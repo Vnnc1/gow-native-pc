@@ -1,5 +1,18 @@
 # Tested hardware and results
 
+## Player log review (2026-10-29, Xeon / RX 580; observational)
+
+Session `20261029-232953-466-5d1a01d1` completes in 565.277 seconds with exit code 0. Recorded configuration:
+Release, portable x86-64-v2, ThinLTO off, scale 2 with dynamic scaling, FXAA on, 60 Hz host cap and basic diagnostics.
+Seventy complete FPS windows contained in runtime t=130–485 seconds average 44.42 guest FPS (32.10–59.97), while
+host frequency averages 59.95 Hz. No stable-60 claim is supported. The corresponding frame-window selection has
+zero intervals above 100 ms; full-session long gaps include MPEG-associated transitions and require separate interpretation.
+
+Earlier retained sessions do not establish a controlled baseline: the ELF hash differs and scene/input alignment
+is unknown. Nine records around t=75–115 seconds average 52.33 FPS before and 52.15 FPS after, a descriptive comparison
+that establishes neither improvement nor regression. No build, running process or original report was modified.
+Full methodology, patch-specific limits and next investigations: [session review](research/session-20261029-patches-30-35.md).
+
 ## Loading progress correction (2026-10-29)
 
 The install log contained nested CMake dependency counters (`7/7`) followed by the real game build (`1/558`).
