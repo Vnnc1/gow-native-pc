@@ -1,0 +1,204 @@
+Accessibility: holding a button instead of mashing it in the minigames (GOW_QTE_HOLD).
+- gow_qte_hold.h (new): a button the player keeps down becomes the train of presses the game's minigames ask for
+  ("Tap O" on a grapple or a context kill). A press shorter than the delay goes through untouched, so single presses
+  keep their meaning; inside each press the button reads as released only long enough for one pad poll (the game polls
+  once per frame), so it is down about two thirds of the time. No dependency on the runtime, so the logic is covered by
+  tools/tests/qte_hold_test.cpp.
+- ps2_pad.cpp: GOW_QTE_HOLD="circle,cross" (names of kNombresAccion; "1" = circle) chooses the buttons,
+  GOW_QTE_HOLD_HZ the presses per second (10), GOW_QTE_HOLD_DELAY the hold in ms before it starts (250),
+  GOW_QTE_HOLD_RELEASE the released part of each press in ms (34), GOW_QTE_HOLD_DIAG=1 logs each press. It is applied
+  to the finished button word, so controller, configurable keyboard and the fixed layouts behave the same. Without the
+  variable nothing changes.
+The launcher's Controls tab writes the variables ("Hold instead of mashing"), for the face buttons only: L1, R1, L2 and
+R2 are held in normal play and repeating them would drop a block.
+In game, GOW_QTE_HOLD_DIAG=1 logs each press the assist makes and the runtime's own GOW_PAD_LOG=1 prints the packet the
+game reads.
+Not tried in game yet: the rate the minigames need, and whether the brief releases disturb a "Hold" prompt on the same
+button. A later patch could narrow the assist to the minigames themselves (Kratos's move id, as gow_cancelar.cpp reads
+it, or the minigame prompt the icon code recognises) instead of any held press.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+new file mode 100644
+index 0000000..6e7f972
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+@@ -0,0 +1,76 @@
++#pragma once
++// gow-native-pc: accessibility. Holding a button instead of mashing it in God of War's minigames.
++//
++// The game's minigames ask for repeated presses ("Tap O" on a grapple or a context kill, the one thing in the game that
++// cannot be played slowly). This turns a held button into that train of presses. Only the player's own press is
++// repeated: nothing is pressed on its own, and a button that is not listed is never touched.
++//
++//   - A press shorter than `delay` goes through untouched, so single presses keep their meaning (grabbing an enemy,
++//     opening a chest): only a button the player keeps down becomes a train of presses.
++//   - Inside each press the button reads as released for `release` seconds only, so it is down about two thirds of the
++//     time; whether that is enough for a "Hold" prompt on the same button to keep charging has not been tried in game.
++//   - `release` must cover one pad poll: the game polls once per frame, so the default 34 ms (two frames at 60 fps)
++//     is seen even when the game runs at 30 fps.
++//
++// The logic is here, with no dependency on the runtime, so `tools/tests/qte_hold_test.cpp` can run it; `ps2_pad.cpp`
++// reads the player's choice from GOW_QTE_HOLD* and applies it to the finished button word of every input device.
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++
++namespace gow_qte
++{
++    struct Config
++    {
++        uint16_t buttons = 0u;  // the pad's button bits the assist repeats (PAD_CIRCLE...), 0 = off
++        double period = 0.1;    // seconds per press
++        double release = 0.034; // seconds of each period the button reads as released
++        double delay = 0.25;    // a button held this long starts the assist
++    };
++
++    // Button words are the pad's: one bit per button, a bit at 0 meaning pressed.
++    class HoldToMash
++    {
++    public:
++        uint16_t apply(const Config &config, uint16_t buttons, double now)
++        {
++            if (!config.buttons)
++                return buttons;
++            const double period = config.period > 0.0 ? config.period : 0.1;
++            const double release = std::min(std::max(config.release, 0.0), period * 0.5);
++            for (int bit = 0; bit < 16; ++bit)
++            {
++                const uint16_t mask = static_cast<uint16_t>(1u << bit);
++                if (!(config.buttons & mask))
++                    continue;
++                if (buttons & mask) // the player is not holding it
++                {
++                    m_held[bit] = false;
++                    m_presses[bit] = 0;
++                    continue;
++                }
++                if (!m_held[bit]) // first poll of this press
++                {
++                    m_held[bit] = true;
++                    m_since[bit] = now;
++                    continue;
++                }
++                const double held = now - m_since[bit] - config.delay;
++                if (held < 0.0)
++                    continue; // still a press the player could have made alone
++                if (std::fmod(held, period) >= period - release)
++                    buttons |= mask; // the gap the game reads as a release, so the next poll is a new press
++                m_presses[bit] = static_cast<int>(held / period) + 1;
++            }
++            return buttons;
++        }
++
++        // Presses the assist has made out of the press being held, for the diagnostics of ps2_pad.cpp.
++        int presses(int bit) const { return bit >= 0 && bit < 16 ? m_presses[bit] : 0; }
++
++    private:
++        bool m_held[16]{};
++        double m_since[16]{};
++        int m_presses[16]{};
++    };
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+index 65f46a2..819cfce 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_pad.h"
++#include "runtime/gow_qte_hold.h"
+ #include "ps2_host_backend.h"
+ #include <array>
+ #include <cstdio>
+@@ -223,6 +224,81 @@ namespace
+         }();
+         return mapa;
+     }
++
++    // gow-native-pc: accessibility. Holding a button instead of mashing it in the game's minigames (runtime/gow_qte_hold.h
++    // explains how a held button becomes a train of presses). The launcher's Controls tab writes the variables:
++    //   GOW_QTE_HOLD          the actions it works on, by the names of kNombresAccion ("circle,cross"); "1" alone means
++    //                         circle, the button God of War's minigames ask for. Without it nothing changes.
++    //   GOW_QTE_HOLD_HZ       presses per second (default 10, 2 to 20).
++    //   GOW_QTE_HOLD_DELAY    ms a button has to be held before the assist starts (default 250): a shorter press is the
++    //                         player's own, untouched.
++    //   GOW_QTE_HOLD_RELEASE  ms of each press the button reads as released (default 34, two frames at 60 fps).
++    //   GOW_QTE_HOLD_DIAG=1   logs every press the assist makes.
++    const gow_qte::Config &configQte()
++    {
++        static const gow_qte::Config config = []
++        {
++            gow_qte::Config c;
++            const char *valor = std::getenv("GOW_QTE_HOLD");
++            if (!valor || !*valor || std::strcmp(valor, "0") == 0)
++                return c;
++            const std::string texto(valor);
++            if (texto == "1")
++                c.buttons = kBitAccion[AccCirculo];
++            size_t pos = texto == "1" ? texto.size() : 0;
++            while (pos < texto.size())
++            {
++                size_t fin = texto.find(',', pos);
++                if (fin == std::string::npos)
++                    fin = texto.size();
++                const std::string nombre = texto.substr(pos, fin - pos);
++                for (size_t a = 0; a <= AccFuria; ++a)
++                    if (nombre == kNombresAccion[a])
++                        c.buttons |= kBitAccion[a];
++                pos = fin + 1;
++            }
++            if (!c.buttons)
++                return c;
++            const auto numero = [](const char *nombre, double porDefecto, double minimo, double maximo)
++            {
++                const char *bruto = std::getenv(nombre);
++                const double v = bruto && *bruto ? std::atof(bruto) : porDefecto;
++                return v < minimo ? minimo : v > maximo ? maximo : v;
++            };
++            c.period = 1.0 / numero("GOW_QTE_HOLD_HZ", 10.0, 2.0, 20.0);
++            c.release = numero("GOW_QTE_HOLD_RELEASE", 34.0, 17.0, 200.0) / 1000.0;
++            c.delay = numero("GOW_QTE_HOLD_DELAY", 250.0, 0.0, 2000.0) / 1000.0;
++            std::fprintf(stderr, "[gow-qte] hold to mash: buttons %04x, %.0f presses/s after %.0f ms\n", c.buttons,
++                         1.0 / c.period, c.delay * 1000.0);
++            return c;
++        }();
++        return config;
++    }
++
++    // Every listed button the player keeps down reads as a train of presses; the rest of the word is untouched.
++    uint16_t repetirMantenidos(uint16_t btns)
++    {
++        const gow_qte::Config &config = configQte();
++        if (!config.buttons)
++            return btns;
++        static const bool diag = []
++        {
++            const char *valor = std::getenv("GOW_QTE_HOLD_DIAG");
++            return valor && std::strcmp(valor, "0") != 0;
++        }();
++        static gow_qte::HoldToMash asistencia;
++        static int registradas[16] = {};
++        const uint16_t resultado = asistencia.apply(config, btns, GetTime());
++        if (diag)
++            for (int bit = 0; bit < 16; ++bit)
++                if (const int n = asistencia.presses(bit); n != registradas[bit])
++                {
++                    registradas[bit] = n;
++                    if (n > 0)
++                        std::fprintf(stderr, "[gow-qte] %04x press %d\n", 1u << bit, n);
++                }
++        return resultado;
++    }
+ }
+ 
+ // GOW-Port: sticks desde el teclado configurable, en el orden del paquete de libpad2 (RX, RY, LX, LY). Lo usa el
+@@ -484,6 +560,10 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+             clearBit(PAD_SELECT);
+     }
+ 
++    // gow-native-pc: hold instead of mashing (GOW_QTE_HOLD), on the finished button word, so it works the same with a
++    // controller, with the configurable keyboard and with the fixed layouts
++    btns = repetirMantenidos(btns);
++
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+ 

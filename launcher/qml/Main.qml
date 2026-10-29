@@ -54,6 +54,10 @@ ApplicationWindow {
         property int versionAjustes: 0
         property bool controlesDmc5: true
         property bool cancelarAnimaciones: true // snappier evade and input buffer (GOW_CANCELAR)
+        // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
+        property bool qteHold: false
+        property string qteHoldButtons: "circle" // "circle" or "face" (the four face buttons)
+        property int qteHoldRate: 10 // presses per second the assist makes (GOW_QTE_HOLD_HZ)
         property bool escSalir: false
         property bool minimizarAlJugar: true
         property int segundosJugados: 0
@@ -175,6 +179,9 @@ ApplicationWindow {
         ajustes.controlesDmc5 = true
         ajustes.mando = ""
         ajustes.cancelarAnimaciones = true
+        ajustes.qteHold = false
+        ajustes.qteHoldButtons = "circle"
+        ajustes.qteHoldRate = 10
         ajustes.escSalir = false
         ajustes.minimizarAlJugar = true
         ajustes.trucos = ""
@@ -216,6 +223,7 @@ ApplicationWindow {
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
+            qteHold: ajustes.qteHold, qteHoldButtons: ajustes.qteHoldButtons, qteHoldRate: ajustes.qteHoldRate,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
             mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",
             trucos: ajustes.trucos, idioma: Tema.idioma, textoJuego: ajustes.textoJuego

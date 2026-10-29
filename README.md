@@ -50,6 +50,8 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
 - **Optimised for 60 fps**: VU1 and IOP code is compiled natively; while you play, newly met code is recorded and
   "Speed up visited areas" compiles it.
 - **Configurable controls**: keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
+- **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
+  ("Hold instead of mashing" in the Controls tab).
 - **Launcher updates**: new GitHub Releases are offered in the sidebar; runtime patch changes prompt a game rebuild.
 
 ## Required: the PS2Recomp runtime

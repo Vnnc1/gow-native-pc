@@ -376,6 +376,24 @@ bool Lanzador::iniciar(const QVariantMap &a)
     bandera("TOBIICHI_DMC5_CONTROLS", a.value(QStringLiteral("controlesDmc5")).toBool(), "0");
     bandera("TOBIICHI_ESC_SALIR", a.value(QStringLiteral("escSalir")).toBool(), "0");
     bandera("GOW_CANCELAR", a.value(QStringLiteral("cancelarAnimaciones"), true).toBool(), "0");
+    // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (ps2_pad.cpp with
+    // runtime/gow_qte_hold.h). The buttons are action names of TOBIICHI_TECLAS; without the variable nothing changes.
+    if (a.value(QStringLiteral("qteHold")).toBool())
+    {
+        // Only the face buttons: L1, R1, L2 and R2 are held in normal play (block, magic) and repeating them would
+        // drop a block. GOW_QTE_HOLD itself takes any action name, for anyone who wants one by hand.
+        const QString cuales = a.value(QStringLiteral("qteHoldButtons"), QStringLiteral("circle")).toString();
+        const QString botones = cuales == QStringLiteral("face") ? QStringLiteral("circle,cross,square,triangle")
+                                                                : QStringLiteral("circle");
+        entorno.insert(QStringLiteral("GOW_QTE_HOLD"), botones);
+        entorno.insert(QStringLiteral("GOW_QTE_HOLD_HZ"),
+                       QString::number(std::clamp(a.value(QStringLiteral("qteHoldRate"), 10).toInt(), 2, 20)));
+    }
+    else
+    {
+        entorno.remove(QStringLiteral("GOW_QTE_HOLD"));
+        entorno.remove(QStringLiteral("GOW_QTE_HOLD_HZ"));
+    }
     // Configurable keyboard and mouse (ps2_pad.cpp): "action=code,code;...".
     const QString teclas = a.value(QStringLiteral("teclas")).toString();
     if (teclas.isEmpty())

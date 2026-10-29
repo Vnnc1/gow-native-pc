@@ -222,6 +222,39 @@ ScrollView {
             }
         }
         Fila {
+            // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
+            titulo: Tema.t("qteHold")
+            descripcion: Tema.t("qteHoldDesc")
+            Interruptor {
+                checked: raiz.ajustes.qteHold
+                onToggled: raiz.ajustes.qteHold = checked
+            }
+        }
+        Fila {
+            titulo: Tema.t("qteHoldButtons")
+            descripcion: Tema.t("qteHoldButtonsDesc")
+            habilitada: raiz.ajustes.qteHold
+            Selector {
+                opciones: [
+                    { texto: Tema.t("qteHoldCircle"), valor: "circle" },
+                    { texto: Tema.t("qteHoldFace"), valor: "face" }
+                ]
+                valor: raiz.ajustes.qteHoldButtons
+                onElegido: (v) => raiz.ajustes.qteHoldButtons = v
+            }
+        }
+        Fila {
+            titulo: Tema.t("qteHoldRate")
+            descripcion: Tema.t("qteHoldRateDesc")
+            habilitada: raiz.ajustes.qteHold
+            Selector {
+                opciones: [{ texto: "6", valor: 6 }, { texto: "10", valor: 10 }, { texto: "14", valor: 14 },
+                           { texto: "20", valor: 20 }]
+                valor: raiz.ajustes.qteHoldRate
+                onElegido: (v) => raiz.ajustes.qteHoldRate = v
+            }
+        }
+        Fila {
             titulo: Tema.t("escSalir")
             descripcion: Tema.t("escSalirDesc")
             separador: false

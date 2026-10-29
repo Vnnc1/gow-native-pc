@@ -50,6 +50,8 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
 - **Otimizado para 60 fps**: o código da VU1 e do IOP vira código nativo; enquanto você joga, o código novo é gravado
   e "Acelerar áreas visitadas" o compila.
 - **Controles configuráveis**: atalhos de teclado/mouse, esquemas clássico ou moderno e mapeamento botão por botão.
+- **Acessibilidade**: os minijogos que pedem apertos repetidos podem ser jogados segurando o botão ("Segurar em vez de
+  apertar sem parar", na aba Controles).
 - **Atualizações pelo launcher**: novas versões do GitHub Releases aparecem na barra lateral; alterações nos patches
   do runtime geram um aviso para recompilar o jogo.
 
