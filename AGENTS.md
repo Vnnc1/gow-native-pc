@@ -75,6 +75,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 - **Pipeline output protocol** (parsed by `installer_backend.cpp`): `=== <step> ===`, `@@progress <done> <all>`,
   `@@status <text>`, anything else is log. Errors: a final `ERROR: <message>` line and exit code 1.
+  `modules/build-progress.ps1` excludes Ninja glob checks and nested CMake regeneration counters from game progress.
+  Resume counters only at the outer build directory's CMake completion marker. The loading screen updates its
+  weighted progress after complete events, never moves backwards within a run, and reserves 100% for success.
+  Regression checks: `tools/test/build-progress-tests.ps1` (also in pipeline-tests.ps1) and
+  `python -I tools/test/loading-progress.py <Qt SDK bin/qml.exe> <llvm-mingw bin>` (real QML, fake pipeline signals).
 - **languages.json** (`data/<id>/`): `{game, title, recompile_elf, languages: [{language, label, edition, quality,
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),

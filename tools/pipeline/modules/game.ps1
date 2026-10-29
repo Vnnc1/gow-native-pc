@@ -96,6 +96,7 @@ if ($Stages -contains 'sync') {
 }
 
 # --- build ----------------------------------------------------------------------------------------------------------
+. (Join-Path $PSScriptRoot 'build-progress.ps1')
 function Build-Game([string]$dir = $bld) {
     Use-Toolchain
     Need (Join-Path $dir 'CMakeCache.txt') 'configured build folder (run the configure stage)'
@@ -106,16 +107,18 @@ function Build-Game([string]$dir = $bld) {
     $ErrorActionPreference = 'Continue'
     $writer = New-Object IO.StreamWriter($log, $false, (New-Object Text.UTF8Encoding($false)))
     $writer.AutoFlush = $true
-    $lastPct = -1; $errors = 0
+    $progressState = New-GameBuildProgress $dir
+    $errors = 0
     & ninja -C $dir "-j$jobs" ps2EntryRunner 2>&1 | ForEach-Object {
         $s = "$_"
         if ($s -eq 'System.Management.Automation.RemoteException') { return }
         $writer.WriteLine($s)
-        if ($s -match '^\[(\d+)/(\d+)\]') {
-            $pct = [int](100 * [int]$Matches[1] / [int]$Matches[2])
-            if ($pct -ne $lastPct) { $lastPct = $pct; Write-Host "@@progress $($Matches[1]) $($Matches[2])" }
-            if ($s -match 'Linking CXX executable') { Write-Host '@@status linking the executable' }
-        } elseif ($s -match 'error C\d|error LNK|fatal error|FAILED:|error:') { if (++$errors -le 20) { Write-Host $s -ForegroundColor Red } }
+        $progress = Read-GameBuildProgress $progressState $s
+        if ($progress) {
+            if ($progress.changed) { Write-Host "@@progress $($progress.done) $($progress.total)" }
+            if ($progress.linking) { Write-Host '@@status linking the executable' }
+        }
+        if ($s -match 'error C\d|error LNK|fatal error|FAILED:|error:') { if (++$errors -le 20) { Write-Host $s -ForegroundColor Red } }
     }
     $rc = $LASTEXITCODE
     $writer.Close()
@@ -142,6 +145,8 @@ function Build-Game([string]$dir = $bld) {
                            flags = "-O3 -DNDEBUG -std=gnu++20 -march=native -ffp-contract=off -fno-strict-aliasing -fwrapv -I`"$(Barra (Join-Path $rec 'ps2xRuntime\include'))`"" }
         [IO.File]::WriteAllText((Join-Path $data 'vu1_jit.json'), ($jit | ConvertTo-Json))
     }
+    # A successful no-op build emits no Ninja counter. Mark the step complete only after all work succeeded.
+    Write-Host '@@progress 1 1'
 }
 if ($Stages -contains 'build') {
     Step "build the game ($Config, $Toolchain)"

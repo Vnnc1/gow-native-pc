@@ -1,5 +1,18 @@
 # Tested hardware and results
 
+## Loading progress correction (2026-10-29)
+
+The install log contained nested CMake dependency counters (`7/7`) followed by the real game build (`1/558`).
+Those were incorrectly mapped to the same weighted stage, showing about 78% and then 37%. The pipeline now ignores
+regeneration counters until the outer CMake build resumes; raw logs and build commands are unchanged. The overall
+loading bar retains its highest valid weighted value and reaches 100% only on a successful pipeline exit.
+
+Validation: 14 Python pipeline tests, the PowerShell pipeline suite (including mocked Build-Game output, no-op and
+failure cases), and the actual LoadingScreen QML driven by fake signals pass. QML checks cover intermediate
+property updates, stage transitions, revised totals, malformed counters, retries, failures, PGO and success.
+The tests did not invoke a game build or modify/restart the installation already compiling in `Documents/test2`.
+This is source-level validation; the previously delivered installer and the running launcher are unchanged.
+
 ## Patches 30–35 integration (2026-10-29, Xeon; synthetic checks)
 
 Checkout: `C:/Users/dzvini/Documents/gow-claude/gow-native-pc`, with the supplied changes adapted as documented in

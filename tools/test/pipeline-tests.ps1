@@ -1,6 +1,7 @@
 # Test configure invalidation and process cleanup without configuring or running a game.
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+& (Join-Path $PSScriptRoot 'build-progress-tests.ps1')
 $CompilerCache = 'sccache'
 . (Join-Path $root 'tools/pipeline/modules/common.ps1')
 . (Join-Path $root 'tools/pipeline/modules/tools.ps1')

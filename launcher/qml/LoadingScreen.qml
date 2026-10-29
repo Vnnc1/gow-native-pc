@@ -84,14 +84,17 @@ Item {
         for (var i = 0; i < plan.length; ++i) s += plan[i].w
         return s
     }
-    // the overall bar: finished steps by weight plus the share done in the current one
-    readonly property real fraccion: {
-        if (estado === "done") return 1
-        if (pesoTotal <= 0 || actual < 0) return 0
+    // Update only after a complete step/progress event, never from intermediate property assignments.
+    // A revised Ninja total may lower the estimate, but must not move the overall bar backwards.
+    property real progressValue: 0
+    readonly property real fraccion: estado === "done" ? 1 : progressValue
+    function updateProgress() {
+        if (pesoTotal <= 0 || actual < 0) return
         var s = 0
         for (var i = 0; i < actual && i < plan.length; ++i) s += plan[i].w
         if (actual < plan.length) s += plan[actual].w * fraccionPaso
-        return Math.min(1, s / pesoTotal)
+        // 100% belongs to the successful process exit, not its last compiler output line.
+        progressValue = Math.max(progressValue, Math.min(0.99, s / pesoTotal))
     }
     // how much slower (> 1) or faster than the expected weights this machine is, from the finished scaled steps
     readonly property real ritmo: {
@@ -153,6 +156,7 @@ Item {
             raiz.verRegistro = false; raiz.inicio = raiz.inicioPaso = raiz.ahora = Date.now()
             raiz.arte = installer.loadingArt()
             raiz.iniciarArte()
+            raiz.progressValue = 0
             raiz.estado = "running"
         }
         function onStepChanged(s) {
@@ -169,10 +173,15 @@ Item {
                     raiz.plan = p
                     raiz.actual = i; raiz.hechos = 0; raiz.total = 0; raiz.estadoTexto = ""
                     raiz.inicioPaso = raiz.ahora = Date.now()
+                    raiz.updateProgress()
                     return
                 }
         }
-        function onProgress(d, t) { if (raiz.estado === "running") { raiz.hechos = d; raiz.total = t } }
+        function onProgress(d, t) {
+            if (raiz.estado !== "running" || raiz.actual < 0 || t <= 0 || d < 0 || d > t) return
+            raiz.hechos = d; raiz.total = t
+            raiz.updateProgress()
+        }
         function onStatusText(t) { if (raiz.estado === "running") raiz.estadoTexto = t }
         function onLogLine(l) { if (raiz.estado === "running") raiz.addLog(l) }
         function onFinished(ok, code) {
