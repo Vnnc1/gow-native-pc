@@ -41,6 +41,7 @@ namespace
     const std::pair<const char *, const char *> kEntornoBase[] = {
         {"PS2X_GS_WORKER", "1"},
         {"GOW_GS_FINISH_ASINCRONO", "1"},
+        {"GOW_VU1_EARLY_FINISH", "1"},
         {"GOW_AUDIO_DEVICE", "default"},
     };
 

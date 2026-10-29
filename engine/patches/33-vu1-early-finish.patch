@@ -1,0 +1,42 @@
+Bound queued large VIF1 packets before submission when GOW_VU1_EARLY_FINISH is enabled.
+Defaults to the asynchronous-FINISH setting; explicit 0 disables it. Sample configuration per PS2Memory instance.
+Use the existing worker/GS-stage idle barrier; packet size is a heuristic, not a frame boundary.
+No gameplay performance measurement is claimed by this patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+index e9539e1..651b8ed 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -494,6 +494,7 @@ public:
+     void runGsWorkerJob(GsWorkerJob &job);
+     void gsWorkerLoop();
+     bool m_gsWorkerEnabled = false;
++    bool m_vu1EarlyFinish = false; // bound large VIF1 submissions while asynchronous FINISH is used
+     std::thread m_gsWorker;
+     std::thread::id m_gsWorkerId;
+     std::mutex m_gsWorkerMutex;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+index 07c4750..f045bb7 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -259,6 +259,10 @@ PS2Memory::PS2Memory()
+     : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
+ {
+     ps2SetScratchpadHostPtr(nullptr);
++    // Snapshot per instance, after standalone boot has restored the environment.
++    const char *early = std::getenv("GOW_VU1_EARLY_FINISH");
++    const char *asyncFinish = std::getenv("GOW_GS_FINISH_ASINCRONO");
++    m_vu1EarlyFinish = early ? early[0] != '0' : (asyncFinish && asyncFinish[0] != '0');
+     const char *worker = std::getenv("PS2X_GS_WORKER");
+     m_gsWorkerEnabled = worker != nullptr && worker[0] == '1';
+     if (m_gsWorkerEnabled)
+@@ -1971,6 +1975,9 @@ void PS2Memory::deliverDma(DmaPath path, std::vector<uint8_t> &&bytes)
+     }
+     if (m_gsWorkerEnabled)
+     {
++        // Drain prior work before enqueuing another large VIF1 packet. Never wait on this worker from itself.
++        if (m_vu1EarlyFinish && path == DmaPath::Vif1 && size >= 65536u)
++            syncGsWorker("large VIF1 submit");
+         GsWorkerJob job;
+         job.fbrst = m_fbrstProvider ? m_fbrstProvider() : 0u;
+         job.items.push_back(GsWorkerItem{path == DmaPath::Vif1, std::move(bytes)});

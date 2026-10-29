@@ -1,0 +1,141 @@
+Inline RDRAM mirror classification; remove impossible 128-bit wrap branches.
+Keep scratchpad/MMIO classification and scalar boundary wrapping. Add memory regressions.
+No gameplay performance measurement is claimed by this patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+index 61b6da8..3749a9d 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+@@ -442,8 +442,10 @@ public:
+ 
+     static PS2_FORCEINLINE bool isSpecialAddress(uint32_t addr)
+     {
+-        // main RAM (almost every access) inline, the rest of the check out of line
+-        return addr >= PS2_RAM_SIZE && Ps2IsSpecialAddress(addr);
++        // gow-native-pc (patch 30): physical RDRAM (0x00000000), uncached (0x20000000), kseg0 (0x80000000) and
++        // kseg1 (0xA0000000) all map to the low 32 MB when bits 31 and 29 are cleared; MMIO (0x10000000) and
++        // scratchpad (0x70000000) stay >= PS2_RAM_SIZE and take the out-of-line check.
++        return (addr & 0x5FFFFFFFu) >= PS2_RAM_SIZE && Ps2IsSpecialAddress(addr);
+     }
+ 
+ public:
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+index ab78a1e..e6eda3e 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -376,7 +376,7 @@ static PS2_FORCEINLINE uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
+ static PS2_FORCEINLINE uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
++    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t))) [[unlikely]]
+         return Ps2FastReadWrapped<uint16_t>(rdram, offset);
+     uint16_t value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+@@ -386,7 +386,7 @@ static PS2_FORCEINLINE uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t add
+ static PS2_FORCEINLINE uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
++    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t))) [[unlikely]]
+         return Ps2FastReadWrapped<uint32_t>(rdram, offset);
+     uint32_t value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+@@ -396,7 +396,7 @@ static PS2_FORCEINLINE uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t add
+ static PS2_FORCEINLINE uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
++    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t))) [[unlikely]]
+         return Ps2FastReadWrapped<uint64_t>(rdram, offset);
+     uint64_t value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+@@ -405,10 +405,8 @@ static PS2_FORCEINLINE uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t add
+ 
+ static PS2_FORCEINLINE __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
+ {
+-    // GOW-Port: LQ/SQ/LQC2/SQC2 ignoran los 4 bits bajos de la direccion (fork de SotC, 9bb389e).
++    // GOW-Port: LQ/SQ/LQC2/SQC2 clear the low 4 bits, so offset <= PS2_RAM_SIZE - 16 is always contiguous (patch 30).
+     const uint32_t offset = addr & PS2_RAM_MASK & ~0xFu;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
+-        return Ps2FastReadWrapped<__m128i>(rdram, offset);
+     __m128i value;
+     std::memcpy(&value, rdram + offset, sizeof(value));
+     return value;
+@@ -422,7 +420,7 @@ static PS2_FORCEINLINE void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t
+ static PS2_FORCEINLINE void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
++    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t))) [[unlikely]]
+     {
+         Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+@@ -433,7 +431,7 @@ static PS2_FORCEINLINE void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16
+ static PS2_FORCEINLINE void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
++    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t))) [[unlikely]]
+     {
+         Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+@@ -444,7 +442,7 @@ static PS2_FORCEINLINE void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32
+ static PS2_FORCEINLINE void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
+ {
+     const uint32_t offset = addr & PS2_RAM_MASK;
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
++    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t))) [[unlikely]]
+     {
+         Ps2FastWriteWrapped(rdram, offset, value);
+         return;
+@@ -454,12 +452,7 @@ static PS2_FORCEINLINE void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64
+ 
+ static PS2_FORCEINLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+ {
+-    const uint32_t offset = addr & PS2_RAM_MASK & ~0xFu; // GOW-Port
+-    if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
+-    {
+-        Ps2FastWriteWrapped(rdram, offset, value);
+-        return;
+-    }
++    const uint32_t offset = addr & PS2_RAM_MASK & ~0xFu; // GOW-Port: always 16-byte aligned inside RDRAM (patch 30)
+     std::memcpy(rdram + offset, &value, sizeof(value));
+ }
+ 
+diff --git a/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp b/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
+index e261553..dd2142a 100644
+--- a/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2257,6 +2257,31 @@ void register_ps2_memory_tests()
+             t.Equals(mem.dmaStartCount(), 0ull, "reinitialization clears the diagnostic counter");
+         });
+ 
++        tc.Run("fast RDRAM classification covers kseg0 kseg1 uncached mirrors and boundary wraps", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "initialize memory");
++            uint8_t *rdram = mem.getRDRAM();
++            for (const uint32_t base : {0x00000000u, 0x20000000u, 0x80000000u, 0xA0000000u})
++            {
++                t.IsFalse(PS2Runtime::isSpecialAddress(base + 0x00001000u), "RDRAM mirror start must take fast path");
++                t.IsFalse(PS2Runtime::isSpecialAddress(base + PS2_RAM_SIZE - 4u), "RDRAM mirror end must take fast path");
++            }
++            t.IsTrue(PS2Runtime::isSpecialAddress(0x70000000u), "scratchpad base must remain special");
++            t.IsTrue(PS2Runtime::isSpecialAddress(0x70003FF0u), "scratchpad end must remain special");
++            t.IsTrue(PS2Runtime::isSpecialAddress(0x10000000u), "MMIO base must remain special");
++            t.IsTrue(PS2Runtime::isSpecialAddress(0x12000000u), "GS privileged MMIO must remain special");
++            Ps2FastWrite32(rdram, 0x81FFFFFEu, 0xAABBCCDDu);
++            t.Equals(Ps2FastRead32(rdram, 0xA1FFFFFEu), 0xAABBCCDDu, "unaligned RDRAM end wrap must match across mirrors");
++            t.Equals(rdram[PS2_RAM_SIZE - 2u], uint8_t{0xDDu}, "low byte at end-2");
++            t.Equals(rdram[0], uint8_t{0xBBu}, "wrapped byte at offset 0");
++            const __m128i q = _mm_setr_epi32(0x11223344, 0x55667788, 0x99AABBCC, 0xDDEEFF00);
++            Ps2FastWrite128(rdram, 0x21FFFFF7u, q);
++            const __m128i qr = Ps2FastRead128(rdram, 0x01FFFFF0u);
++            t.Equals(Ps2ExtractEpi32(qr, 0), 0x11223344, "128-bit masked fast write/read lane 0");
++            t.Equals(Ps2ExtractEpi32(qr, 3), static_cast<int32_t>(0xDDEEFF00u), "128-bit masked fast write/read lane 3");
++        });
++
+         tc.Run("sceDmaReset clears the native DMA environment", [](TestCase &t)
+         {
+             PS2Runtime runtime; t.IsTrue(runtime.memory().initialize(), "initialize memory");

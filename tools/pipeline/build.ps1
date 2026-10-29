@@ -27,6 +27,7 @@
 #        recomp,sync,build] [-Discs "<iso>|<iso>"] [-Config Release|RelWithDebInfo] [-Ltcg] [-Pdb] [-BuildRoot <folder>]
 # -BuildRoot: default C:\gow-build (or C:\gow-build-<hash> when another copy uses it), kept in data\build-root.txt
 # -Pdb: Release with debug information (ps2EntryRunner.pdb) for profilers; the optimised code is the same
+# -CpuTarget: portable (x86-64-v2, default) or x86-64-v3 (explicit AVX2-class build).
 # -Codegen locals (default): recomp stage with register-locals code generation (engine/patches/08, ~22 % less EE
 #        thread time); -Codegen classic generates the code as before patch 08
 # All components use pinned llvm-mingw. -Toolchain msvc is accepted only to migrate old scripts to clang.
@@ -39,6 +40,7 @@ param(
     [ValidateSet('Release', 'RelWithDebInfo')][string]$Config = 'Release',
     [switch]$Ltcg,
     [switch]$Pdb,
+    [ValidateSet('portable', 'x86-64-v3')][string]$CpuTarget = 'portable',
     [ValidateSet('classic', 'locals')][string]$Codegen = 'locals',
     [string]$BuildRoot = '',
     [ValidateSet('', 'msvc', 'clang')][string]$Toolchain = '', # msvc is a migration alias

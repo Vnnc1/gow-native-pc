@@ -186,6 +186,16 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   never shadow `$global:LASTEXITCODE` with a local variable in that helper (it hides failed external commands).
   `-bxor` is signed; `Set-Content -Encoding UTF8` writes a BOM.
 - ThinLTO remains opt-in (`-Ltcg`) until measured link time, RAM and gameplay justify it. Historical MSVC LTCG took hours.
+- Patches 30-35 add memory fast paths, explicit Clang ThinLTO, math flags, large-VIF1 submission throttling and VU1
+  self-loop optimizations. `-CpuTarget portable` (default) selects x86-64-v2; `-CpuTarget x86-64-v3` selects the AVX2
+  tier explicitly. Do not restore an unconditional `-march=native` that overrides this choice. Neither tier is a new
+  performance-support claim. The profile's `build.unity_batch` applies only with at least 14 GiB RAM.
+- `GOW_VU1_EARLY_FINISH=0` disables the large-VIF1 barrier; otherwise it defaults to `GOW_GS_FINISH_ASINCRONO`.
+  The setting is per memory instance. The 64 KiB threshold identifies packets, not exact guest frames. Preserve
+  worker/stage-thread self-wait guards and DMA submission/completion semantics.
+- VU1 `chainSelf` completes exit accounting even when it returns false: generated blocks must return `kVu1nDone`
+  without calling `chain` again. Keep the x64 direct self-body jump and AOT/DLL behavior equivalent. Run
+  `tools/test/vu1-equivalence.py` for random programs and deterministic budget/depth self-loop exits (no game data).
 - AMD Windows OpenGL: GS draw-batching changes from Waffle's 2026-10-17/18 commits saturated the GPU; the newer Waffle
   renderer sampled textures black. Test renderer changes on AMD and NVIDIA.
 - Windows `mklink /J` needs backslash paths.

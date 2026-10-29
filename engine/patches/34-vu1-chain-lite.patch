@@ -1,0 +1,95 @@
+Fast-path self-chain transitions with idle timing, no scalar starts/tails and preserved clean lanes.
+Retain history, commits, PC, accounting, stop/budget/depth checks and the generic fallback.
+The two cached predicates fit the existing Slot padding (static_assert keeps its 128-byte ABI).
+No gameplay performance measurement is claimed by this patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index c4a6b87..164163a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -172,6 +172,8 @@ struct VU1Interpreter::NativeState
+         bool memoable = false;   // its entry timing does not depend on FDIV/EFU state
+         uint8_t scalarCount = 0; // FDIV / EFU operations it starts (kScalarMany: more than fit in `scalar`)
+         struct Scalar { uint8_t pair, latency; bool fdiv; } scalar[2] = {};
++        bool fastChain = false; // idle timing, no scalar starts or tail; occupies existing padding
++        bool fastSelf = false;  // a repeated entry preserves all required clean lanes
+         // Entry timing by predecessor (blocks that read entry flags): when the block before ran for maxLat cycles or more
+         // and nothing from the exact engine is still in flight, that block and its timing table alone decide the entry
+         // state; the timing found for it is reused.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index bdf2bed..a1ff08d 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -856,6 +856,10 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+                     for (const uint8_t i : bt.scalarPairs)
+                         sl.scalar[sl.scalarCount++] = {i, static_cast<uint8_t>(bt.dec[i].lowerUsage.latency),
+                                                        bt.dec[i].lowerUsage.pipeline == VU1Interpreter::PipelineFdiv};
++                sl.fastChain = !sl.readsEntryFlags && sl.scalarCount == 0u && sl.tail == nullptr;
++                sl.fastSelf = sl.fastChain &&
++                              ((sl.laneReq[0] & ~(sl.laneKeep[0] | sl.laneGen[0] | 0xFull)) == 0u) &&
++                              ((sl.laneReq[1] & ~(sl.laneKeep[1] | sl.laneGen[1])) == 0u);
+             }
+             else
+             {
+@@ -911,27 +915,52 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     VU1Interpreter &vu = *n.vu;
+     NS &ns = *vu.m_native;
+     const NS::Slot &cur = *static_cast<const NS::Slot *>(n.slot);
++#if defined(__clang__)
++    constexpr uint32_t kMaxDepth = 4096u;
++#else
++    constexpr uint32_t kMaxDepth = 64u;
++#endif
++    const uint32_t pc = next & 0x3FF8u;
++    // gow-native-pc (patch 34): fast path for self-loops and idle-timing blocks without scalar pipelines or tails.
++    if (pc == n.pc && cur.fastSelf && n.cyc == cur.idle) [[likely]]
++    {
++        const uint64_t end = n.start + cur.idleEnd;
++        NS::Hist &h = ns.hist[ns.histNext];
++        h.bt = cur.bt;
++        h.cyc = cur.idle;
++        h.cycId = 0u;
++        h.start = n.start;
++        h.end = end;
++        ns.histNext = (ns.histNext + 1u) & (NS::kHist - 1u);
++        ++ns.histCount;
++        vu.m_cycle = end;
++        if (end >= vu.m_nextCommitCycle) [[unlikely]]
++            commitDue(vu);
++        n.pairs += cur.pairs;
++        ++n.blocks;
++        if (ns.diag) [[unlikely]]
++            ++ns.selfBlocks, ns.selfPairs += cur.pairs;
++        vu.m_state.pc = next & 0x3FFFu;
++        const auto &context = *static_cast<const VU1Interpreter::StepContext *>(n.context);
++        if (!n.chain || n.depth >= kMaxDepth || vu.m_stopRequested || end >= context.budgetEnd) [[unlikely]]
++            return nullptr;
++        n.start = end;
++        ++n.depth;
++        return const_cast<NS::Slot *>(&cur);
++    }
+     finishBlockTiming(vu, cur, n.cyc, n.cycId, n.start);
+     if (vu.m_cycle >= vu.m_nextCommitCycle)
+         commitDue(vu);
+     n.pairs += cur.pairs;
+     ++n.blocks;
+-    if (ns.diag && (next & 0x3FF8u) == n.pc)
++    if (ns.diag && pc == n.pc)
+         ++ns.selfBlocks, ns.selfPairs += cur.pairs;
+     vu.m_state.pc = next & 0x3FFFu;
+-    // with a guaranteed tail call (clang, VU1N_MUSTTAIL) the chain uses no stack; otherwise (MSVC with GOW_VU1N_CHAIN=1)
+-    // each chained block keeps its frame and runNative takes over every 64 blocks
+-#if defined(__clang__)
+-    constexpr uint32_t kMaxDepth = 4096u;
+-#else
+-    constexpr uint32_t kMaxDepth = 64u;
+-#endif
+     if (!n.chain || n.depth >= kMaxDepth)
+         return nullptr;
+     const auto &context = *static_cast<const VU1Interpreter::StepContext *>(n.context);
+     if (vu.m_stopRequested || vu.m_cycle >= context.budgetEnd)
+         return nullptr;
+-    const uint32_t pc = next & 0x3FF8u;
+     if (pc + 8u > context.codeSize)
+         return nullptr;
+     NS::Slot &sl = ns.slots[pc >> 3];

@@ -1,5 +1,30 @@
 # Tested hardware and results
 
+## Patches 30–35 integration (2026-10-29, Xeon; synthetic checks)
+
+Checkout: `C:/Users/dzvini/Documents/gow-claude/gow-native-pc`, with the supplied changes adapted as documented in
+`docs/research/patches-30-35-integration.md`. Hardware: Xeon E5-2666 v3; the synthetic GS initialization reports an
+RX 580 2048SP. Compiler: pinned llvm-mingw Clang 23.1.4. Regression build:
+`C:/gow-build-c75e3561-verify-clang`, Release, x86-64-v2, ThinLTO off, object cache disabled.
+
+- All patches through 35 replay from the pinned runtime commit and reproduce the runtime working tree exactly.
+- `build.cmd -Stages verify -CompilerCache none` passes: Python and PowerShell pipeline regressions, synthetic ELF
+  generation/synchronization, guest-call parity/diagnostic modes, 81 memory/DMA tests, 68 codegen tests and frame metrics.
+- The separate VIF1 worker regression passes explicit enable/disable, asynchronous-FINISH fallback, per-instance
+  configuration and the small-packet bypass, while preserving the count of two DMA submissions.
+- VU1 generated DLL, inline x64, helper x64, forced SSE and no-speculation digests match for seeds 1, 4, 7, 11 and 23
+  (one procedural image and three measured trials per seed, 24 programs per image). Special-value inputs also match
+  with speculation enabled/disabled. Deterministic self-loops at 7 and 20,000 cycles match generated unchained code,
+  generated chained code and both JIT tiers, including native-block counts (9 and 20,001 over three trials).
+- A separate two-translation-unit executable and static library compile, link and run successfully with explicit
+  ThinLTO, hidden visibility, the new math flags and lld's two-job limit. This is a toolchain smoke check, not a full
+  game ThinLTO build or a build-time comparison.
+
+Local evidence: `data/verify-patches-30-35-final.log`, `data/gow1/logs/vu1-equivalence/vu1-equiv-k06j7ngc/`, and
+`data/thinlto-probe/`. This checkout has no prepared discs or generated EE game sources. Full game/launcher rebuild,
+visible gameplay, sound, first-visit stalls and FPS are not validated for this series. No hardware support tier or
+performance improvement is claimed.
+
 ## Branch review (2026-10-28, Xeon / RX 580)
 
 `prototipo-claude` at `2e0f0cf`, plus the local review corrections below. Hardware: Xeon E5-2666 v3

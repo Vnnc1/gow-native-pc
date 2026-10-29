@@ -89,6 +89,23 @@ if ('-DPS2X_LTO_JOBS=' -notin $script:configured[-1] -or -not ($script:configure
     throw 'Clang ThinLTO must use lld job control, not numeric -flto=N'
 }
 Write-Host 'PASS: opt-in ThinLTO job control'
+$CpuTarget = 'portable'
+Configure -MaySkip
+if ($script:configured[-1] -match 'CXX_FLAGS=.*-march=x86-64-v3') { throw 'Portable builds must not require x86-64-v3' }
+$beforeCpuChange = $script:configured.Count
+$CpuTarget = 'x86-64-v3'
+Configure -MaySkip
+if ($script:configured.Count -ne $beforeCpuChange + 1 -or -not ($script:configured[-1] -match 'CXX_FLAGS=.*-march=x86-64-v3')) {
+    throw 'CPU target must reach compiler flags and invalidate configure'
+}
+$prof = [pscustomobject]@{ build = [pscustomobject]@{ unity_batch = 16 } }
+$ramGb = 16
+Configure -MaySkip
+if ('-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=16' -notin $script:configured[-1]) { throw 'Profile unity batch should apply with enough RAM' }
+$ramGb = 8
+Configure -MaySkip
+if ('-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8' -notin $script:configured[-1]) { throw 'Low-memory builds must retain the smaller unity batch' }
+Write-Host 'PASS: CPU target and RAM-aware unity batch configure invalidation'
 
 $probe = Join-Path $scratch 'probe.py'
 [IO.File]::WriteAllText($probe, "import os, sys`nsys.exit(0 if os.environ.get('GOW_FOUNDATION_PROBE') == 'temporary' else 2)`n")

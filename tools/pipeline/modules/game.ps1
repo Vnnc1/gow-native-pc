@@ -29,7 +29,11 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
         $extra += "-DPS2X_VU1N_GEN_OVERRIDE=$(Barra (Join-Path $rt $prof.runtime.vu1_native_generator))"
     }
     # Generated EE code requires wrapping integers and conservative aliasing.
-    $flags = '-fno-strict-aliasing -fwrapv'
+    $flags = '-fno-strict-aliasing -fwrapv -fno-math-errno -fno-trapping-math'
+    # AVX2-class builds are explicit; keep the runtime's portable baseline available.
+    $cpuArch = if ($CpuTarget -eq 'x86-64-v3') { 'x86-64-v3' } else { 'x86-64-v2' }
+    $extra += "-DPS2X_CPU_ARCH=$cpuArch"
+    $flags += " -march=$cpuArch"
     $link = '-static'
     if ($Pdb) {
         # The upstream PS2X_RELEASE_PDB option only handles MSVC. llvm-mingw needs CodeView + lld's PDB output.
@@ -56,7 +60,7 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
     $cmakeArgs = @('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
-        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8') + $extra
+        "-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=$(if ($prof.build -and $prof.build.unity_batch -and $ramGb -ge 14) { $prof.build.unity_batch } else { 8 })") + $extra
     $sigFile = Join-Path $dir 'gow-configure.sig'
     $sigText = ($cmakeArgs -join "`n") + "`nheads=$(Test-Path (Join-Path $data 'vu1n_heads.txt'))`nrec=$(Barra $rec)"
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -127,7 +131,7 @@ function Build-Game([string]$dir = $bld) {
     $elf = (Languages).recompile_elf
     if ($dir -eq $bld -and $elf -and (Test-Path $elf) -and -not (Test-Path $bootFile)) {
         # A launcher session replaces these defaults with the selected disc and runtime settings.
-        $bootText = "GOW_NATIVE_BOOT_V1`n$elf`nGOW_VU1N_X64=1`nGOW_VU1_CAPTURE_MISSES=1`nGOW_VU1_CAPTURA=$vu1`nPS2X_GS_HW=1`nPS2X_GS_WORKER=1`nTOBIICHI_PANORAMICO=16:9`n"
+        $bootText = "GOW_NATIVE_BOOT_V1`n$elf`nGOW_VU1N_X64=1`nGOW_VU1_EARLY_FINISH=1`nGOW_VU1_CAPTURE_MISSES=1`nGOW_VU1_CAPTURA=$vu1`nPS2X_GS_HW=1`nPS2X_GS_WORKER=1`nTOBIICHI_PANORAMICO=16:9`n"
         [IO.File]::WriteAllText($bootFile, $bootText, (New-Object Text.UTF8Encoding($false)))
     }
     # the background VU1 compiler (launcher: "Compile new areas while playing") builds modules with this compiler and the

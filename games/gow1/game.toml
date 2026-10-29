@@ -35,6 +35,9 @@ movie_ext = ".PSS"
 # Match exact bytes, not a general size threshold: short valid movies must survive.
 widescreen_placeholders = [{size = 16388, sha256 = "98117b3548648b5aec8843bd95fd0187f7b59411b8e0f70d403ce25d0e6c190c"}]
 
+[build]
+unity_batch = 16
+
 [optimize]
 # scripted run that records the VU1 microcode and IOP modules the game uses (Tobiichi's recording script)
 seconds = 240

@@ -15,10 +15,13 @@ if ($Stages -contains 'verify') {
         "-DPython3_EXECUTABLE=$(Barra $python)",
         "-DCMAKE_PROJECT_PS2RetroX_INCLUDE=$(Barra (Join-Path $root 'tools/test/guest-calls.cmake'))") + (Clang-CMakeArgs)
     Native $cmakeExe $testArgs 'regression configure'
-    Native $cmakeExe @('--build', $testBuild, '--target', 'gow_guest_calls', 'gow_codegen_tests', 'gow_memory_tests', 'gow_frame_metrics', 'ps2_recomp', '--parallel', "$jobs") 'regression build'
+    Native $cmakeExe @('--build', $testBuild, '--target', 'gow_guest_calls', 'gow_codegen_tests', 'gow_memory_tests', 'gow_frame_metrics', 'gow_vu1_x64_fuzz_test', 'gow_dma_worker_tests', 'ps2_recomp', '--parallel', "$jobs") 'regression build'
     Write-CompilerCacheStats 'verify'
     Native $python @('-I', (Join-Path $root 'tools/test/recompile-smoke.py'), $testBuild) 'synthetic ELF generation regression'
     Native $python @('-I', (Join-Path $root 'tools/test/guest-calls.py'), (Join-Path $testBuild 'gow_guest_calls.exe'),
         (Join-Path $logs 'guest-calls')) 'guest-call regression tests'
-    Native (Join-Path (Split-Path $cmakeExe) 'ctest.exe') @('--test-dir', $testBuild, '-R', '^gow_(codegen_tests|memory_tests|frame_metrics)$', '--output-on-failure') 'codegen, memory and frame-metric regression tests'
+    Native (Join-Path (Split-Path $cmakeExe) 'ctest.exe') @('--test-dir', $testBuild, '-R', '^gow_(codegen_tests|memory_tests|frame_metrics|dma_worker_tests)$', '--output-on-failure') 'codegen, memory and frame-metric regression tests'
+    Native $python @('-I', (Join-Path $root 'tools/test/vu1-equivalence.py'),
+        (Join-Path $testBuild 'gow_vu1_x64_fuzz_test.exe'), $rt, $python,
+        (Join-Path $script:llvmBin 'clang++.exe'), (Join-Path $logs 'vu1-equivalence')) 'VU1 backend equivalence'
 }

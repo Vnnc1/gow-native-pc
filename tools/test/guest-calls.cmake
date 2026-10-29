@@ -58,3 +58,13 @@ elseif(MINGW)
     target_link_options(gow_guest_calls PRIVATE -Wl,--stack,8388608)
     target_link_options(gow_codegen_tests PRIVATE -Wl,--stack,8388608)
 endif()
+
+# Exercise the same native VU1 runtime with procedural microcode (no disc required).
+add_executable(gow_vu1_x64_fuzz_test "${CMAKE_SOURCE_DIR}/../tests/vu1_x64_fuzz_test.cpp")
+target_compile_features(gow_vu1_x64_fuzz_test PRIVATE cxx_std_20)
+target_link_libraries(gow_vu1_x64_fuzz_test PRIVATE ps2_runtime)
+add_executable(gow_dma_worker_tests "${CMAKE_CURRENT_LIST_DIR}/dma_worker_tests.cpp")
+target_compile_features(gow_dma_worker_tests PRIVATE cxx_std_20)
+target_link_libraries(gow_dma_worker_tests PRIVATE ps2_runtime)
+add_test(NAME gow_dma_worker_tests COMMAND gow_dma_worker_tests)
+set_tests_properties(gow_dma_worker_tests PROPERTIES TIMEOUT 30)
