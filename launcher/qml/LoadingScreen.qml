@@ -27,6 +27,8 @@ Item {
         build: [{ id: "build", w: 12 }],
         pgo: [{ id: "pgoBuild", w: 12 }, { id: "pgoPlay", w: 4, fixed: true }, { id: "pgoRebuild", w: 12 }],
         optimize: [{ id: "record", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
+        // tune (install with first-play preparation): instrumented build, one recorded run, final build with the profile
+        tune: [{ id: "pgoBuild", w: 10 }, { id: "pgoPlay", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "pgoRebuild", w: 9 }],
         native: [{ id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
         vu1disc: [{ id: "vu1disc", w: 3 }]
     })
@@ -61,7 +63,7 @@ Item {
     }
     // a run that takes long enough to deserve the screen (not "tools" or "tools,fetch" alone)
     function esLarga(stages) {
-        return /(^|,)(recomp|build|optimize|native|pgo|vu1disc)(,|$)/.test(stages)
+        return /(^|,)(recomp|build|optimize|native|pgo|tune|vu1disc)(,|$)/.test(stages)
     }
 
     // ------------------------------------------------------------------------------------------------ state

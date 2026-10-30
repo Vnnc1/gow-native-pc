@@ -551,3 +551,13 @@ the ship deck), exclusive full screen 1920×1080 with the FPS counter, 3 pairs: 
 window 42.9 vs 35.9; one of the three pairs was reversed (47.5 vs 49.1), route variance. Four in-game window captures in
 heavy combat were correct. Batching the worker's GS-stage pushes (64 KiB) measured slower in 3/3 full-screen pairs
 (53.8 vs 57.1 mean) and was dropped. Stable 60 guest FPS is still not reached in combat.
+
+## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
+
+Compiler jobs now one per 1.0 GB above 4 GB (11 here; measured 0.5 GB average, 0.64 GB peak per compiler); patch 41
+builds register_functions.cpp alone at -O1 (331 s -> 9.8 s). Stage tune (instrumented build, one recorded run for VU1
+code and profile, final build): 24.1 min against about 63 min for the former build, optimize and pgo sequence. Save
+route, full screen, 3 alternating pairs: tune build 54.81 vs traditional PGO build 52.51 FPS. A -O1 training build was
+slower (45.0 vs 49.7, 3/3) and is not used. PGO retrained with early FINISH: neutral (51.9 vs 52.2). Intro movies with
+early FINISH: gameplay reached, no errors. 30-minute session from the save: 48.1 FPS mean after loading, 3 windows over
+100 ms (max 309 ms), memory stable over the last 8 minutes.

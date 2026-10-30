@@ -85,6 +85,7 @@ ApplicationWindow {
     // are read again by refrescarInstalacion() when a build finishes and before playing.
     property var idiomasJuego: installer.languages()
     property string ejecutableJuego: installer.runnerPath()
+    property bool pgoAtivo: installer.pgoApplied() // the installed build uses the profile-guided optimisation
     readonly property bool listo: ejecutableJuego.length > 0 && idiomasJuego.length > 0
     // gow-native-pc: launcher updates (GitHub Releases, tools/pipeline/update.ps1). A newer release than this launcher is
     // offered under the version in the side bar.
@@ -107,6 +108,7 @@ ApplicationWindow {
     function refrescarInstalacion() {
         idiomasJuego = installer.languages()
         ejecutableJuego = installer.runnerPath()
+        pgoAtivo = installer.pgoApplied()
     }
     Connections {
         target: installer
@@ -902,12 +904,30 @@ ApplicationWindow {
                     }
                 }
 
-                Text {
+                RowLayout {
                     Layout.topMargin: 16
-                    text: Tema.t("pistaF1")
-                    color: Tema.textoSuave
-                    font.pixelSize: 13
-                    font.letterSpacing: 0.3
+                    spacing: 14
+                    Text {
+                        text: Tema.t("pistaF1")
+                        color: Tema.textoSuave
+                        font.pixelSize: 13
+                        font.letterSpacing: 0.3
+                    }
+                    // an installed game without the profile-guided build: point to the step that adds it
+                    Text {
+                        visible: ventana.listo && !ventana.pgoAtivo
+                        text: "▲  " + Tema.t("pgoRecomendado")
+                        color: zonaPgo.containsMouse ? Tema.oroClaro : Tema.oro
+                        font.pixelSize: 13
+                        font.weight: Font.DemiBold
+                        MouseArea {
+                            id: zonaPgo
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: ventana.pagina = 1
+                        }
+                    }
                 }
 
                 // Summary cards.

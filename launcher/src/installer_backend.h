@@ -45,6 +45,8 @@ public:
     // the recorded VU1 code was compiled in (optimize / native stage ran): the first play does not stutter
     Q_INVOKABLE bool firstPlayPrepared() const;
     Q_INVOKABLE bool hasPendingNativeCode() const;
+    // The installed game was compiled with the profile-guided optimisation (its CMake flags use the profile).
+    Q_INVOKABLE bool pgoApplied() const;
     Q_INVOKABLE QVariantMap discScanReport() const;
     // pictures for the loading screen: the player's own images in data/<game>/loading (png, jpg, webp; none ship with
     // this repository), as file URLs, sorted by name

@@ -51,8 +51,10 @@ ScrollView {
         var stages = "tools,fetch"
         if (compatibleIsos().length > 0) stages += ",discs"
         if (scanDisc) stages += ",vu1disc"
-        stages += ",configure,recomp,sync,build"
-        if (prepareFirstPlay) stages += ",optimize"
+        stages += ",configure,recomp,sync"
+        // with the first-play preparation one "tune" pass replaces build + optimize and adds the profile-guided build
+        // (build.ps1 stage tune); without it the plain build
+        stages += prepareFirstPlay ? ",tune" : ",build"
         installer.run(stages, { isos: compatibleIsos(), config: "Release" })
     }
     function maintenance(stages) { begin(); installer.run(stages, { config: "Release" }) }
@@ -423,7 +425,9 @@ ScrollView {
                 font.pixelSize: 13
             }
             Fila {
-                titulo: Tema.t("instPgo")
+                // the installed game's build tells whether the profile is in use (InstallerBackend::pgoApplied)
+                readonly property bool aplicado: root.env.game && !installer.running && installer.pgoApplied()
+                titulo: Tema.t("instPgo") + (aplicado ? "  ·  " + Tema.t("instPgoOn") : (root.env.game ? "  ·  " + Tema.t("instPgoRec") : ""))
                 descripcion: Tema.t("instPgoDesc")
                 BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("pgo") }
             }

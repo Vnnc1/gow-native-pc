@@ -372,6 +372,20 @@ bool InstallerBackend::applyUpdate(const QString &url, const QString &sha256, co
     return started;
 }
 
+bool InstallerBackend::pgoApplied() const
+{
+    const QString runner = runnerPath();
+    if (runner.isEmpty())
+        return false;
+    QFile cache(QFileInfo(runner).dir().absoluteFilePath(QStringLiteral("../CMakeCache.txt")));
+    if (!cache.open(QIODevice::ReadOnly))
+        return false;
+    for (const QByteArray &line : cache.readAll().split('\n'))
+        if (line.startsWith("CMAKE_CXX_FLAGS:") && line.contains("-fprofile-instr-use="))
+            return true;
+    return false;
+}
+
 bool InstallerBackend::needsRebuild() const
 {
     return QFileInfo::exists(m_root + QStringLiteral("/data/needs-rebuild.txt"));

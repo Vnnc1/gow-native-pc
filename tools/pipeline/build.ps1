@@ -13,6 +13,8 @@
 #   build      ps2EntryRunner (log: data/<game>/logs/build.log)
 #   pgo        clang only: an instrumented build plays the [optimize] pad script, its profile goes to
 #              data/<game>/pgo/gow.profdata, and the game is rebuilt with it (profile-guided optimisation)
+#   tune       install path with first-play preparation: one instrumented -O1 build plays the pad script once,
+#              recording the VU1/IOP code (as optimize) and the profile (as pgo); one final build uses both
 #   optimize   the game plays itself (profile [optimize]: pad script, seconds), hidden and muted (engine/patches/15), recording
 #              the VU1 microcode and IOP modules it uses, then "native" (only the VU1 / IOP code is rebuilt: patch 16)
 #   native     the recorded VU1 microcode and IOP modules compiled into the game (the launcher records new microcode
@@ -54,7 +56,7 @@ trap { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red; exit 1 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Stages = @(($Stages -join ',') -split ',' | Where-Object { $_ })
 . (Join-Path $PSScriptRoot 'modules/common.ps1')
-$allowedStages = @('tools','fetch','discs','vu1disc','configure','recomp','sync','build','pgo','optimize','native','verify','launcher','package','installer')
+$allowedStages = @('tools','fetch','discs','vu1disc','configure','recomp','sync','build','pgo','tune','optimize','native','verify','launcher','package','installer')
 foreach ($stage in $Stages) { if ($stage -notin $allowedStages) { throw "Unknown stage '$stage'" } }
 # One writer per checkout: caches and generated outputs must never be updated concurrently.
 New-Item -ItemType Directory -Force (Join-Path $root 'data') | Out-Null

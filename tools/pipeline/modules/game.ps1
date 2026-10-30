@@ -41,13 +41,19 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
         $link += ' -Wl,--pdb='
     }
     if ($Ltcg) { $link += " -Wl,--thinlto-jobs=$([math]::Max(1, $jobs))" }
-    if ($pgo -eq 'generate') { $flags += ' -fprofile-instr-generate'; $link += ' -fprofile-instr-generate' }
+    if ($pgo -eq 'generate') {
+        $flags += ' -fprofile-instr-generate'; $link += ' -fprofile-instr-generate'
+        # Keep the configuration's -O3 here. A -O1 training build (2.2x faster to compile) gave a profile whose final
+        # build was measured slower: 45.0 vs 49.7 FPS mean on the save route, 3 of 3 alternating pairs (2026-10-30).
+    }
     elseif ($pgo -eq 'auto' -and (Test-Path $pgoProfile)) {
         $profileHash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash
         Write-Host "profile-guided: $pgoProfile ($profileHash)"
         # The digest changes Ninja commands and cache keys when the same profile path gets new contents.
         $flags += " -fprofile-instr-use=`"$(Barra $pgoProfile)`" -DGOW_PGO_REVISION=$profileHash -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
     }
+    # Always explicit: a value once passed stays in CMakeCache.txt, so an omitted one would silently keep it.
+    $extra += @('-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG', '-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG')
     $extra += Clang-CMakeArgs -NoCache:($pgo -eq 'generate')
     # The pipeline owns launcher selection, including disabling cache for instrumented objects.
     # The upstream numeric -flto=N job limit is GCC-only. lld's job limit above is used for Clang.

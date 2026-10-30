@@ -185,6 +185,13 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   Texture tests use the production texture store and inspect primitive submissions without a GL context; they do
   not validate GPU rasterization. `tools/test/session-game-smoke.py --visible` adds the separate gameplay check;
   `--detailed` enables intrusive timing and must not be used as an FPS benchmark.
+- Build parallelism: one compiler per 1.0 GB above 4 GB (measured 0.5 GB average, 0.64 GB peak per compiler on the game
+  build); patch 41 keeps the 12.8 MB register_functions.cpp out of unity/PCH at -O1. Release optimisation flags are
+  always passed explicitly: CMakeCache.txt keeps any value once given, which silently kept a -O1 training build.
+- Stage `tune` (the install's first-play preparation) = one instrumented build that records VU1/IOP code and the PGO
+  profile in one run, then one final build. Keep its training build at -O3: a -O1 training build compiled 2.2x faster
+  but its profile produced a build measured ~9% slower (3/3 pairs). Its step texts reuse the pgo/native ones, which
+  LoadingScreen.qml and InstallPage.qml match by prefix.
 - PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
   `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
 - Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts

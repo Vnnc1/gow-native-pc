@@ -63,9 +63,11 @@ $env:GIT_CONFIG_COUNT = '2'
 $env:GIT_CONFIG_KEY_0 = 'core.longpaths'; $env:GIT_CONFIG_VALUE_0 = 'true'
 $env:GIT_CONFIG_KEY_1 = 'safe.directory'; $env:GIT_CONFIG_VALUE_1 = (Barra $rt)
 # parallel compilers: two logical cores stay free for Windows (a build on every core froze the machine), at most one
-# compiler per 1.6 GB above 4 GB (generated code uses substantial RAM; paging defeats parallelism)
+# compiler per 1.0 GB above 4 GB (paging defeats parallelism). Measured 2026-10-30 on the game build (unity batch 16,
+# Release, PGO): 7 compilers used 3.4 GB together, the largest one 0.64 GB; register_functions.cpp, the only outlier,
+# builds at -O1 since runtime patch 41. The former 1.6 GB per compiler left 16 GB machines at 7 of 18 usable cores.
 $ramGb = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB
-$jobs = [int][math]::Max(1, [math]::Min([Environment]::ProcessorCount - 2, [math]::Floor(($ramGb - 4) / 1.6)))
+$jobs = [int][math]::Max(1, [math]::Min([Environment]::ProcessorCount - 2, [math]::Floor(($ramGb - 4) / 1.0)))
 # the whole pipeline (clang, ninja, python) runs below normal priority so the desktop stays usable; the recorded test
 # game goes back to normal priority in the optimize stage
 try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }

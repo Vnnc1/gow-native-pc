@@ -54,3 +54,4 @@
 | 38-sync-barrier-optin-stage-push | Large-VIF1 barrier opt-in, one queue lock per GS stage push, history-ring size check; measured FPS-neutral | this project |
 | 39-game-menu-live-graphics | F1 game menu (graphics live, cheats, save), FXAA no longer disables the sharp scaler, borderless window, debugger on Ctrl+F1 | this project |
 | 40-gs-early-finish | FINISH raised when the frame's VIF1 packet is queued; CSR without worker wait, display writes in drawing order; +20% in VU1-bound combat | this project |
+| 41-register-functions-o1 | Generated register_functions.cpp built alone at -O1 without unity/PCH: 331 s -> 9.8 s | this project |
