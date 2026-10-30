@@ -13,7 +13,42 @@ ScrollView {
     contentWidth: availableWidth
     clip: true
 
-    readonly property bool completa: ajustes.modoPantalla === "completa"
+    // Full screen and borderless both use the monitor's own resolution.
+    readonly property bool completa: ajustes.modoPantalla !== "ventana"
+
+    // Quick profiles: each one is a set of the settings below; any other combination shows as "Custom".
+    readonly property var perfiles: ({
+        desempenho: { resolucionInterna: "1", filtro: "fsr", fxaa: false, anisotropico: "1" },
+        equilibrado: { resolucionInterna: "2", filtro: "fsr", fxaa: true, anisotropico: "4" },
+        qualidade: { resolucionInterna: "auto", filtro: "fsr", fxaa: true, anisotropico: "16" }
+    })
+    readonly property string perfilActual: {
+        for (var nombre in perfiles) {
+            var p = perfiles[nombre]
+            if (ajustes.resolucionInterna === p.resolucionInterna && ajustes.filtro === p.filtro && ajustes.fxaa === p.fxaa
+                    && ajustes.anisotropico === p.anisotropico)
+                return nombre
+        }
+        return "personalizado"
+    }
+    function aplicarPerfil(nombre) {
+        var p = perfiles[nombre]
+        if (!p) return
+        ajustes.resolucionInterna = p.resolucionInterna
+        ajustes.filtro = p.filtro
+        ajustes.fxaa = p.fxaa
+        ajustes.anisotropico = p.anisotropico
+    }
+
+    component Grupo: Text {
+        Layout.topMargin: 22
+        Layout.bottomMargin: 2
+        color: Tema.oro
+        font.family: Tema.fuenteTitulo
+        font.pixelSize: 13
+        font.weight: Font.Bold
+        font.letterSpacing: 2
+    }
     readonly property real aspectoPantalla: pantalla.ancho / pantalla.alto
 
     function nombreTarjeta(t) {
@@ -73,6 +108,22 @@ ScrollView {
         spacing: 0
 
         Fila {
+            titulo: Tema.t("perfil")
+            descripcion: Tema.t("perfilDesc")
+            Selector {
+                opciones: [
+                    { texto: Tema.t("perfilDesempenho"), valor: "desempenho", detalle: Tema.t("perfilDesempenhoDet") },
+                    { texto: Tema.t("perfilEquilibrado"), valor: "equilibrado", detalle: Tema.t("perfilEquilibradoDet") },
+                    { texto: Tema.t("perfilQualidade"), valor: "qualidade", detalle: Tema.t("perfilQualidadeDet") }
+                ].concat(raiz.perfilActual === "personalizado"
+                         ? [{ texto: Tema.t("perfilPersonalizado"), valor: "personalizado", detalle: Tema.t("perfilPersonalizadoDet") }] : [])
+                valor: raiz.perfilActual
+                onElegido: (v) => raiz.aplicarPerfil(v)
+            }
+        }
+
+        Grupo { text: Tema.t("grupoImagen") }
+        Fila {
             titulo: Tema.t("gpu")
             descripcion: raiz.gpuPerdida ? Tema.t("gpuFalta") : Tema.t("gpuDesc")
             Selector {
@@ -85,7 +136,8 @@ ScrollView {
             titulo: Tema.t("modo")
             descripcion: Tema.t("modoDesc")
             Selector {
-                opciones: [{ texto: Tema.t("completa"), valor: "completa" }, { texto: Tema.t("ventana"), valor: "ventana" }]
+                opciones: [{ texto: Tema.t("completa"), valor: "completa" }, { texto: Tema.t("sinBordes"), valor: "sin_bordes" },
+                           { texto: Tema.t("ventana"), valor: "ventana" }]
                 valor: raiz.ajustes.modoPantalla
                 onElegido: (v) => raiz.ajustes.modoPantalla = v
             }
@@ -129,14 +181,23 @@ ScrollView {
                 onToggled: raiz.ajustes.estirar = checked
             }
         }
+        Grupo { text: Tema.t("grupoCalidad") }
+        Fila {
+            titulo: Tema.t("interna")
+            descripcion: Tema.t("internaDesc")
+            Selector {
+                opciones: raiz.opcionesEscala
+                valor: raiz.ajustes.resolucionInterna
+                onElegido: (v) => raiz.ajustes.resolucionInterna = v
+            }
+        }
         Fila {
             titulo: Tema.t("escalado")
             descripcion: Tema.t("escaladoDesc")
             Selector {
                 opciones: [
                     { texto: Tema.t("filtroFsr"), valor: "fsr" },
-                    { texto: Tema.t("filtroBilineal"), valor: "bilineal" },
-                    { texto: Tema.t("filtroPixel"), valor: "pixel" }
+                    { texto: Tema.t("filtroBilineal"), valor: "bilineal" }
                 ]
                 valor: raiz.ajustes.filtro
                 onElegido: (v) => raiz.ajustes.filtro = v
@@ -177,16 +238,41 @@ ScrollView {
                 onElegido: (v) => raiz.ajustes.anisotropico = v
             }
         }
-        // The render-target renderer is always used and has no dynamic scale or line-doubling mode: the former
-        // "hardware renderer", "dynamic resolution" and "sharp image" switches set variables no runtime code read.
+
+        Grupo { text: Tema.t("grupoHerramientas") }
         Fila {
-            titulo: Tema.t("interna")
-            descripcion: Tema.t("internaDesc")
+            titulo: Tema.t("upNativo")
+            descripcion: Tema.t("upNativoDesc")
+            anchoControl: 0
+        }
+        Fila {
+            titulo: Tema.t("upDlss")
+            descripcion: Tema.t("upDlssDesc")
+            anchoControl: 150
+            Rectangle {
+                anchors.right: parent.right
+                width: etiquetaNo.implicitWidth + 24
+                height: 28
+                radius: 14
+                color: "transparent"
+                border.width: 1
+                border.color: Tema.borde
+                Text {
+                    id: etiquetaNo
+                    anchors.centerIn: parent
+                    text: Tema.t("upNoDisponible")
+                    color: Tema.textoTenue
+                    font.pixelSize: 12
+                }
+            }
+        }
+        Fila {
+            titulo: Tema.t("upExternas")
+            descripcion: Tema.t("upExternasDesc")
             separador: false
-            Selector {
-                opciones: raiz.opcionesEscala
-                valor: raiz.ajustes.resolucionInterna
-                onElegido: (v) => raiz.ajustes.resolucionInterna = v
+            Interruptor {
+                checked: raiz.ajustes.modoPantalla === "sin_bordes"
+                onToggled: raiz.ajustes.modoPantalla = checked ? "sin_bordes" : "completa"
             }
         }
     }

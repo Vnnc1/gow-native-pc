@@ -138,7 +138,7 @@ ApplicationWindow {
 
     // Internal resolution. Automatic: the image height on screen divided by 448 lines, 2x to 8x.
     function escalaAuto() {
-        var alto = ajustes.modoPantalla === "completa" ? pantalla.alto : ajustes.alto
+        var alto = ajustes.modoPantalla !== "ventana" ? pantalla.alto : ajustes.alto
         return Math.max(2, Math.min(8, Math.floor(alto / 448)))
     }
     function escalaElegida() {
@@ -162,12 +162,14 @@ ApplicationWindow {
         ajustes.alto = pantalla.ancho / pantalla.alto < 1.7 ? 800 : 720
         ajustes.aspecto = aspectoPorDefecto()
         ajustes.estirar = false
-        ajustes.filtro = "bilineal"
+        // the "Balanced" profile of the Graphics page
+        ajustes.filtro = "fsr"
         ajustes.nitidez = 0.8
         ajustes.fxaa = true
-        ajustes.anisotropico = "1"
+        ajustes.anisotropico = "4"
         ajustes.resolucionInterna = "2"
-        ajustes.fpsLimite = 120
+        // the game makes at most 60 frames; a higher window rate only repeats them
+        ajustes.fpsLimite = 60
         ajustes.vsync = false
         ajustes.mostrarFps = false
         ajustes.saltarVideos = true
@@ -178,6 +180,16 @@ ApplicationWindow {
         ajustes.escSalir = false
         ajustes.minimizarAlJugar = true
         ajustes.trucos = ""
+    }
+
+    // Name key of the Graphics page's quick profile the current settings match (PaginaGrafico.qml perfiles).
+    function perfilTexto() {
+        var r = ajustes.resolucionInterna, f = ajustes.filtro, x = ajustes.fxaa, a = ajustes.anisotropico
+        if (f !== "fsr") return "perfilPersonalizado"
+        if (r === "1" && !x && a === "1") return "perfilDesempenho"
+        if (r === "2" && x && a === "4") return "perfilEquilibrado"
+        if (r === "auto" && x && a === "16") return "perfilQualidade"
+        return "perfilPersonalizado"
     }
 
     function nombreGpu() {
@@ -193,8 +205,6 @@ ApplicationWindow {
         if (installer.running || lanzador.jugando) return
         refrescarInstalacion()
         if (!listo) { aviso(Tema.t("instNotReady")); ventana.pagina = 1; return }
-        // Explain the interpreter cost when neither first-play preparation nor the JIT is available.
-        if (!installer.firstPlayPrepared() && !ajustes.compilarAreas) aviso(Tema.t("firstPlayNotice"))
         var elegido = idiomaJuego(ajustes.textoJuego)
         if (!elegido) {
             if (idiomasJuego.length > 1) { preguntaIdioma.open(); return }
@@ -212,9 +222,10 @@ ApplicationWindow {
             elf: elegido.elf, iso: "", ejecutable: ejecutableJuego,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
             capturaVu1: installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
-            // experimental: VU1 code met without native code is compiled while playing (x86-64 JIT, GOW_VU1N_X64)
-            datosJit: ajustes.compilarAreas ? installer.repoRoot + "/data/" + installer.gameId : "",
-            jitInline: ajustes.jitInline,
+            // VU1 code met without native code is always compiled while playing (x86-64 JIT, GOW_VU1N_X64, inline tier):
+            // the native path is the fast one, so it is no longer a switch
+            datosJit: installer.repoRoot + "/data/" + installer.gameId,
+            jitInline: true,
             diagnostics: ajustes.diagnostics,
             framePc: installer.diagnosticsFramePc(),
             // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)
@@ -311,6 +322,16 @@ ApplicationWindow {
         if (ajustes.versionAjustes < 6) {
             ajustes.saltarVideos = false
             ajustes.versionAjustes = 6
+        }
+        // Version 7: native JIT always on, the duplicate "pixel" filter and fast boot removed from the interface, a
+        // 120 FPS window limit (the game makes 60) brought to 60.
+        if (ajustes.versionAjustes < 7) {
+            ajustes.compilarAreas = true
+            ajustes.jitInline = true
+            ajustes.arranqueRapido = false
+            if (ajustes.filtro === "pixel") ajustes.filtro = "bilineal"
+            if (ajustes.fpsLimite === 120) ajustes.fpsLimite = 60
+            ajustes.versionAjustes = 7
         }
         if (ajustes.idioma.length === 0) {
             var loc = Qt.locale().name
@@ -879,26 +900,35 @@ ApplicationWindow {
                     }
                 }
 
+                Text {
+                    Layout.topMargin: 16
+                    text: Tema.t("pistaF1")
+                    color: Tema.textoSuave
+                    font.pixelSize: 13
+                    font.letterSpacing: 0.3
+                }
+
                 // Summary cards.
                 RowLayout {
-                    Layout.topMargin: 30
+                    Layout.topMargin: 14
                     Layout.fillWidth: true
                     spacing: 12
                     Repeater {
                         model: [
+                            { titulo: Tema.t("cardPerfil"),
+                              valor: Tema.t(ventana.perfilTexto()),
+                              detalle: ventana.escalaElegida() + "× · " + (512 * ventana.escalaElegida()) + "×" + (448 * ventana.escalaElegida()),
+                              pagina: 2 },
                             { titulo: Tema.t("cardImagen"),
-                              valor: ajustes.modoPantalla === "completa" ? Tema.t("completa") : Tema.t("ventana"),
-                              detalle: (ajustes.modoPantalla === "completa" ? ventana.pantalla.ancho + "×" + ventana.pantalla.alto
+                              valor: Tema.t(ajustes.modoPantalla === "sin_bordes" ? "sinBordes"
+                                            : ajustes.modoPantalla === "completa" ? "completa" : "ventana"),
+                              detalle: (ajustes.modoPantalla !== "ventana" ? ventana.pantalla.ancho + "×" + ventana.pantalla.alto
                                                                           : ajustes.ancho + "×" + ajustes.alto) + " · " + ajustes.aspecto,
                               pagina: 2 },
-                            { titulo: Tema.t("cardEscala"),
-                              valor: ventana.escalaElegida() + "×",
-                              detalle: (512 * ventana.escalaElegida()) + "×" + (448 * ventana.escalaElegida()),
-                              pagina: 2 },
-                            { titulo: Tema.t("cardFps"),
-                              valor: ajustes.fpsLimite > 0 ? ajustes.fpsLimite + " FPS" : Tema.t("sinLimite"),
-                              detalle: ajustes.vsync ? "VSync" : Tema.t("cardJuego60"),
-                              pagina: 3 },
+                            { titulo: Tema.t("cardControles"),
+                              valor: mando.conectado ? Tema.t("cardMando") : Tema.t("cardTeclado"),
+                              detalle: mando.conectado ? mando.nombre : Tema.t("cardTecladoDet"),
+                              pagina: 4 },
                             { titulo: Tema.t("cardTiempo"),
                               valor: ajustes.segundosJugados > 0 ? Tema.duracion(ajustes.segundosJugados) : "—",
                               detalle: ajustes.ultimaSesion > 0 ? Tema.tf("ultimaSesion", Tema.duracion(ajustes.ultimaSesion)) : Tema.t("sinJugar"),

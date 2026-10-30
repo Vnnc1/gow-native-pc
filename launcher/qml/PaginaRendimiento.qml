@@ -52,20 +52,8 @@ ScrollView {
                 onToggled: raiz.ajustes.mostrarFps = checked
             }
         }
-        Fila {
-            titulo: Tema.t("compilarAreas")
-            descripcion: Tema.t("compilarAreasDesc")
-            Interruptor {
-                checked: raiz.ajustes.compilarAreas
-                onToggled: raiz.ajustes.compilarAreas = checked
-            }
-        }
-
-        Fila {
-            titulo: Tema.t("jitInline")
-            descripcion: Tema.t("jitInlineDesc")
-            Interruptor { checked: raiz.ajustes.jitInline; enabled: raiz.ajustes.compilarAreas; onToggled: raiz.ajustes.jitInline = checked }
-        }
+        // The native VU1 path (AOT code plus the in-process JIT for areas the build has not seen) is always on: the
+        // former "compile new areas" and "fast JIT instructions" switches only offered slower fallbacks.
         Fila {
             titulo: Tema.t("autoNative")
             descripcion: Tema.t("autoNativeDesc")

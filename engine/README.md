@@ -52,3 +52,4 @@
 | 36-worker-stage-wait-metrics | Bounded opt-in worker/GS-stage wait attribution, including stage-only stalls; collector integration | this project |
 | 37-vu1-isolated-task-replay | Local bounded MSCAL capture and standalone regression replay with independent native/exact baselines; no FPS gain claimed | this project |
 | 38-sync-barrier-optin-stage-push | Large-VIF1 barrier opt-in, one queue lock per GS stage push, history-ring size check; measured FPS-neutral | this project |
+| 39-game-menu-live-graphics | F1 game menu (graphics live, cheats, save), FXAA no longer disables the sharp scaler, borderless window, debugger on Ctrl+F1 | this project |

@@ -88,14 +88,6 @@ ScrollView {
             }
         }
         Fila {
-            titulo: Tema.t("arranqueRapido")
-            descripcion: Tema.t("arranqueRapidoDesc")
-            Interruptor {
-                checked: raiz.ajustes.arranqueRapido
-                onToggled: raiz.ajustes.arranqueRapido = checked
-            }
-        }
-        Fila {
             titulo: Tema.t("minimizarAlJugar")
             descripcion: Tema.t("minimizarAlJugarDesc")
             Interruptor {

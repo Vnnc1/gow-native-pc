@@ -537,3 +537,7 @@ Sampling profile (PDB build, same route): the EE thread waits ~57%; the VIF1/VU1
 `VU1NativeAccess::chain` is 19.6%, `blockTiming` 3.5%, slot setup/code-change checks ~3%, GS-stage locking ~5% and
 interpreter call-outs (OPMULA/OPMSUB/EFU) ~3.5%. Stable 60 guest FPS is not reached; the worst combat window with PGO
 averages ~45 FPS. Analysis and next steps: `docs/research/revisao-2026-10-30.pt-BR.md`, section 6.
+
+Patch 39 (same machine and protocol, FXAA on with the sharp scaler, two alternating pairs): 52.99 / 54.97 FPS against
+54.88 / 50.95 for the patch 38 PGO build: no measurable change. In-game screenshots confirmed the F1 menu (pt) and a
+borderless 1920×1080 window with FXAA followed by the sharp scaler, correctly oriented.

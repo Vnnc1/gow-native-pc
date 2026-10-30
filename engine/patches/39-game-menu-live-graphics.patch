@@ -1,0 +1,1037 @@
+In-game menu (F1) with Graphics, Cheats and Save tabs; graphics settings change while playing.
+gow_ajustes_vivo.h (header-only atomics, read once from the launcher's variables) feeds the presentation pass (scaling
+filter, sharpness, FXAA, stretch), texture anisotropy and the FPS counter; the menu also sets the window FPS limit and
+VSync. F2 still opens the cheats; the ImGui runtime debugger moves to Ctrl+F1 and registers its memory-card copy for the
+menu's Save tab. Portuguese menu texts (the menu fell back to English for pt).
+Fix: with FXAA on, the presentation shader returned the FXAA colour and skipped the sharp bicubic scaler; FXAA now runs
+at the game's resolution into a render target and the scaler maps that onto the window.
+TOBIICHI_PANTALLA=sin_bordes opens a borderless window over the monitor (F11 toggles), for capture/scaling tools.
+The guest frame function is always wrapped so the counter can be turned on in game (one increment per guest frame).
+Tested: game build, in-game screenshots of the menu (pt, 1280x720) and of borderless FXAA+sharp at 1920x1080.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_ajustes_vivo.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_ajustes_vivo.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_ajustes_vivo.h
+@@ -0,0 +1,49 @@
++#pragma once
++// gow-native-pc (patch 39): graphics settings the in-game menu (F1) changes while playing. They start from the
++// launcher's variables and are read where they apply: the presentation pass (main thread), texture sampling (GS
++// thread) and the window. Header-only so the renderer does not link against the menu. Changes last for the session;
++// the launcher stays the place where settings are saved.
++#include <atomic>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++
++namespace gow_vivo
++{
++    inline std::atomic<bool> fxaa{false};
++    inline std::atomic<bool> nitido{true};     // bicubic + adaptive sharpen when magnifying; false = bilinear
++    inline std::atomic<float> nitidez{0.4f};   // GOW_SHARPEN, 0..0.5
++    inline std::atomic<int> aniso{1};          // GOW_ANISO, 1 (off) .. 16
++    inline std::atomic<bool> estirar{false};   // TOBIICHI_ASPECTO=estirar: fill the window, ignore the aspect
++    inline std::atomic<bool> mostrarFps{false}; // TOBIICHI_FPS_GOSTER
++    // Set by the debug panel when it is built in: copies the memory card (F1 > Save). Returns a status line.
++    inline std::atomic<std::string (*)()> copiarSave{nullptr};
++
++    // Reads the launcher's variables once; every reader calls it before its first use.
++    inline void cargar()
++    {
++        static const bool cargado = []
++        {
++            const char *scaler = std::getenv("GOW_SCALER");
++            nitido.store(!(scaler && std::strcmp(scaler, "bilinear") == 0), std::memory_order_relaxed);
++            if (const char *v = std::getenv("GOW_SHARPEN"))
++            {
++                const float s = static_cast<float>(std::atof(v));
++                nitidez.store(s < 0.0f ? 0.0f : (s > 0.5f ? 0.5f : s), std::memory_order_relaxed);
++            }
++            const char *f = std::getenv("TOBIICHI_FXAA");
++            fxaa.store(f && f[0] == '1', std::memory_order_relaxed);
++            if (const char *v = std::getenv("GOW_ANISO"))
++            {
++                const int a = std::atoi(v);
++                aniso.store(a < 1 ? 1 : (a > 16 ? 16 : a), std::memory_order_relaxed);
++            }
++            const char *aspecto = std::getenv("TOBIICHI_ASPECTO");
++            estirar.store(aspecto && std::strcmp(aspecto, "estirar") == 0, std::memory_order_relaxed);
++            const char *fps = std::getenv("TOBIICHI_FPS_GOSTER");
++            mostrarFps.store(fps && fps[0] == '1', std::memory_order_relaxed);
++            return true;
++        }();
++        (void)cargado;
++    }
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -17,6 +17,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "raylib.h"
+ #include "runtime/gow_frame_metrics.h"
++#include "runtime/gow_ajustes_vivo.h"
+ #include <chrono>
+ 
+ #include <algorithm>
+@@ -83,10 +84,18 @@
+ 
+     void applyCursor()
+     {
+-        if (IsWindowFullscreen())
++        if (IsWindowFullscreen() || IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE))
+             HideCursor();
+         else
+             ShowCursor();
++    }
++
++    // gow-native-pc (patch 39): borderless window over the whole monitor (TOBIICHI_PANTALLA=sin_bordes; F11 toggles it).
++    bool g_sinBordes = false;
++    void alternarSinBordes()
++    {
++        ToggleBorderlessWindowed();
++        applyCursor();
+     }
+ 
+     // Pantalla completa con el modo de vídeo actual del monitor (no cambia la resolución). En X11/XWayland el gestor
+@@ -126,7 +135,6 @@
+     PS2Runtime::RecompiledFunction g_funcionCuadro = nullptr;
+     std::atomic<uint64_t> g_cuadrosJuego{0};
+     bool g_frameDiagnostics = false;
+-    bool g_showFrameOverlay = false;
+     uint32_t g_framePc = kFuncionCuadro;
+ 
+     void recordGuestFrame()
+@@ -328,12 +336,15 @@
+ // GOW-Port: proporción de la imagen en la ventana (gs_host_present.cpp). 0 = estirar a toda la ventana.
+ float gowAspectoPresentacion()
+ {
++    // gow-native-pc (patch 39): "stretch" can be switched in the in-game menu (F1); the aspect itself stays fixed.
++    gow_vivo::cargar();
++    if (gow_vivo::estirar.load(std::memory_order_relaxed))
++        return 0.0f;
+     static const float aspect = []
+     {
+-        if (const char *value = std::getenv("TOBIICHI_ASPECTO"); value && *value && std::strcmp(value, "auto") != 0)
+-        {
+-            if (std::strcmp(value, "estirar") == 0)
+-                return 0.0f;
++        if (const char *value = std::getenv("TOBIICHI_ASPECTO"); value && *value && std::strcmp(value, "auto") != 0 &&
++                                                                    std::strcmp(value, "estirar") != 0)
++        {
+             if (const float fixed = parseAspect(value); fixed > 0.0f)
+                 return fixed;
+         }
+@@ -361,6 +372,11 @@
+     // run and draw as usual (shaders still get compiled into the cache), but nothing shows and no key reaches it
+     const bool hidden = envFlag("GOW_WINDOW_HIDDEN", false);
+     const bool fullscreen = !hidden && mode && std::strcmp(mode, "completa") == 0;
++    // gow-native-pc (patch 39): TOBIICHI_PANTALLA=sin_bordes: a borderless window the size of the monitor. Window
++    // capture, overlays and external scaling / frame-generation tools (Lossless Scaling) need it; exclusive full
++    // screen hides the window from them.
++    const bool borderless = !hidden && mode && std::strcmp(mode, "sin_bordes") == 0;
++    g_sinBordes = borderless;
+     SetConfigFlags(FLAG_WINDOW_RESIZABLE | (envFlag("TOBIICHI_VSYNC", false) ? FLAG_VSYNC_HINT : 0u) |
+                    (hidden ? FLAG_WINDOW_HIDDEN : 0u));
+     const char *customTitle = std::getenv("TOBIICHI_TITULO");
+@@ -390,6 +406,8 @@
+     }
+     if (fullscreen)
+         alternarPantallaCompleta();
++    else if (borderless)
++        alternarSinBordes();
+     if (!escCierraJuego())
+         SetExitKey(KEY_NULL);
+ }
+@@ -418,7 +436,7 @@
+                 std::cerr << "[teclado] mapa configurable activo (TOBIICHI_TECLAS); sticks del teclado desde el mapa" << std::endl;
+         }
+     }
+-    g_showFrameOverlay = envFlag("TOBIICHI_FPS_GOSTER", false);
++    gow_vivo::cargar();
+     g_frameDiagnostics = envFlag("GOW_FRAME_DIAG", false);
+     if (g_frameDiagnostics)
+     {
+@@ -427,7 +445,9 @@
+         if (configured && runtime.hasFunction(configured)) g_framePc = configured;
+         else { g_frameDiagnostics = false; std::fprintf(stderr, "[gow-frame] unavailable: valid profile frame PC required\n"); }
+     }
+-    if ((g_showFrameOverlay || g_frameDiagnostics) && runtime.hasFunction(g_framePc))
++    // gow-native-pc (patch 39): the counter can be turned on from the in-game menu, so the frame function is always
++    // wrapped (one counter increment per guest frame); before, only with the overlay or diagnostics on.
++    if (runtime.hasFunction(g_framePc))
+         if (PS2Runtime::RecompiledFunction actual = runtime.lookupFunction(g_framePc))
+         {
+             g_funcionCuadro = actual;
+@@ -446,7 +466,12 @@
+ void gowCuadroEntrada()
+ {
+     if (IsKeyPressed(KEY_F11))
+-        alternarPantallaCompleta();
++    {
++        if (g_sinBordes)
++            alternarSinBordes();
++        else
++            alternarPantallaCompleta();
++    }
+     gowTrucosMenuEntrada(escCierraJuego()); // F2, menú de trucos
+     gowFijarEntrada();                      // Alt fija el objetivo, el ratón lo cambia
+ }
+@@ -456,6 +481,6 @@
+ {
+     gowFijarDibujar(x, y, w, h);
+     gowTrucosMenuDibujar();
+-    if (g_funcionCuadro && g_showFrameOverlay)
++    if (g_funcionCuadro && gow_vivo::mostrarFps.load(std::memory_order_relaxed))
+         dibujarFps(x, y, h);
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -1,5 +1,7 @@
+ // GOW-Port: menú de trucos (entrenador) de God of War (SCUS-97399, NTSC-U). F2 lo abre durante la partida;
+-// TOBIICHI_TRUCOS="inmortal,un_golpe,..." (lanzador) da el estado inicial y TOBIICHI_IDIOMA (tr/en/es) el idioma.
++// TOBIICHI_TRUCOS="inmortal,un_golpe,..." (lanzador) da el estado inicial y TOBIICHI_IDIOMA (tr/en/es/pt) el idioma.
++// gow-native-pc (patch 39): it is now the game menu: F1 opens it with Graphics (live settings, gow_ajustes_vivo.h),
++// Cheats and Save tabs; F2 opens it on the cheats.
+ //
+ // Direcciones sacadas del ejecutable (no de códigos de terceros):
+ //   0x302CC0  estado de Kratos (es lo que va a la partida guardada):
+@@ -19,6 +21,7 @@
+ #include "ps2_runtime.h"
+ #include "ps2_runtime_macros.h"
+ #include "raylib.h"
++#include "runtime/gow_ajustes_vivo.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -32,6 +35,8 @@
+ #include <iostream>
+ #include <string>
+ #include <vector>
++
++int gowVentanaFps(); // gow_integracion.cpp
+ 
+ namespace
+ {
+@@ -262,18 +267,184 @@
+          "Dificultad Modo Dios, trajes, vídeos, Desafío de los Dioses. Al guardar queda para siempre."},
+     };
+ 
++    const Textos kPortugues = {
++        "TRUQUES",
++        "Os controles do jogo param enquanto o menu está aberto",
++        "",
++        {"Imortalidade", "Morte com um golpe", "Magia infinita", "Fúria dos Deuses infinita", "Orbes vermelhos no máximo",
++         "Todas as melhorias", "Todos os poderes e armas", "Vida e magia no máximo", "Desbloquear todos os extras"},
++        {"Kratos não sofre dano; a vida fica sempre cheia.",
++         "Inimigos e chefes morrem com um golpe.",
++         "A barra de magia nunca diminui.",
++         "Barra de fúria sempre cheia; não acaba enquanto ativa.",
++         "60000 orbes vermelhos (o limite do jogo).",
++         "Lâminas do Caos nível 5; magias e Lâmina de Ártemis nível 3.",
++         "Fúria de Zeus, Olhar da Medusa, Ira de Poseidon, Exército de Hades, Lâmina de Ártemis, Tridente de Poseidon.",
++         "Todas as melhorias de Olhos da Górgona e Penas de Fênix.",
++         "Dificuldade Modo Deus, trajes, vídeos, Desafio dos Deuses. Fica permanente ao salvar."},
++    };
++
++    // gow-native-pc (patch 39): language of the menu (TOBIICHI_IDIOMA: tr, en, es, pt).
++    int idiomaMenu()
++    {
++        static const int idioma = []
++        {
++            const char *v = std::getenv("TOBIICHI_IDIOMA");
++            if (v && std::strncmp(v, "tr", 2) == 0)
++                return 0;
++            if (v && std::strncmp(v, "es", 2) == 0)
++                return 2;
++            if (v && std::strncmp(v, "pt", 2) == 0)
++                return 3;
++            return 1;
++        }();
++        return idioma;
++    }
++
+     const Textos &textos()
+     {
+-        static const Textos *elegidos = []
+-        {
+-            const char *idioma = std::getenv("TOBIICHI_IDIOMA");
+-            if (idioma && std::strncmp(idioma, "tr", 2) == 0)
+-                return &kTurco;
+-            if (idioma && std::strncmp(idioma, "es", 2) == 0)
+-                return &kEspanol;
+-            return &kIngles;
+-        }();
+-        return *elegidos;
++        static const Textos *const todos[] = {&kTurco, &kIngles, &kEspanol, &kPortugues};
++        return *todos[idiomaMenu()];
++    }
++
++    // ---- In-game menu (F1): Graphics, Cheats and Save tabs (gow-native-pc, patch 39) ----
++
++    enum Pestana : int
++    {
++        PGraficos,
++        PTrucos,
++        PSave,
++        kNumPestanas
++    };
++    enum Grafico : int
++    {
++        GFiltro,
++        GNitidez,
++        GFxaa,
++        GAniso,
++        GFps,
++        GVsync,
++        GContador,
++        GEstirar,
++        kNumGraficos
++    };
++
++    struct TextosMenu
++    {
++        const char *titulo;
++        const char *subtitulo;
++        const char *pestanas[kNumPestanas];
++        const char *ayuda;
++        const char *nombre[kNumGraficos];
++        const char *descripcion[kNumGraficos];
++        const char *nitido, *suave, *desactivado, *sinLimite;
++        const char *saveNombre, *saveDesc, *saveNoDisponible, *nota;
++    };
++
++    const TextosMenu kMenuTurco = {
++        "OYUN MENÜSÜ",
++        "Menü açıkken oyun girdisi durur",
++        {"Grafik", "Hileler", "Kayıt"},
++        "↑↓ seç    ←→ değiştir    Q/E sekme    F1 / Esc kapat",
++        {"Ölçekleme filtresi", "Keskinlik", "Kenar yumuşatma (FXAA)", "Anizotropik filtre", "Pencere FPS sınırı", "VSync",
++         "FPS sayacı", "Görüntüyü uzat"},
++        {"Keskin: bikübik + uyarlamalı keskinleştirme. Yumuşak: bilineer.",
++         "Keskin filtrenin şiddeti.",
++         "Kenar tırtıklarını ölçeklemeden önce, oyunun çözünürlüğünde yumuşatır.",
++         "Eğik açılardaki dokular daha net; GPU maliyeti düşük.",
++         "Oyun en fazla 60 kare üretir; üstü yalnızca aynı görüntüyü tekrarlar.",
++         "Monitörle eşitler: yırtılma yok, biraz daha gecikme.",
++         "Oyunun saniyedeki karelerini gösterir.",
++         "Pencereyi siyah şerit olmadan doldurur (oranı bozar)."},
++        "Keskin",
++        "Yumuşak",
++        "Kapalı",
++        "Sınırsız",
++        "Hafıza kartını kopyala",
++        "Hafıza kartını şimdiki hâliyle kopyalar (bir sunakta yapılan son kayıt). Başlatıcının Kayıtlar sayfasından geri yüklenir.",
++        "Bu sürümde yok",
++        "İç çözünürlük ve geniş ekran başlatıcıdadır (yeniden başlatma gerekir).",
++    };
++
++    const TextosMenu kMenuIngles = {
++        "GAME MENU",
++        "Game input is paused while the menu is open",
++        {"Graphics", "Cheats", "Save"},
++        "↑↓ select    ←→ change    Q/E tabs    F1 / Esc close",
++        {"Scaling filter", "Sharpness", "Anti-aliasing (FXAA)", "Anisotropic filtering", "Window FPS limit", "VSync",
++         "FPS counter", "Stretch image"},
++        {"Sharp: bicubic with adaptive sharpening. Soft: bilinear.",
++         "Strength of the sharp filter.",
++         "Smooths jagged edges at the game's resolution, before scaling.",
++         "Sharper textures at an angle; low GPU cost.",
++         "The game makes at most 60 frames; above that the image is only repeated.",
++         "Syncs to the monitor: no tearing, slightly more latency.",
++         "Shows the game's frames per second.",
++         "Fills the whole window, no black bars (distorts the proportions)."},
++        "Sharp",
++        "Soft",
++        "Off",
++        "Unlimited",
++        "Copy the memory card",
++        "Copies the memory card as it is now (the last save made at an altar). Restore it from the launcher's Saves page.",
++        "Not available in this build",
++        "Internal resolution and widescreen are in the launcher (restart needed).",
++    };
++
++    const TextosMenu kMenuEspanol = {
++        "MENÚ DEL JUEGO",
++        "Con el menú abierto el juego no recibe controles",
++        {"Gráficos", "Trucos", "Partida"},
++        "↑↓ elegir    ←→ cambiar    Q/E pestañas    F1 / Esc cerrar",
++        {"Filtro de escalado", "Nitidez", "Antialiasing (FXAA)", "Filtro anisotrópico", "Límite de FPS de la ventana",
++         "VSync", "Contador de FPS", "Estirar imagen"},
++        {"Nítido: bicúbico con nitidez adaptativa. Suave: bilineal.",
++         "Intensidad del filtro nítido.",
++         "Suaviza los bordes dentados a la resolución del juego, antes del escalado.",
++         "Texturas más definidas en ángulo; poco coste de GPU.",
++         "El juego hace como mucho 60 cuadros; por encima solo repite la imagen.",
++         "Sincroniza con el monitor: sin tearing, algo más de retraso.",
++         "Muestra los cuadros por segundo del juego.",
++         "Llena toda la ventana, sin barras negras (deforma las proporciones)."},
++        "Nítido",
++        "Suave",
++        "Desactivado",
++        "Sin límite",
++        "Copiar la memory card",
++        "Copia la memory card como está ahora (la última partida guardada en un altar). Se restaura en la página Partidas del lanzador.",
++        "No disponible en esta versión",
++        "Resolución interna y panorámico están en el lanzador (hace falta reiniciar).",
++    };
++
++    const TextosMenu kMenuPortugues = {
++        "MENU DO JOGO",
++        "Os controles do jogo param enquanto o menu está aberto",
++        {"Gráficos", "Truques", "Save"},
++        "↑↓ escolher    ←→ mudar    Q/E abas    F1 / Esc fechar",
++        {"Filtro de escala", "Nitidez", "Antisserrilhado (FXAA)", "Filtro anisotrópico", "Limite de FPS da janela", "VSync",
++         "Contador de FPS", "Esticar imagem"},
++        {"Nítido: bicúbico com nitidez adaptativa. Suave: bilinear.",
++         "Intensidade do filtro nítido.",
++         "Suaviza bordas serrilhadas na resolução do jogo, antes da escala.",
++         "Texturas mais definidas em ângulo; custo baixo de GPU.",
++         "O jogo faz no máximo 60 quadros; acima disso só repete a imagem.",
++         "Sincroniza com o monitor: sem tearing, um pouco mais de atraso.",
++         "Mostra os quadros por segundo do jogo.",
++         "Preenche a janela inteira, sem barras pretas (distorce as proporções)."},
++        "Nítido",
++        "Suave",
++        "Desligado",
++        "Sem limite",
++        "Copiar o cartão de memória",
++        "Copia o cartão de memória como está agora (o último save feito num altar). Restaure pela página Saves do launcher.",
++        "Indisponível nesta versão",
++        "Resolução interna e widescreen ficam no launcher (exigem reiniciar).",
++    };
++
++    const TextosMenu &textosMenu()
++    {
++        static const TextosMenu *const todos[] = {&kMenuTurco, &kMenuIngles, &kMenuEspanol, &kMenuPortugues};
++        return *todos[idiomaMenu()];
+     }
+ 
+     struct Fuentes
+@@ -291,7 +462,8 @@
+             codigos.push_back(c);
+         for (int c = 160; c < 256; ++c)
+             codigos.push_back(c);
+-        for (int c : {0x011E, 0x011F, 0x0130, 0x0131, 0x015E, 0x015F, 0x2190, 0x2191, 0x2192, 0x2193, 0x2022, 0x2026})
++        for (int c : {0x011E, 0x011F, 0x0130, 0x0131, 0x015E, 0x015F, 0x2190, 0x2191, 0x2192, 0x2193, 0x2022, 0x2026,
++                       0x2039, 0x203A})
+             codigos.push_back(c);
+         for (const std::string &ruta : rutas)
+         {
+@@ -373,27 +545,43 @@
+ 
+     struct EstadoMenu
+     {
+-        int elegido = 0;
++        int pestana = PGraficos;
++        std::array<int, kNumPestanas> elegido{};
+         int teclaCierre = 0;
+         bool cursorOculto = false;
++        int fps = -1; // window FPS limit (0 = none); -1 until read from TOBIICHI_VENTANA_FPS
++        bool vsync = false;
++        std::string saveEstado;
+     };
+     EstadoMenu g_menu;
+ 
++    constexpr int kAnisos[] = {1, 2, 4, 8, 16};
++    constexpr int kNumAnisos = 5;
++    constexpr int kFpsOpciones[] = {60, 120, 144, 0};
++    constexpr int kNumFps = 4;
++
++    int filas(int pestana)
++    {
++        return pestana == PGraficos ? static_cast<int>(kNumGraficos) : pestana == PTrucos ? static_cast<int>(kNumTrucos) : 1;
++    }
++
+     struct Geometria
+     {
+-        float escala, x, y, w, cabecera, fila, pie, h;
++        float escala, x, y, w, cabecera, pestanas, fila, pie, h;
+     };
+ 
+     Geometria geometria()
+     {
+         const float sw = static_cast<float>(GetScreenWidth()), sh = static_cast<float>(GetScreenHeight());
+         Geometria g{};
+-        g.escala = std::clamp(sh / 1080.0f, 0.6f, 2.0f);
+-        g.w = std::min(sw - 32.0f, 820.0f * g.escala);
+-        g.cabecera = 96.0f * g.escala;
+-        g.fila = 64.0f * g.escala;
++        g.escala = std::clamp(sh / 1080.0f, 0.8f, 2.0f); // readable descriptions at 720p
++        g.w = std::min(sw - 32.0f, 860.0f * g.escala);
++        g.pestanas = 50.0f * g.escala;
++        g.cabecera = 96.0f * g.escala + g.pestanas;
++        g.fila = 62.0f * g.escala;
+         g.pie = 52.0f * g.escala;
+-        g.h = std::min(sh - 32.0f, g.cabecera + g.fila * static_cast<float>(kNumTrucos) + g.pie);
++        const int maximo = std::max(static_cast<int>(kNumGraficos), static_cast<int>(kNumTrucos));
++        g.h = std::min(sh - 32.0f, g.cabecera + g.fila * static_cast<float>(maximo) + g.pie);
+         g.x = std::floor((sw - g.w) * 0.5f);
+         g.y = std::floor((sh - g.h) * 0.5f);
+         return g;
+@@ -406,9 +594,145 @@
+         std::cerr << "[trucos] " << kIds[indice] << (nuevo ? " activo" : " desactivado") << std::endl;
+     }
+ 
+-    void abrir(bool escCierraJuego)
+-    {
+-        (void)escCierraJuego;
++    enum TipoFila
++    {
++        Interruptor,
++        Opcion,
++        Accion
++    };
++
++    struct Fila
++    {
++        const char *nombre;
++        std::string descripcion;
++        TipoFila tipo;
++        bool encendido;
++        std::string valor;
++        bool habilitada;
++    };
++
++    int indiceAniso()
++    {
++        const int actual = gow_vivo::aniso.load(std::memory_order_relaxed);
++        for (int i = 0; i < kNumAnisos; ++i)
++            if (kAnisos[i] >= actual)
++                return i;
++        return kNumAnisos - 1;
++    }
++
++    Fila fila(int pestana, int i)
++    {
++        const TextosMenu &m = textosMenu();
++        if (pestana == PTrucos)
++            return {textos().nombre[i], textos().descripcion[i], Interruptor, g_activo[i].load(std::memory_order_relaxed), {}, true};
++        if (pestana == PSave)
++        {
++            const bool hay = gow_vivo::copiarSave.load(std::memory_order_relaxed) != nullptr;
++            return {m.saveNombre, !g_menu.saveEstado.empty() ? g_menu.saveEstado : std::string(hay ? m.saveDesc : m.saveNoDisponible),
++                    Accion, false, {}, hay};
++        }
++        const char *nombre = m.nombre[i];
++        const char *desc = m.descripcion[i];
++        switch (i)
++        {
++        case GFiltro:
++            return {nombre, desc, Opcion, false, gow_vivo::nitido.load() ? m.nitido : m.suave, true};
++        case GNitidez:
++        {
++            const int pct = static_cast<int>(std::lround(gow_vivo::nitidez.load() / 0.5f * 100.0f));
++            return {nombre, desc, Opcion, false, std::to_string(pct) + "%", gow_vivo::nitido.load()};
++        }
++        case GFxaa:
++            return {nombre, desc, Interruptor, gow_vivo::fxaa.load(), {}, true};
++        case GAniso:
++        {
++            const int a = kAnisos[indiceAniso()];
++            return {nombre, desc, Opcion, false, a <= 1 ? std::string(m.desactivado) : std::to_string(a) + "x", true};
++        }
++        case GFps:
++            return {nombre, desc, Opcion, false, g_menu.fps == 0 ? std::string(m.sinLimite) : std::to_string(g_menu.fps) + " FPS", true};
++        case GVsync:
++            return {nombre, desc, Interruptor, g_menu.vsync, {}, true};
++        case GContador:
++            return {nombre, desc, Interruptor, gow_vivo::mostrarFps.load(), {}, true};
++        default:
++            return {nombre, desc, Interruptor, gow_vivo::estirar.load(), {}, true};
++        }
++    }
++
++    // dir: +1 / -1 from the arrow keys, 0 from Enter / click (switches toggle, choices advance, actions run).
++    void cambiar(int pestana, int i, int dir)
++    {
++        if (pestana == PTrucos)
++        {
++            alternar(i);
++            return;
++        }
++        if (pestana == PSave)
++        {
++            if (dir != 0)
++                return;
++            if (auto copiar = gow_vivo::copiarSave.load(std::memory_order_relaxed))
++                g_menu.saveEstado = copiar();
++            return;
++        }
++        const int paso = dir < 0 ? -1 : 1;
++        switch (i)
++        {
++        case GFiltro:
++            gow_vivo::nitido.store(!gow_vivo::nitido.load());
++            break;
++        case GNitidez:
++            if (gow_vivo::nitido.load())
++                gow_vivo::nitidez.store(std::clamp(gow_vivo::nitidez.load() + 0.05f * static_cast<float>(paso), 0.0f, 0.5f));
++            break;
++        case GFxaa:
++            gow_vivo::fxaa.store(!gow_vivo::fxaa.load());
++            break;
++        case GAniso:
++            gow_vivo::aniso.store(kAnisos[(indiceAniso() + paso + kNumAnisos) % kNumAnisos]);
++            break;
++        case GFps:
++        {
++            int actual = 0;
++            while (actual < kNumFps - 1 && kFpsOpciones[actual] != g_menu.fps)
++                ++actual;
++            g_menu.fps = kFpsOpciones[(actual + paso + kNumFps) % kNumFps];
++            SetTargetFPS(g_menu.fps);
++            break;
++        }
++        case GVsync:
++            g_menu.vsync = !g_menu.vsync;
++            if (g_menu.vsync)
++                SetWindowState(FLAG_VSYNC_HINT);
++            else
++                ClearWindowState(FLAG_VSYNC_HINT);
++            break;
++        case GContador:
++            gow_vivo::mostrarFps.store(!gow_vivo::mostrarFps.load());
++            break;
++        default:
++            gow_vivo::estirar.store(!gow_vivo::estirar.load());
++            break;
++        }
++        std::fprintf(stderr, "[menu] graphics: filter=%s sharpen=%.2f fxaa=%d aniso=%d fps=%d vsync=%d counter=%d stretch=%d\n",
++                     gow_vivo::nitido.load() ? "sharp" : "soft", gow_vivo::nitidez.load(), int(gow_vivo::fxaa.load()),
++                     gow_vivo::aniso.load(), g_menu.fps, int(g_menu.vsync), int(gow_vivo::mostrarFps.load()),
++                     int(gow_vivo::estirar.load()));
++    }
++
++    void abrir(int pestana)
++    {
++        gow_vivo::cargar();
++        if (g_menu.fps < 0)
++        {
++            g_menu.fps = gowVentanaFps();
++            const char *v = std::getenv("TOBIICHI_VSYNC");
++            g_menu.vsync = v && v[0] == '1';
++        }
++        if (pestana >= 0)
++            g_menu.pestana = pestana;
++        g_menu.saveEstado.clear();
+         g_menuAbierto.store(true, std::memory_order_release);
+         SetExitKey(KEY_NULL);
+         g_menu.cursorOculto = IsCursorHidden();
+@@ -461,7 +785,7 @@
+     for (int i = 0; i < kNumTrucos; ++i)
+         if (g_activo[i].load())
+             activos += std::string(activos.empty() ? "" : ",") + kIds[i];
+-    std::cerr << "[trucos] menú de trucos listo (F2); activos: " << (activos.empty() ? "ninguno" : activos) << std::endl;
++    std::cerr << "[trucos] menú del juego listo (F1, trucos con F2); activos: " << (activos.empty() ? "ninguno" : activos) << std::endl;
+ }
+ 
+ // Hilo del EE, al empezar cada VBlank: valores que se mantienen mientras el truco está activo.
+@@ -534,7 +858,9 @@
+     return g_bloqueoTrasCerrar.load(std::memory_order_acquire);
+ }
+ 
+-// Hilo principal, antes de dibujar: F2 abre y cierra; con el menú abierto, teclado, ratón y mando lo manejan.
++// Hilo principal, antes de dibujar. gow-native-pc (patch 39): F1 opens the game menu (graphics, cheats, save) where it
++// was last left, F2 opens it on the cheats; Ctrl+F1 stays with the runtime debugger. With the menu open, keyboard, mouse
++// and controller drive it.
+ void gowTrucosMenuEntrada(bool escCierraJuego)
+ {
+     if (!g_instalado.load(std::memory_order_relaxed))
+@@ -543,59 +869,92 @@
+         !IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+         g_bloqueoTrasCerrar.store(false, std::memory_order_release);
+ 
+-    // Pruebas (capturas sin teclado): TOBIICHI_TRUCOS_ABRIR_EN=<segundos> abre el menú a esa hora.
++    // Pruebas (capturas sin teclado): TOBIICHI_TRUCOS_ABRIR_EN=<segundos> abre el menú a esa hora,
++    // TOBIICHI_MENU_PESTANA=<0..2> en esa pestaña (por defecto los trucos).
+     static double abrirEn = []
+     {
+         const char *valor = std::getenv("TOBIICHI_TRUCOS_ABRIR_EN");
+         return valor ? std::atof(valor) : -1.0;
+     }();
++    const bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
++    const bool f1 = IsKeyPressed(KEY_F1) && !control;
+     const bool abierto = g_menuAbierto.load(std::memory_order_relaxed);
+     if (!abierto)
+     {
+-        const bool prueba = abrirEn >= 0.0 && GetTime() >= abrirEn;
+-        if (prueba)
++        if (abrirEn >= 0.0 && GetTime() >= abrirEn)
++        {
+             abrirEn = -1.0;
+-        if (IsKeyPressed(KEY_F2) || prueba)
+-            abrir(escCierraJuego);
++            const char *p = std::getenv("TOBIICHI_MENU_PESTANA");
++            abrir(p ? std::clamp(std::atoi(p), 0, kNumPestanas - 1) : static_cast<int>(PTrucos));
++        }
++        else if (f1)
++            abrir(-1);
++        else if (IsKeyPressed(KEY_F2))
++            abrir(PTrucos);
+         return;
+     }
+-    if (IsKeyPressed(KEY_F2) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE))
+-    {
+-        cerrar(escCierraJuego, IsKeyPressed(KEY_F2) ? KEY_F2 : IsKeyPressed(KEY_ESCAPE) ? KEY_ESCAPE : KEY_BACKSPACE);
++    if (f1 || IsKeyPressed(KEY_F2) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE))
++    {
++        cerrar(escCierraJuego, f1 ? KEY_F1 : IsKeyPressed(KEY_F2) ? KEY_F2 : IsKeyPressed(KEY_ESCAPE) ? KEY_ESCAPE : KEY_BACKSPACE);
+         return;
+     }
+-    if (IsGamepadAvailable(0) && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
++    const bool mando = IsGamepadAvailable(0);
++    if (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+     {
+         cerrar(escCierraJuego, 0);
+         g_bloqueoTrasCerrar.store(true, std::memory_order_release);
+         return;
+     }
+ 
+-    int &elegido = g_menu.elegido;
+-    const bool mando = IsGamepadAvailable(0);
++    int &pestana = g_menu.pestana;
++    if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_E) || (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)))
++        pestana = (pestana + 1) % kNumPestanas;
++    if (IsKeyPressed(KEY_Q) || (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1)))
++        pestana = (pestana + kNumPestanas - 1) % kNumPestanas;
++    const int n = filas(pestana);
++    int &elegido = g_menu.elegido[pestana];
++    elegido = std::clamp(elegido, 0, n - 1);
+     if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP) || IsKeyPressed(KEY_W) ||
+         (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP)))
+-        elegido = (elegido + kNumTrucos - 1) % kNumTrucos;
++        elegido = (elegido + n - 1) % n;
+     if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN) || IsKeyPressed(KEY_S) ||
+         (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN)))
+-        elegido = (elegido + 1) % kNumTrucos;
+-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_LEFT) ||
+-        IsKeyPressed(KEY_RIGHT) || (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)))
+-        alternar(elegido);
++        elegido = (elegido + 1) % n;
++    if (IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT) || IsKeyPressed(KEY_A) ||
++        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT)))
++        cambiar(pestana, elegido, -1);
++    if (IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT) || IsKeyPressed(KEY_D) ||
++        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT)))
++        cambiar(pestana, elegido, 1);
++    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE) ||
++        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)))
++        cambiar(pestana, elegido, 0);
+ 
+     const Geometria g = geometria();
+     const Vector2 raton = GetMousePosition();
++    const float pestanasY = g.y + g.cabecera - g.pestanas;
++    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && raton.y >= pestanasY && raton.y < pestanasY + g.pestanas &&
++        raton.x >= g.x && raton.x < g.x + g.w)
++    {
++        pestana = std::clamp(static_cast<int>((raton.x - g.x) / (g.w / kNumPestanas)), 0, kNumPestanas - 1);
++        return;
++    }
+     const float filasY = g.y + g.cabecera;
+-    if (raton.x >= g.x && raton.x < g.x + g.w && raton.y >= filasY && raton.y < filasY + g.fila * static_cast<float>(kNumTrucos))
+-    {
+-        const int sobre = std::clamp(static_cast<int>((raton.y - filasY) / g.fila), 0, kNumTrucos - 1);
++    if (raton.x >= g.x && raton.x < g.x + g.w && raton.y >= filasY && raton.y < filasY + g.fila * static_cast<float>(n))
++    {
++        const int sobre = std::clamp(static_cast<int>((raton.y - filasY) / g.fila), 0, n - 1);
+         const Vector2 delta = GetMouseDelta();
+         if (delta.x != 0.0f || delta.y != 0.0f)
+             elegido = sobre;
+         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+         {
+             elegido = sobre;
+-            alternar(sobre);
++            cambiar(pestana, sobre, 0);
++        }
++        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
++        {
++            elegido = sobre;
++            cambiar(pestana, sobre, -1);
+         }
+     }
+ }
+@@ -606,61 +965,107 @@
+     if (!g_menuAbierto.load(std::memory_order_relaxed))
+         return;
+     const Fuentes &f = fuentes();
+-    const Textos &t = textos();
++    const TextosMenu &m = textosMenu();
+     const Geometria g = geometria();
+     const float s = g.escala;
+-
+-    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{6, 3, 2, 150});
++    const int pestana = g_menu.pestana;
++
++    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{6, 3, 2, 160});
+     const Rectangle panel{g.x, g.y, g.w, g.h};
+-    DrawRectangleRec(panel, Color{20, 12, 9, 238});
++    DrawRectangleRec(panel, Color{20, 12, 9, 240});
+     DrawRectangleGradientV(static_cast<int>(g.x), static_cast<int>(g.y), static_cast<int>(g.w), static_cast<int>(g.cabecera),
+-                           Color{90, 13, 9, 200}, Color{20, 12, 9, 0});
++                           Color{90, 13, 9, 190}, Color{20, 12, 9, 0});
+     DrawRectangleLinesEx(panel, std::max(1.0f, 1.5f * s), kBorde);
+     DrawRectangle(static_cast<int>(g.x), static_cast<int>(g.y), static_cast<int>(g.w), std::max(2, static_cast<int>(3.0f * s)), kOro);
+ 
+     const float margen = 28.0f * s;
+     const float tamTitulo = 30.0f * s, tamSub = 15.0f * s;
+-    texto(f.negrita, t.titulo, g.x + margen, g.y + 22.0f * s, tamTitulo, kOroClaro);
+-    texto(f.normal, t.subtitulo, g.x + margen, g.y + 22.0f * s + tamTitulo + 6.0f * s, tamSub, kTextoTenue);
+-    const char *marca = "TOBIICHI";
+-    texto(f.negrita, marca, g.x + g.w - margen - ancho(f.negrita, marca, 14.0f * s), g.y + 30.0f * s, 14.0f * s, kOro);
++    texto(f.negrita, m.titulo, g.x + margen, g.y + 22.0f * s, tamTitulo, kOroClaro);
++    texto(f.normal, m.subtitulo, g.x + margen, g.y + 22.0f * s + tamTitulo + 6.0f * s, tamSub, kTextoTenue);
++
++    // tabs
++    const float pestanasY = g.y + g.cabecera - g.pestanas;
++    const float anchoPestana = g.w / static_cast<float>(kNumPestanas);
++    const float tamPestana = 18.0f * s;
++    for (int p = 0; p < kNumPestanas; ++p)
++    {
++        const float px = g.x + anchoPestana * static_cast<float>(p);
++        const bool activa = p == pestana;
++        const Font &fuente = activa ? f.negrita : f.normal;
++        const float tw = ancho(fuente, m.pestanas[p], tamPestana);
++        texto(fuente, m.pestanas[p], px + (anchoPestana - tw) * 0.5f, pestanasY + (g.pestanas - tamPestana) * 0.5f - 2.0f * s,
++              tamPestana, activa ? kOroClaro : kTextoSuave);
++        if (activa)
++            DrawRectangleRec(Rectangle{px + anchoPestana * 0.2f, pestanasY + g.pestanas - 3.0f * s, anchoPestana * 0.6f,
++                                       std::max(2.0f, 3.0f * s)},
++                             kOro);
++    }
+     DrawLineEx(Vector2{g.x + margen, g.y + g.cabecera - 1.0f}, Vector2{g.x + g.w - margen, g.y + g.cabecera - 1.0f},
+                std::max(1.0f, s), kBorde);
+ 
+-    const float tamNombre = 21.0f * s, tamDesc = 15.0f * s;
+-    const float interruptorW = 52.0f * s, interruptorH = 26.0f * s;
+-    for (int i = 0; i < kNumTrucos; ++i)
++    const float tamNombre = 20.0f * s, tamDesc = 14.5f * s, tamValor = 17.0f * s;
++    const float interruptorW = 52.0f * s, interruptorH = 26.0f * s, valorW = 190.0f * s;
++    const int n = filas(pestana);
++    for (int i = 0; i < n; ++i)
+     {
+         const float fy = g.y + g.cabecera + g.fila * static_cast<float>(i);
+         if (fy + g.fila > g.y + g.h - g.pie + 1.0f)
+             break;
+-        const bool encendido = g_activo[i].load(std::memory_order_relaxed);
+-        const bool sel = i == g_menu.elegido;
++        const Fila fl = fila(pestana, i);
++        const bool sel = i == g_menu.elegido[pestana];
+         if (sel)
+         {
+             DrawRectangleRec(Rectangle{g.x + 1.0f, fy, g.w - 2.0f, g.fila}, Color{58, 30, 18, 200});
+             DrawRectangleRec(Rectangle{g.x + 1.0f, fy, std::max(3.0f, 4.0f * s), g.fila}, kOro);
+         }
++        const float controlW = fl.tipo == Interruptor ? interruptorW : valorW;
+         const float textoX = g.x + margen;
+-        const float textoMax = g.w - margen * 2.0f - interruptorW - 20.0f * s;
++        const float textoMax = g.w - margen * 2.0f - controlW - 20.0f * s;
+         const float bloque = tamNombre + 6.0f * s + tamDesc;
+         const float ty = fy + (g.fila - bloque) * 0.5f;
+-        texto(f.negrita, t.nombre[i], textoX, ty, tamNombre, encendido ? kOroClaro : (sel ? kTexto : kTextoSuave));
+-        const std::string desc = ajustar(f.normal, t.descripcion[i], tamDesc, textoMax);
++        const Color colorNombre = !fl.habilitada ? kTextoTenue : fl.encendido ? kOroClaro : (sel ? kTexto : kTextoSuave);
++        texto(f.negrita, fl.nombre, textoX, ty, tamNombre, colorNombre);
++        const std::string desc = ajustar(f.normal, fl.descripcion.c_str(), tamDesc, textoMax);
+         texto(f.normal, desc.c_str(), textoX, ty + tamNombre + 6.0f * s, tamDesc, kTextoTenue);
+ 
+-        const Rectangle pista{g.x + g.w - margen - interruptorW, fy + (g.fila - interruptorH) * 0.5f, interruptorW, interruptorH};
+-        DrawRectangleRounded(pista, 1.0f, 12, encendido ? Color{212, 168, 87, 255} : Color{45, 30, 22, 255});
+-        DrawRectangleRoundedLinesEx(pista, 1.0f, 12, std::max(1.0f, s), encendido ? kOroClaro : kBorde);
+-        const float radio = interruptorH * 0.5f - 3.0f * s;
+-        const float cx = encendido ? pista.x + pista.width - interruptorH * 0.5f : pista.x + interruptorH * 0.5f;
+-        DrawCircleV(Vector2{cx, pista.y + interruptorH * 0.5f}, radio, encendido ? Color{29, 15, 7, 255} : kTextoSuave);
+-
+-        if (i + 1 < kNumTrucos)
++        if (fl.tipo == Interruptor)
++        {
++            const Rectangle pista{g.x + g.w - margen - interruptorW, fy + (g.fila - interruptorH) * 0.5f, interruptorW, interruptorH};
++            DrawRectangleRounded(pista, 1.0f, 12, fl.encendido ? Color{212, 168, 87, 255} : Color{45, 30, 22, 255});
++            DrawRectangleRoundedLinesEx(pista, 1.0f, 12, std::max(1.0f, s), fl.encendido ? kOroClaro : kBorde);
++            const float radio = interruptorH * 0.5f - 3.0f * s;
++            const float cx = fl.encendido ? pista.x + pista.width - interruptorH * 0.5f : pista.x + interruptorH * 0.5f;
++            DrawCircleV(Vector2{cx, pista.y + interruptorH * 0.5f}, radio, fl.encendido ? Color{29, 15, 7, 255} : kTextoSuave);
++        }
++        else
++        {
++            const float altoCaja = 34.0f * s;
++            const Rectangle caja{g.x + g.w - margen - valorW, fy + (g.fila - altoCaja) * 0.5f, valorW, altoCaja};
++            DrawRectangleRounded(caja, 0.3f, 8, Color{34, 21, 15, 255});
++            DrawRectangleRoundedLinesEx(caja, 0.3f, 8, std::max(1.0f, s), sel && fl.habilitada ? kOro : kBorde);
++            const Color colorValor = fl.habilitada ? (sel ? kOroClaro : kTexto) : kTextoTenue;
++            const float vy = caja.y + (caja.height - tamValor) * 0.5f - 1.0f * s;
++            if (fl.tipo == Opcion)
++            {
++                texto(f.normal, "‹", caja.x + 10.0f * s, vy, tamValor, kTextoSuave);
++                texto(f.normal, "›", caja.x + caja.width - 18.0f * s, vy, tamValor, kTextoSuave);
++            }
++            const char *valor = fl.tipo == Opcion ? fl.valor.c_str() : "Enter";
++            const float vw = ancho(f.negrita, valor, tamValor);
++            texto(f.negrita, valor, caja.x + (caja.width - vw) * 0.5f, vy, tamValor, colorValor);
++        }
++        if (i + 1 < n)
+             DrawLineEx(Vector2{g.x + margen, fy + g.fila}, Vector2{g.x + g.w - margen, fy + g.fila}, 1.0f, Color{61, 38, 25, 160});
++    }
++    if (pestana != PTrucos)
++    {
++        const float notaY = g.y + g.cabecera + g.fila * static_cast<float>(n) + 14.0f * s;
++        if (notaY + tamDesc < g.y + g.h - g.pie)
++            texto(f.normal, ajustar(f.normal, m.nota, tamDesc, g.w - margen * 2.0f).c_str(), g.x + margen, notaY, tamDesc,
++                  kTextoTenue);
+     }
+ 
+     const float pieY = g.y + g.h - g.pie;
+     DrawLineEx(Vector2{g.x + margen, pieY}, Vector2{g.x + g.w - margen, pieY}, std::max(1.0f, s), kBorde);
+-    texto(f.normal, t.ayuda, g.x + margen, pieY + (g.pie - tamDesc) * 0.5f, tamDesc, kTextoSuave);
++    texto(f.normal, m.ayuda, g.x + margen, pieY + (g.pie - tamDesc) * 0.5f, tamDesc, kTextoSuave);
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+@@ -2,6 +2,7 @@
+ #include "runtime/gs/gs_host_present.h"
+ #include "rlgl.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/gow_ajustes_vivo.h"
+ #include "runtime/ps2_perf.h"
+ #include "ps2_log.h"
+ 
+@@ -114,18 +115,18 @@
+ )GLSL";
+ 
+     Shader g_scaler{};
++    // gow-native-pc (patch 39): FXAA runs first at the game's resolution into this target, then the scaler pass maps
++    // it onto the window. Before, FXAA returned early in the one pass and the sharp scaler never ran with it on.
++    RenderTexture2D g_fxaaTarget{};
+     int g_scalerSrcSize = -1, g_scalerSharpen = -1, g_scalerPlain = -1;
+     int g_scalerFxaa = -1; // GOW-Port: TOBIICHI_FXAA
+     bool g_scalerTried = false;
+ 
+     bool scalerEnabled()
+     {
+-        // GOW-Port: con TOBIICHI_FXAA=1 el sombreador hace falta también con el estirado bilineal.
+-        static const bool on = [] {
+-            const char *v = std::getenv("GOW_SCALER"), *fxaa = std::getenv("TOBIICHI_FXAA");
+-            return !(v && std::strcmp(v, "bilinear") == 0) || (fxaa && fxaa[0] == '1');
+-        }();
+-        return on;
++        // gow-native-pc (patch 39): always loaded. The in-game menu (F1) switches the filter and FXAA while playing;
++        // its "plain" mode is the one bilinear tap the shader-less path drew.
++        return true;
+     }
+ 
+     Shader *scalerShader()
+@@ -359,20 +360,56 @@
+     Shader *scaler = scalerShader();
+     if (!scaler)
+         SetTextureFilter(selected.texture, TEXTURE_FILTER_BILINEAR);
++    Texture2D shown = selected.texture;
++    Rectangle shownSource = source;
+     if (scaler)
+     {
++        gow_vivo::cargar();
++        const int w = static_cast<int>(sourceWidth), h = static_cast<int>(sourceHeight);
++        if (gow_vivo::fxaa.load(std::memory_order_relaxed) && gow_vivo::nitido.load(std::memory_order_relaxed) && magnified)
++        {
++            if (g_fxaaTarget.id == 0u || g_fxaaTarget.texture.width != w || g_fxaaTarget.texture.height != h)
++            {
++                if (g_fxaaTarget.id != 0u)
++                    UnloadRenderTexture(g_fxaaTarget);
++                g_fxaaTarget = LoadRenderTexture(w, h);
++            }
++            if (g_fxaaTarget.id != 0u)
++            {
++                const float size[2] = {sourceWidth, sourceHeight};
++                const float zero = 0.0f, one = 1.0f;
++                SetShaderValue(*scaler, g_scalerSrcSize, size, SHADER_UNIFORM_VEC2);
++                SetShaderValue(*scaler, g_scalerSharpen, &zero, SHADER_UNIFORM_FLOAT);
++                SetShaderValue(*scaler, g_scalerPlain, &one, SHADER_UNIFORM_FLOAT);
++                SetShaderValue(*scaler, g_scalerFxaa, &one, SHADER_UNIFORM_FLOAT);
++                SetTextureFilter(selected.texture, TEXTURE_FILTER_BILINEAR);
++                BeginTextureMode(g_fxaaTarget);
++                BeginShaderMode(*scaler);
++                DrawTexturePro(selected.texture, source, Rectangle{0.0f, 0.0f, sourceWidth, sourceHeight}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++                EndShaderMode();
++                EndTextureMode();
++                shown = g_fxaaTarget.texture;
++                shownSource = Rectangle{0.0f, 0.0f, sourceWidth, -sourceHeight}; // render textures are stored bottom-up
++            }
++        }
++    }
++    if (scaler)
++    {
+         const float size[2] = {sourceWidth, sourceHeight};
+-        static const float sharpen = [] { const char *v = std::getenv("GOW_SHARPEN"); return v ? static_cast<float>(std::atof(v)) : 0.5f; }();
++        // gow-native-pc (patch 39): GOW_SCALER / GOW_SHARPEN / TOBIICHI_FXAA as the in-game menu currently has them
++        gow_vivo::cargar();
++        const bool sharpScaler = gow_vivo::nitido.load(std::memory_order_relaxed);
++        const float sharpen = gow_vivo::nitidez.load(std::memory_order_relaxed);
+         SetShaderValue(*scaler, g_scalerSrcSize, size, SHADER_UNIFORM_VEC2);
+         SetShaderValue(*scaler, g_scalerSharpen, &sharpen, SHADER_UNIFORM_FLOAT);
+-        const float plain = magnified ? 0.0f : 1.0f;
++        const float plain = magnified && sharpScaler ? 0.0f : 1.0f;
+         SetShaderValue(*scaler, g_scalerPlain, &plain, SHADER_UNIFORM_FLOAT);
+-        static const float fxaa = [] { const char *v = std::getenv("TOBIICHI_FXAA"); return v && v[0] == '1' ? 1.0f : 0.0f; }();
++        const float fxaa = shown.id == selected.texture.id && gow_vivo::fxaa.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+         SetShaderValue(*scaler, g_scalerFxaa, &fxaa, SHADER_UNIFORM_FLOAT);
+-        SetTextureFilter(selected.texture, TEXTURE_FILTER_BILINEAR);
++        SetTextureFilter(shown, TEXTURE_FILTER_BILINEAR);
+         BeginShaderMode(*scaler);
+     }
+-    DrawTexturePro(selected.texture, source, destination, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++    DrawTexturePro(shown, shownSource, destination, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+     if (scaler)
+         EndShaderMode();
+     gowCuadroDibujar(destination.x, destination.y, destination.width, destination.height); // GOW-Port
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1,5 +1,6 @@
+ // GOW-Port: render-target GS renderer, see include/runtime/gs/gs_hw_backend.h.
+ #include "runtime/gs/gs_hw_backend.h"
++#include "runtime/gow_ajustes_vivo.h"
+ #include "gs_texture_store.h"
+ #include "runtime/gs/gs_swizzle.h"
+ #include "gs_gl.h"
+@@ -2260,8 +2261,10 @@
+             g.Uniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
+             g.Uniform2f(locRtClamp, src && (c.clamp & 3u) == 1u ? 1.0f : 0.0f, src && ((c.clamp >> 2) & 3u) == 1u ? 1.0f : 0.0f);
+             g.Uniform1f(locPxScale, scale);
+-            // GOW_ANISO=2..16: anisotropic filtering of uploaded textures (render targets are read as the GS reads them)
+-            static const int aniso = [] { const char *v = std::getenv("GOW_ANISO"); return v ? std::clamp(std::atoi(v), 1, 16) : 1; }();
++            // GOW_ANISO=2..16: anisotropic filtering of uploaded textures (render targets are read as the GS reads them).
++            // gow-native-pc (patch 39): the in-game menu (F1) may change it while playing.
++            gow_vivo::cargar();
++            const int aniso = gow_vivo::aniso.load(std::memory_order_relaxed);
+             g.Uniform1i(locAniso, !(src || rsrc || zsrc) && s.linearFilter ? aniso : 1);
+             g.Uniform1i(locReinterp, rsrc ? 1 : 0);
+             if (rsrc)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+@@ -1,4 +1,5 @@
+ #include "ps2_debug_panel.h"
++#include "runtime/gow_ajustes_vivo.h"
+ #include "ps2_runtime.h"
+ #include "ps2_runtime_macros.h"
+ #include "ps2_log.h"
+@@ -2356,6 +2357,8 @@
+     {
+         rlImGuiSetup(true);
+         m_initialized = true;
++        // gow-native-pc (patch 39): the in-game menu (F1 > Save) copies the card through the same code as this panel
++        gow_vivo::copiarSave.store(+[]() -> std::string { return snapshotCard(std::string()); });
+     }
+ #endif
+ }
+@@ -2379,7 +2382,8 @@
+         return;
+     }
+ 
+-    if (IsKeyPressed(KEY_F1))
++    // gow-native-pc (patch 39): F1 alone opens the game menu (gow_trucos.cpp); the debugger is Ctrl+F1
++    if (IsKeyPressed(KEY_F1) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)))
+     {
+         toggleVisible();
+     }

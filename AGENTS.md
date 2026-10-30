@@ -82,6 +82,12 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   `python -I tools/test/loading-progress.py <Qt SDK bin/qml.exe> <llvm-mingw bin>` (real QML, fake pipeline signals).
 - **languages.json** (`data/<id>/`): `{game, title, recompile_elf, languages: [{language, label, edition, quality,
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
+- **In-game menu (patch 39)**: F1 opens the game menu (`gow_trucos.cpp`: Graphics, Cheats, Save tabs), F2 opens it on
+  the cheats, Ctrl+F1 opens the ImGui runtime debugger. Graphics changes are live for the session through the header-only
+  `runtime/gow_ajustes_vivo.h` (read once from GOW_SCALER, GOW_SHARPEN, TOBIICHI_FXAA, GOW_ANISO, TOBIICHI_ASPECTO,
+  TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings. TOBIICHI_PANTALLA = completa | sin_bordes |
+  ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a
+  runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16).
   GOW_VU1N_X64=1 (in-process x86-64 VU1 JIT, engine/patches/18, experimental: the Performance tab's "Compile new areas
@@ -93,7 +99,7 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   GOW_PERF_FRAME_PC (the profile's [diagnostics].frame_pc, read by InstallerBackend::diagnosticsFramePc) is set with the
   Performance tab's diagnostics toggle, next to GOW_AUDIO_STATS / GOW_IOP_DRIFT / GOW_VU1N_DIAG / GOW_PERF_DIAG.
   GOW_MC0 (the memory card image: Mcd001.ps2 next to the ELF unless already set) and GOW_SAVES_DIR (data/<id>/saves):
-  F1 > Saves in game copies the card to GOW_SAVES_DIR/<yyyyMMdd-HHmmss>/{Mcd001.ps2, save.json} (patch 26); the Saves
+  F1 > Save in game (Ctrl+F1 > Saves in the debugger) copies the card to GOW_SAVES_DIR/<yyyyMMdd-HHmmss>/{Mcd001.ps2, save.json} (patch 26); the Saves
   tab (PaginaPartidas.qml, Lanzador::partidas/guardarPartida/importarPartida/restaurarPartida/borrarPartida) lists,
   makes, imports, deletes and restores copies. save.json: {label, time, source: F1|launcher|import|backup, card, bytes}.
   A restore needs the game closed and first keeps the current card as a "backup" copy. There are no savestates: a copy

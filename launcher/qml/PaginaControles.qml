@@ -200,9 +200,21 @@ ScrollView {
     }
 
     ColumnLayout {
+        id: columna
         width: raiz.availableWidth
         spacing: 0
 
+        // Keyboard players: the full key list is below the controller's; jump straight to it.
+        Fila {
+            titulo: Tema.t("tecladoAtajo")
+            descripcion: mando.conectado ? Tema.t("tecladoAtajoMando") : Tema.t("tecladoAtajoDesc")
+            BotonSecundario {
+                anchors.right: parent.right
+                text: Tema.t("tecladoAtajoBoton")
+                onClicked: raiz.contentItem.contentY = Math.min(cabeceraTeclado.mapToItem(columna, 0, 0).y - 8,
+                                                                 Math.max(0, columna.height - raiz.height))
+            }
+        }
         Fila {
             titulo: Tema.t("mandoEsquema")
             descripcion: Tema.t("mandoEsquemaDesc")
@@ -284,6 +296,7 @@ ScrollView {
         }
 
         RowLayout {
+            id: cabeceraTeclado
             Layout.fillWidth: true
             Layout.topMargin: 22
             spacing: 12

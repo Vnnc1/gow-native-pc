@@ -419,8 +419,11 @@ bool Lanzador::iniciar(const QVariantMap &a)
     else
         entorno.remove(QStringLiteral("GOW_VU1N_X64"));
     // Window.
-    const bool completa = a.value(QStringLiteral("modoPantalla")).toString() == QStringLiteral("completa");
-    entorno.insert(QStringLiteral("TOBIICHI_PANTALLA"), completa ? QStringLiteral("completa") : QStringLiteral("ventana"));
+    // completa: exclusive full screen; sin_bordes: borderless window over the monitor (capture and scaling tools see it,
+    // runtime patch 39); anything else: a window.
+    const QString modo = a.value(QStringLiteral("modoPantalla")).toString();
+    entorno.insert(QStringLiteral("TOBIICHI_PANTALLA"), modo == QStringLiteral("completa") || modo == QStringLiteral("sin_bordes")
+                                                            ? modo : QStringLiteral("ventana"));
     entorno.insert(QStringLiteral("TOBIICHI_ANCHO"), QString::number(a.value(QStringLiteral("ancho")).toInt()));
     entorno.insert(QStringLiteral("TOBIICHI_ALTO"), QString::number(a.value(QStringLiteral("alto")).toInt()));
     entorno.insert(QStringLiteral("TOBIICHI_TITULO"), QStringLiteral("God of War"));

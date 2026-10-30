@@ -17,8 +17,9 @@ def main():
     chunks = [a.header + "\n\n"]
     for name in a.files:
         old, new = a.baseline / name, a.runtime / name
-        before = old.read_text().splitlines(keepends=True) if old.exists() else []
-        after = new.read_text().splitlines(keepends=True)
+        # Runtime sources are UTF-8 (Spanish comments); the Windows default code page cannot decode them.
+        before = old.read_text(encoding="utf-8").splitlines(keepends=True) if old.exists() else []
+        after = new.read_text(encoding="utf-8").splitlines(keepends=True)
         if before == after:
             continue
         chunks.append(f"diff --git a/{name} b/{name}\n")
