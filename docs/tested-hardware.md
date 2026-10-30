@@ -408,6 +408,76 @@ Both exit normally; after startup, 17 five-second windows each have zero missing
 The hatch and sailor scene have not been reproduced; this is not an all-audio-bugs-fixed claim.
 See [audio investigation and compatibility plan](research/audio-standalone-mods-2026-10-26.md).
 
+## Worker synchronization and task replay (2026-10-29)
+
+Original checkout `C:\Users\dzvini\Documents\gow-claude\gow-native-pc`, Xeon E5-2666 v3, RX 580 2048SP,
+Windows 10 22H2, approximately 16 GiB RAM. Fresh Release runner with patches 01–37, Clang 23.1.4,
+portable x86-64-v2, ThinLTO off, no PGO or captured VU1 AOT corpus. JIT enabled. The USA disc was prepared into
+this checkout; no other installation or player card was modified.
+
+Runner SHA-256: `e820daccd23900ddbccad3c28239c57d0d9782c75d4456d7d7a8aec78a518233`.
+ELF SHA-256: `ec9397d252f14d4412daffaad6be1f1931769e56222b5dbb9b39a947fc8ad71c`.
+
+Six 90-second visible runs with audio enabled, fixed 1280×720 window, internal scale 1, dynamic scale/FXAA/VSync off,
+60 Hz host cap, profile-supplied scripted input and a new private card per run. Each average uses nine complete
+five-second windows after 40 seconds of warm-up. Detailed timing and capture were disabled in this comparison.
+
+| Order | Large-VIF1 barrier | Guest FPS | Median of window p95 intervals (ms) |
+| --- | --- | --- | --- |
+| 1 | On | 46.36 | 23.99 |
+| 2 | Off | 43.81 | 24.94 |
+| 3 | Off | 44.98 | 24.99 |
+| 4 | On | 42.18 | 29.15 |
+| 5 | On | 40.58 | 28.18 |
+| 6 | Off | 40.56 | 29.11 |
+
+Mean of the three runs: **43.04 FPS on, 43.11 FPS off** (off/on difference approximately +0.18%).
+This does not establish a useful barrier speedup or regression: run variation is much larger, and real-time inputs
+do not ensure identical simulation/scene trajectories. The existing default remains unchanged. This compares
+patch 33's setting within one new binary, **not** patches 36–37 against an older binary. It cannot be compared
+directly with the user's earlier 2× dynamic-resolution session. Stable 60 guest FPS is not achieved.
+
+All six runs reached `state=11 levelReady=1`, exited 0 and stopped gracefully through their own collector.
+Audio-device initialization succeeded. No post-warm-up interval exceeded 100 ms in the recorded windows; this does
+not erase startup stalls or prove later-scene pacing. Evidence: `data/gow1/logs/worker-ab-fps-20261029/summary.json`.
+
+Full `verify` passed: pipeline, guest calls, 81 memory tests, 68 codegen tests, frame metrics, worker/stage waits
+and VU1 differential cases. Focused replay tests passed again after the final timing refinements, including an
+XGKICK fixture, capture noninterference, all five replay modes, invalid input, overwrite refusal and deliberate
+baseline mismatch. The deployed collector passed all eight tests. Game and Qt launcher builds completed.
+Contracts and reproduction: [worker waits and task replay](research/worker-sync-task-replay.md).
+
+Two separate 90-second detailed runs also reached gameplay and exited 0. With the barrier on, its 3,817 calls
+observed zero busy worker/stage waits; aggregate overhead was 0.482 ms worker-side and 0.390 ms stage-side across
+the whole session. MMIO aggregates observed one worker wait and two stage waits in each setting, under 5 ms combined
+per session. These measured sites are not the dominant waits in this route; they do not cover every guest scheduler
+or presentation wait. Post-warm-up five-second windows averaged 3,791/3,805 ms in the VU scope (on/off),
+1,638/1,574 ms EE and 2,276/1,968 ms GS. Scopes can overlap across threads and include instrumentation overhead;
+do not sum them into a frame budget. Both runs ended with 623 compiled JIT blocks, zero unsupported blocks and
+zero reported native misses. Early diagnostic windows recorded up to two lane-check failures, which use the existing
+despeculation/fallback path; final windows had zero. Post-warm-up audio windows reported zero missing/dropped samples;
+audible quality was not independently assessed. Evidence: `data/gow1/logs/worker-ab-timing-20261029/`.
+
+The separate 100-second capture run recorded 128 fresh MSCAL tasks (4,284,416 bytes), stride 256 after a 40-second
+delay, spanning approximately 44.2–45.0 seconds of collector time. It exited 0 without forced termination.
+The game-rendered 50-second image showed ship combat, Kratos, enemies, textures and HUD. The corpus contains
+78 microcode hashes and entry PCs 0, 24 and 48; it is a short local sample, not whole-level coverage.
+
+All 128 tasks matched their corresponding captured baseline in hybrid, JIT, helper, SSE and exact replay, with
+five warm repetitions after the first execution. Every sample used native blocks in the four native modes.
+All 128 native baselines differ from their exact baselines: this validates repeatability within each backend,
+**not** native/exact bit equivalence. Existing procedural differential checks remain a separate gate.
+This build has no captured AOT corpus, so hybrid replay primarily exercises JIT, not a new AOT coverage claim.
+
+Median of per-task warm execution medians: hybrid 9.50 us, JIT 9.00 us, helper 22.70 us, SSE 9.45 us, exact
+180.40 us. These isolated timings exclude input reconstruction, hashing and final pipeline flush; they are not
+FPS gains or an unbiased workload profile. The slowest JIT sample was record 1, PC 24, code hash
+`0449e3d7d30cee7d`, 217.4 us warm and 6,205 native blocks. The corpus/ranking is a starting point for investigating
+that task, not enough evidence to replace its algorithm. No hand-written native task replacement is enabled.
+Evidence: `data/gow1/logs/worker-task-capture-20261029/` and `worker-task-replay-20261029/summary.json`.
+Captures remain local and excluded from exports. All 43 runtime patches reproduced 66 patched files from the
+pinned tree using a temporary index; the developer's runtime index was unchanged.
+
 ## Reported by the projects this builds on (not re-tested here)
 
 | Machine | Code | Reported result | Source |

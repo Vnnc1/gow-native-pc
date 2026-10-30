@@ -491,7 +491,7 @@ bool Lanzador::iniciar(const QVariantMap &a)
     // Frame-only accounting avoids the expensive per-call timing scopes in normal play.
     entorno.insert(QStringLiteral("GOW_PERF_DIAG"), a.value(QStringLiteral("diagnostics"), false).toBool() ? QStringLiteral("1") : QStringLiteral("frames"));
     entorno.insert(QStringLiteral("GOW_FRAME_DIAG"), QStringLiteral("1"));
-    for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"), QStringLiteral("GOW_VU1N_DIAG")}) {
+    for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"), QStringLiteral("GOW_VU1N_DIAG"), QStringLiteral("GOW_SYNC_DIAG")}) {
         if (a.value(QStringLiteral("diagnostics"), false).toBool()) entorno.insert(key, QStringLiteral("1"));
         else entorno.remove(key);
     }

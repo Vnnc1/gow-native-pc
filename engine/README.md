@@ -43,3 +43,11 @@
 | 29d-native-memory-regressions | Restore the isolated memory suite against native DMA completion and real texture-store/primitive-submission contracts; integrated into the ISO-free `verify` stage | this project |
 | 29e-scratchpad-chain-completion | Completed SPR_FROM/SPR_TO chains keep STR cleared instead of restoring the busy bit; retain copied bytes, mode/direction and one completion | this project |
 | 29f-dma-submission-metrics | Count DMA submissions once across MMIO/HLE, empty transfers and scratchpad; 80 memory tests pass with 29d/29e | this project |
+| 30-mem-fast-path | Inline RDRAM mirror classification while preserving scratchpad/MMIO and scalar boundary behavior | this project |
+| 31-build-thinlto | Explicit opt-in Clang ThinLTO; Release symbol visibility | this project |
+| 32-xeon-avx2-math-flags | Disable host math errno/traps; preserve explicit portable/v3 CPU selection, without fast-math | this project |
+| 33-vu1-early-finish | Bound large VIF1 submissions with a per-instance barrier; explicit opt-out for measurement | this project |
+| 34-vu1-chain-lite | Preserve accounting and timing semantics on the eligible VU1 self-chain fast path | this project |
+| 35-vu1-selfloop | Equivalent generated C++ and x64 JIT self-loops, including budget/depth exits | this project |
+| 36-worker-stage-wait-metrics | Bounded opt-in worker/GS-stage wait attribution, including stage-only stalls; collector integration | this project |
+| 37-vu1-isolated-task-replay | Local bounded MSCAL capture and standalone regression replay with independent native/exact baselines; no FPS gain claimed |

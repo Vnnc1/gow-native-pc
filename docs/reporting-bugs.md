@@ -56,6 +56,13 @@ page faults, cumulative I/O byte counts, available system RAM and AC/battery sta
 There is no GPU utilization, VRAM, temperature or clock-speed sensor collection yet. A quiet log or a matching warning
 word is a lead to investigate, not proof of a hang or defect; even a line saying "0 errors" may match the warning filter.
 
+Detailed mode also enables `[gow-sync]` worker/GS-stage wall-time aggregates. Site 0 is the large-VIF1 barrier, site 1
+is MMIO and site 2 is other explicit synchronization. `worker_ms` and `stage_ms` are sequential portions of the wait,
+including locking overhead, not GPU timings. `stage_waits` can be nonzero while `worker_waits` is zero. Intervals are
+approximately five seconds with a partial final flush. `[gow-sync-config]` reports effective barrier/worker/timing
+settings, so an omitted environment override is not mistaken for a disabled feature. These metrics are opt-in.
+VU1 task corpora are separate local research files and are never included in exported player reports.
+
 The source/configuration snapshot describes files at launch. Local changes may not have been compiled; use
 `runner_sha256` to distinguish actual binaries. Reports are written atomically at each heartbeat and exit. A remaining
 `running`/`starting` state with a stale heartbeat indicates interrupted collection or an incomplete live snapshot;

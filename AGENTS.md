@@ -225,6 +225,14 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 ## Direct launch and diagnostics
 
+Patches 36–37 add opt-in `GOW_SYNC_DIAG=1` worker/GS-stage wait aggregates and bounded isolated MSCAL task replay.
+`tools/test/worker-ab.py` separates FPS, intrusive timing and capture modes; it uses private cards and stops only its
+own child. `tools/test/vu1-task-replay.py` validates local task corpora with `gow_vu1_tasks` from the verify build.
+Task corpora contain game-derived code/data: keep them under ignored data, never package them or add them to the
+collector export allowlist. Resume/MSCNT state is not captured. Native and exact replay match separate baselines;
+their digests need not match each other. Timing excludes reconstruction/hashing/final flush and is not gameplay FPS. Details and commands:
+`docs/research/worker-sync-task-replay.md`. Preserve worker/stage self-wait guards and the barrier's existing default.
+
 The pipeline creates `gow-native.boot` beside the built runner; the launcher atomically refreshes it on play.
 It records the selected ELF and runtime-prefixed environment variables only. No-argument runner launches restore it
 and write `standalone.log` beside the executable (patch 25). Never package this machine-specific profile.

@@ -150,7 +150,7 @@ public:
             ++warningLines;
             if (warningLines <= 1000) event({{"type", "runtime_warning_candidate"}, {"text", text.left(2048)}});
         }
-        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
+        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-sync|gow-sync-config|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
         const auto match = tag.match(text);
         if (match.hasMatch()) {
             QJsonObject sample{{"type", "runtime"}, {"tag", match.captured(1)}, {"elapsed_ms", lastOutput}};
@@ -365,7 +365,7 @@ int SessionDiagnostics::run(const QStringList &args)
     QFile cache(QFileInfo(args[1]).dir().absoluteFilePath("../CMakeCache.txt"));
     if (cache.open(QIODevice::ReadOnly)) {
         QJsonObject build;
-        const QStringList allowed{"CMAKE_BUILD_TYPE", "CMAKE_CXX_FLAGS", "CMAKE_CXX_FLAGS_RELEASE", "PS2X_RELEASE_LTCG", "PS2X_RELEASE_PDB", "PS2X_PGO_MODE"};
+        const QStringList allowed{"CMAKE_BUILD_TYPE", "CMAKE_CXX_FLAGS", "CMAKE_CXX_FLAGS_RELEASE", "PS2X_RELEASE_LTCG", "PS2X_RELEASE_PDB", "PS2X_PGO_MODE", "PS2X_CPU_ARCH"};
         for (const auto &line : QString::fromUtf8(cache.read(2 * 1024 * 1024)).split('\n')) {
             const auto colon = line.indexOf(':'); const auto equals = line.indexOf('=');
             if (colon > 0 && equals > colon && allowed.contains(line.left(colon))) build[line.left(colon)] = redact(line.mid(equals + 1).trimmed(), r.paths);
@@ -380,6 +380,7 @@ int SessionDiagnostics::run(const QStringList &args)
     QJsonObject env;
     for (const char *name : {"GOW_PERF_DIAG", "GOW_FRAME_DIAG", "GOW_PERF_FRAME_PC", "GOW_AUDIO", "GOW_AUDIO_STATS", "GOW_IOP_DRIFT",
          "GOW_VU1N_DIAG", "GOW_VU1N_X64", "GOW_VU1X_INLINE", "GOW_DISPATCH_FULL", "GOW_GS_FINISH_ASINCRONO",
+         "GOW_VU1_EARLY_FINISH", "GOW_SYNC_DIAG", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
          "PS2X_GS_HW", "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "PS2X_GS_ESCALA_DINAMICA", "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS"})
         if (qEnvironmentVariableIsSet(name)) env[name] = redact(qEnvironmentVariable(name).left(128), r.paths);
     r.meta["runtime_environment"] = env;

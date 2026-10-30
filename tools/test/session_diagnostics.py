@@ -80,6 +80,16 @@ class DiagnosticsTests(unittest.TestCase):
         for secret in (str(self.root), "person@example.com", "SECRET_MUST_NOT_APPEAR", "SAVE_MUST_NOT_APPEAR", "ISO_MUST_NOT_APPEAR"):
             self.assertNotIn(secret, text)
 
+    def test_sync_settings_and_metrics(self):
+        self.env.update(GOW_SYNC_DIAG="1", GOW_VU1_EARLY_FINISH="0")
+        self.start("print('[gow-sync-config] early_finish=0 worker=1 timing=1',flush=True)\nprint('[gow-sync] site=0 syncs=4 worker_waits=1 stage_waits=2 worker_ms=12.5 stage_ms=31.25 queue_peak=3 final=1',flush=True)\n").wait(timeout=15)
+        self.assertEqual(self.metadata()["runtime_environment"]["GOW_VU1_EARLY_FINISH"], "0")
+        rows = [json.loads(x) for x in (self.session / "metrics.jsonl").read_text().splitlines()]
+        config = next(r["values"] for r in rows if r.get("tag") == "gow-sync-config")
+        sync = next(r["values"] for r in rows if r.get("tag") == "gow-sync")
+        self.assertEqual(config["early_finish"], 0)
+        self.assertEqual((sync["worker_ms"], sync["stage_ms"], sync["stage_waits"]), (12.5, 31.25, 2))
+
     def test_marker_and_requested_stop(self):
         self.start("import time\nprint('started',flush=True)\ntime.sleep(60)\n")
         time.sleep(1)
