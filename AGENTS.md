@@ -201,6 +201,13 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   self-loop optimizations. `-CpuTarget portable` (default) selects x86-64-v2; `-CpuTarget x86-64-v3` selects the AVX2
   tier explicitly. Do not restore an unconditional `-march=native` that overrides this choice. Neither tier is a new
   performance-support claim. The profile's `build.unity_batch` applies only with at least 14 GiB RAM.
+- **Early FINISH (patch 40, GOW_GS_EARLY_FINISH=1, launcher default on)**: the EE scans each VIF1 packet for PATH2
+  FINISH writes and raises FINISH at submission (or at job start when a job waits ahead), so it runs at most one job
+  ahead; stage markers (GifPathId 0) suppress that job's real FINISH and apply display registers in drawing order.
+  CSR access must not wait for the worker in this mode, and display stores must go through gsDisplayStore/setDisplay
+  (direct register access resyncs and drops the shadow). Test-only VRAM dumps can catch the next frame mid-draw.
+  Batching the worker's stage pushes (64 KiB) was measured slower (3/3 pairs, about -6%): the stage lost overlap with
+  VU1. Keep per-packet pushes.
 - The large-VIF1 barrier (patch 33) is opt-in since patch 38: only `GOW_VU1_EARLY_FINISH=1` enables it; the launcher
   and boot profile no longer set it. Despite its name it is a drain-before-submit wait, not the "early FINISH" of the
   25 October handoff (signalling FINISH sooner), which is still unimplemented. The setting is per memory instance. The 64 KiB threshold identifies packets, not exact guest frames. Preserve

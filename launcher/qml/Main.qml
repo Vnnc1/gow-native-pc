@@ -62,6 +62,7 @@ ApplicationWindow {
         property string mando: "" // controller layout as JSON (empty = the fixed layout of controlesDmc5)
         property bool compilarAreas: true // in-process x64 JIT; existing saved choices are preserved
         property bool autoNative: false // optional AOT build after a successful play session
+        property bool finAnticipado: true // GOW_GS_EARLY_FINISH (runtime patch 40): the EE prepares the next frame while VU1 draws
         property bool jitInline: true
         property bool diagnostics: false
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
@@ -226,6 +227,7 @@ ApplicationWindow {
             // the native path is the fast one, so it is no longer a switch
             datosJit: installer.repoRoot + "/data/" + installer.gameId,
             jitInline: true,
+            finAnticipado: ajustes.finAnticipado,
             diagnostics: ajustes.diagnostics,
             framePc: installer.diagnosticsFramePc(),
             // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)

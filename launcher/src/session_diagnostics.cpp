@@ -263,7 +263,7 @@ QString SessionDiagnostics::create(const QString &base, const QVariantMap &setti
     // Explicit settings allowlist excludes ISO/save paths, key bindings and other personal fields.
     for (const QString &key : {"diagnostics", "framePc", "gpu", "modoPantalla", "ancho", "alto", "escala",
                                "aspecto", "fxaa", "vsync", "fpsLimite", "filtro", "anisotropico",
-                               "jitInline", "idioma", "saltarVideos", "arranqueRapido"})
+                               "jitInline", "finAnticipado", "idioma", "saltarVideos", "arranqueRapido"})
         if (settings.contains(key)) selected[key] = QJsonValue::fromVariant(settings.value(key));
     if (!saveJson(dir + "/session.json", {{"schema", 1}, {"id", id}, {"created_utc", utc()}, {"state", "prepared"}, {"settings", selected}})) return {};
     if (!saveJson(base + "/latest.json", {{"id", id}})) return {};
@@ -380,7 +380,7 @@ int SessionDiagnostics::run(const QStringList &args)
     QJsonObject env;
     for (const char *name : {"GOW_PERF_DIAG", "GOW_FRAME_DIAG", "GOW_PERF_FRAME_PC", "GOW_AUDIO", "GOW_AUDIO_STATS", "GOW_IOP_DRIFT",
          "GOW_VU1N_DIAG", "GOW_VU1N_X64", "GOW_VU1X_INLINE", "GOW_DISPATCH_FULL", "GOW_GS_FINISH_ASINCRONO",
-         "GOW_VU1_EARLY_FINISH", "GOW_SYNC_DIAG", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
+         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_SYNC_DIAG", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
          "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS"})
         if (qEnvironmentVariableIsSet(name)) env[name] = redact(qEnvironmentVariable(name).left(128), r.paths);
     r.meta["runtime_environment"] = env;

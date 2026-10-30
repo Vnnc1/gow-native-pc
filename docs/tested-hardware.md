@@ -541,3 +541,13 @@ averages ~45 FPS. Analysis and next steps: `docs/research/revisao-2026-10-30.pt-
 Patch 39 (same machine and protocol, FXAA on with the sharp scaler, two alternating pairs): 52.99 / 54.97 FPS against
 54.88 / 50.95 for the patch 38 PGO build: no measurable change. In-game screenshots confirmed the F1 menu (pt) and a
 borderless 1920×1080 window with FXAA followed by the sharp scaler, correctly oriented.
+
+## Early FINISH, patch 40 (2026-10-30, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Same executable with GOW_GS_EARLY_FINISH=1 and =0, alternating runs, scale 2, audio on, PGO build (profile trained
+before patch 40). Ship route from a new game, 1280×720 window, 3 pairs: mean 57.80 vs 54.63 FPS (+5.8%), combat
+windows 52.22 vs 43.45 FPS (+20%). Route from the player's own save (copy of the native port's memory card, later on
+the ship deck), exclusive full screen 1920×1080 with the FPS counter, 3 pairs: mean 51.52 vs 42.82 FPS (+20%), worst
+window 42.9 vs 35.9; one of the three pairs was reversed (47.5 vs 49.1), route variance. Four in-game window captures in
+heavy combat were correct. Batching the worker's GS-stage pushes (64 KiB) measured slower in 3/3 full-screen pairs
+(53.8 vs 57.1 mean) and was dropped. Stable 60 guest FPS is still not reached in combat.
