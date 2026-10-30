@@ -517,3 +517,23 @@ before output resampling; original control matches the identical source audio at
 1.17 (source second 4). PT-BR residual is 2244.99, with 16,813 of 46,822 distinct-channel samples matching the wrong
 channel. No runtime fix is claimed. The player's card remains byte-identical to its backup.
 See [reproduction evidence and correction plan](research/cutscene-audio-2026-10-26.md).
+
+## PGO, CPU target and patch 38 (2026-10-30, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Checkout `Documents/gow/gow-native-pc`, patches 01–38, clang 23.1.4 Release, AOT VU1 from the optimize stage, JIT on.
+Scripted ship route (profile pad script), private card, visible 1280×720 window, internal scale 2, audio on, 60 Hz
+cap, frames-only diagnostics. Each value is the mean of guest-FPS windows at t=25–100 s of one 105-second run; the
+"dip" is the combat windows at t≈30–50 s. Runs alternate between the two builds within one session: run-to-run noise
+is about ±3 FPS and the level drifts between sessions, so only alternating pairs are compared.
+
+| Comparison (alternating pairs) | Mean FPS | Dip FPS | Result |
+| --- | --- | --- | --- |
+| Patch 38 vs 01–37 (2 pairs) | 54.71, 52.36 vs 55.07, 52.78 | 46.09, 41.69 vs 44.96, 42.13 | neutral |
+| PGO vs no PGO, portable (3 pairs) | 54.96 vs 52.51 | 45.60 vs 40.20 | +4.7% / +13.4%, all pairs |
+| PGO x86-64-v3 vs PGO portable (3 pairs) | 52.11 vs 52.91 | 40.49 vs 43.42 | no gain; portable kept |
+
+All runs reached gameplay. A first non-alternating three-run baseline (51.52) wrongly suggested a patch 38 gain.
+Sampling profile (PDB build, same route): the EE thread waits ~57%; the VIF1/VU1 worker is ~78% busy, of which
+`VU1NativeAccess::chain` is 19.6%, `blockTiming` 3.5%, slot setup/code-change checks ~3%, GS-stage locking ~5% and
+interpreter call-outs (OPMULA/OPMSUB/EFU) ~3.5%. Stable 60 guest FPS is not reached; the worst combat window with PGO
+averages ~45 FPS. Analysis and next steps: `docs/research/revisao-2026-10-30.pt-BR.md`, section 6.

@@ -134,7 +134,7 @@ function Build-Game([string]$dir = $bld) {
     $elf = (Languages).recompile_elf
     if ($dir -eq $bld -and $elf -and (Test-Path $elf) -and -not (Test-Path $bootFile)) {
         # A launcher session replaces these defaults with the selected disc and runtime settings.
-        $bootText = "GOW_NATIVE_BOOT_V1`n$elf`nGOW_VU1N_X64=1`nGOW_VU1_EARLY_FINISH=1`nGOW_VU1_CAPTURE_MISSES=1`nGOW_VU1_CAPTURA=$vu1`nPS2X_GS_HW=1`nPS2X_GS_WORKER=1`nTOBIICHI_PANORAMICO=16:9`n"
+        $bootText = "GOW_NATIVE_BOOT_V1`n$elf`nGOW_VU1N_X64=1`nGOW_VU1_CAPTURE_MISSES=1`nGOW_VU1_CAPTURA=$vu1`nPS2X_GS_WORKER=1`nGOW_GS_FINISH_ASINCRONO=1`nTOBIICHI_PANORAMICO=16:9`n"
         [IO.File]::WriteAllText($bootFile, $bootText, (New-Object Text.UTF8Encoding($false)))
     }
     # the background VU1 compiler (launcher: "Compile new areas while playing") builds modules with this compiler and the

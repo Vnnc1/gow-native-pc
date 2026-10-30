@@ -177,38 +177,16 @@ ScrollView {
                 onElegido: (v) => raiz.ajustes.anisotropico = v
             }
         }
+        // The render-target renderer is always used and has no dynamic scale or line-doubling mode: the former
+        // "hardware renderer", "dynamic resolution" and "sharp image" switches set variables no runtime code read.
         Fila {
             titulo: Tema.t("interna")
             descripcion: Tema.t("internaDesc")
+            separador: false
             Selector {
                 opciones: raiz.opcionesEscala
                 valor: raiz.ajustes.resolucionInterna
                 onElegido: (v) => raiz.ajustes.resolucionInterna = v
-            }
-        }
-        Fila {
-            titulo: Tema.t("dibujoHardware")
-            descripcion: Tema.t("dibujoHardwareDesc")
-            Interruptor {
-                checked: raiz.ajustes.dibujoHardware
-                onToggled: raiz.ajustes.dibujoHardware = checked
-            }
-        }
-        Fila {
-            titulo: Tema.t("escalaDinamica")
-            descripcion: Tema.t("escalaDinamicaDesc")
-            Interruptor {
-                checked: raiz.ajustes.escalaDinamica
-                onToggled: raiz.ajustes.escalaDinamica = checked
-            }
-        }
-        Fila {
-            titulo: Tema.t("imagenNitida")
-            descripcion: Tema.t("imagenNitidaDesc")
-            separador: false
-            Interruptor {
-                checked: raiz.ajustes.imagenNitida
-                onToggled: raiz.ajustes.imagenNitida = checked
             }
         }
     }

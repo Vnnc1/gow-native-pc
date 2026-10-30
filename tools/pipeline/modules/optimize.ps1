@@ -15,8 +15,8 @@ if ($Stages -contains 'pgo') {
     New-Item -ItemType Directory -Force $pgoDir | Out-Null
     Get-ChildItem $pgoDir -Filter '*.profraw' -ErrorAction SilentlyContinue | Remove-Item
     $vars = @{ LLVM_PROFILE_FILE = (Join-Path $pgoDir 'run-%p.profraw'); GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_PAD_TEST_NO_CAPTURE = '1'
-               PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; GOW_VU1_EARLY_FINISH = '1'; PS2X_GS_HW = '1'; GOW_WINDOW_HIDDEN = '1'
-               TOBIICHI_PANORAMICO = '16:9'; TOBIICHI_FXAA = '1'; PS2X_GS_ESCALA = '2'; PS2X_GS_HW_SCALE = '2'; PS2X_GS_ESCALA_DINAMICA = '1'
+               PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; GOW_WINDOW_HIDDEN = '1'
+               TOBIICHI_PANORAMICO = '16:9'; TOBIICHI_FXAA = '1'; PS2X_GS_HW_SCALE = '2'
                GOW_VU1N_X64 = '1'; GOW_AUDIO = '0'; GOW_AUDIO_PCM = 'NUL'; GOW_PAD_GUION = $prof.optimize.pad_script }
     if (Get-ChildItem -Path $vu1 -Filter *.bin -ErrorAction SilentlyContinue | Select-Object -First 1) { $vars.GOW_VU1_CAPTURA = $vu1 }
     Invoke-GameRecording (Join-Path $genBld 'ps2xRuntime/ps2EntryRunner.exe') $elf $secs $vars 60000
@@ -37,11 +37,10 @@ if ($Stages -contains 'optimize') {
     Need $runnerExe 'built game (run the build stage)'
     $elf = (Languages).recompile_elf
     New-Item -ItemType Directory -Force $vu1, $iopMods | Out-Null
-    # the hardware renderer as the player has it: with PS2X_GS_SHADER_CACHE_DIR (the launcher passes its own) the shaders
-    # compiled here are already in the cache at the first play. The window stays hidden (engine/patches/15): the GPU
-    # draws as usual, nothing shows on the desktop and no key can reach the game
+    # The render-target renderer as the player has it (it has no on/off switch and no shader cache). The window stays
+    # hidden (engine/patches/15): the GPU draws as usual, nothing shows on the desktop and no key can reach the game
     $vars = @{ GOW_VU1_CAPTURA = $vu1; PS2X_IOP_DUMP_MODULES = $iopMods; GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_AUDIO = '0'
-               GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; PS2X_GS_HW = '1'
+               GOW_PAD_TEST_NO_CAPTURE = '1'; PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'
                GOW_WINDOW_HIDDEN = '1'; GOW_VU1N_X64 = '1'; GOW_VU1_CAPTURE_MISSES = '1'; GOW_PAD_GUION = $prof.optimize.pad_script }
     Invoke-GameRecording $runnerExe $elf $secs $vars
 

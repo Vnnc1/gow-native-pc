@@ -195,8 +195,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   self-loop optimizations. `-CpuTarget portable` (default) selects x86-64-v2; `-CpuTarget x86-64-v3` selects the AVX2
   tier explicitly. Do not restore an unconditional `-march=native` that overrides this choice. Neither tier is a new
   performance-support claim. The profile's `build.unity_batch` applies only with at least 14 GiB RAM.
-- `GOW_VU1_EARLY_FINISH=0` disables the large-VIF1 barrier; otherwise it defaults to `GOW_GS_FINISH_ASINCRONO`.
-  The setting is per memory instance. The 64 KiB threshold identifies packets, not exact guest frames. Preserve
+- The large-VIF1 barrier (patch 33) is opt-in since patch 38: only `GOW_VU1_EARLY_FINISH=1` enables it; the launcher
+  and boot profile no longer set it. Despite its name it is a drain-before-submit wait, not the "early FINISH" of the
+  25 October handoff (signalling FINISH sooner), which is still unimplemented. The setting is per memory instance. The 64 KiB threshold identifies packets, not exact guest frames. Preserve
   worker/stage-thread self-wait guards and DMA submission/completion semantics.
 - VU1 `chainSelf` completes exit accounting even when it returns false: generated blocks must return `kVu1nDone`
   without calling `chain` again. Keep the x64 direct self-body jump and AOT/DLL behavior equivalent. Run

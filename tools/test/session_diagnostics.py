@@ -44,7 +44,14 @@ class DiagnosticsTests(unittest.TestCase):
         return self.process
 
     def metadata(self):
-        return json.loads((self.session / "session.json").read_text(encoding="utf-8"))
+        # The collector replaces session.json atomically; on Windows a read during the rename is denied briefly.
+        for attempt in range(50):
+            try:
+                return json.loads((self.session / "session.json").read_text(encoding="utf-8"))
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.02)
 
     def test_exit_metrics_redaction_and_export(self):
         self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('[vu1n] nativePairs=123 nativeBlocks=24 missBlocks=7 laneFails=0',flush=True)\nprint('[vu1x] compiled=12 unsupported=1 codeKB=20 avgCompileUs=4.0',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)

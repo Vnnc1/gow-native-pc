@@ -271,11 +271,8 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
     m_process = new QProcess(this);
     m_process->setProgram(QStringLiteral("powershell.exe"));
     m_process->setArguments(args);
-    // the first-play preparation (optimize stage) fills the same shader cache the game uses when started from here
-    // (Lanzador: CacheLocation/sombreadores)
+    // The runtime keeps no shader cache: PS2X_GS_SHADER_CACHE_DIR is not read, so none is passed.
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"),
-                       QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/sombreadores"));
     m_process->setProcessEnvironment(environment);
     m_process->setWorkingDirectory(m_root);
     m_process->setProcessChannelMode(QProcess::MergedChannels);

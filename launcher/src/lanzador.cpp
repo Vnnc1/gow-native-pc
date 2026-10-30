@@ -41,7 +41,6 @@ namespace
     const std::pair<const char *, const char *> kEntornoBase[] = {
         {"PS2X_GS_WORKER", "1"},
         {"GOW_GS_FINISH_ASINCRONO", "1"},
-        {"GOW_VU1_EARLY_FINISH", "1"},
         {"GOW_AUDIO_DEVICE", "default"},
     };
 
@@ -435,10 +434,8 @@ bool Lanzador::iniciar(const QVariantMap &a)
     else
         entorno.insert(QStringLiteral("TOBIICHI_PANORAMICO"), aspecto);
     entorno.insert(QStringLiteral("TOBIICHI_ASPECTO"), a.value(QStringLiteral("estirar")).toBool() ? QStringLiteral("estirar") : QStringLiteral("auto"));
-    entorno.insert(QStringLiteral("TOBIICHI_FILTRO"), a.value(QStringLiteral("filtro"), QStringLiteral("fsr")).toString());
-    // Sharpness 0..1 in the interface -> RCAS steps (2 = soft, 0 = maximum).
+    // Sharpness 0..1 in the interface -> GOW_SHARPEN below.
     const double nitidez = std::clamp(a.value(QStringLiteral("nitidez"), 0.8).toDouble(), 0.0, 1.0);
-    entorno.insert(QStringLiteral("TOBIICHI_NITIDEZ"), QString::number(2.0 * (1.0 - nitidez), 'f', 2));
     bandera("TOBIICHI_FXAA", a.value(QStringLiteral("fxaa")).toBool());
     // Anisotropic filtering of the game's textures (gs_hw_backend.cpp, from the God of War II port): 1 = off.
     const int aniso = std::clamp(a.value(QStringLiteral("anisotropico"), 1).toInt(), 1, 16);
@@ -461,13 +458,13 @@ bool Lanzador::iniciar(const QVariantMap &a)
             entorno.insert(QStringLiteral("GOW_SHARPEN"), QStringLiteral("0"));
         }
     }
-    // GS internal resolution (1..8; the interface resolves "automatic" from the display) and sharp image.
-    entorno.insert(QStringLiteral("PS2X_GS_ESCALA"), QString::number(std::clamp(a.value(QStringLiteral("escala"), 1).toInt(), 1, 8)));
-    // The render-target renderer reads the scale from PS2X_GS_HW_SCALE.
+    // GS internal resolution (1..8; the interface resolves "automatic" from the display). The render-target renderer
+    // reads only PS2X_GS_HW_SCALE: it is always on and has no dynamic scale or line-doubling switch, so the variables
+    // older launchers set for those (and the unread filter/sharpness/shader-cache names) are removed.
     entorno.insert(QStringLiteral("PS2X_GS_HW_SCALE"), QString::number(std::clamp(a.value(QStringLiteral("escala"), 2).toInt(), 1, 8)));
-    bandera("PS2X_GS_NITIDO", a.value(QStringLiteral("imagenNitida"), true).toBool(), "0");
-    bandera("PS2X_GS_ESCALA_DINAMICA", a.value(QStringLiteral("escalaDinamica"), true).toBool(), "0");
-    bandera("PS2X_GS_HW", a.value(QStringLiteral("dibujoHardware"), true).toBool(), "0");
+    for (const char *unread : {"PS2X_GS_ESCALA", "PS2X_GS_NITIDO", "PS2X_GS_ESCALA_DINAMICA", "PS2X_GS_HW", "TOBIICHI_FILTRO",
+                               "TOBIICHI_NITIDEZ", "PS2X_GS_SHADER_CACHE_DIR"})
+        entorno.remove(QString::fromLatin1(unread));
     // Window pacing.
     entorno.insert(QStringLiteral("TOBIICHI_VENTANA_FPS"), QString::number(a.value(QStringLiteral("fpsLimite"), 120).toInt()));
     bandera("TOBIICHI_VSYNC", a.value(QStringLiteral("vsync")).toBool());
@@ -483,10 +480,6 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.remove(QStringLiteral("GOW_ISO"));
     else
         entorno.insert(QStringLiteral("GOW_ISO"), iso);
-    const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/sombreadores");
-    QDir().mkpath(cache);
-    if (!entorno.contains(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR")))
-        entorno.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"), cache);
     aplicarTarjeta(entorno, a.value(QStringLiteral("gpu")).toString(), ejecutable);
     // Frame-only accounting avoids the expensive per-call timing scopes in normal play.
     entorno.insert(QStringLiteral("GOW_PERF_DIAG"), a.value(QStringLiteral("diagnostics"), false).toBool() ? QStringLiteral("1") : QStringLiteral("frames"));

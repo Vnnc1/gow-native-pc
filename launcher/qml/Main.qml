@@ -41,10 +41,7 @@ ApplicationWindow {
         property real nitidez: 0.8
         property bool fxaa: true
         property string anisotropico: "1" // anisotropic texture filtering: 1 = off, 2..16 (GOW_ANISO)
-        property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_ESCALA)
-        property bool escalaDinamica: true // lowers the resolution when the GPU cannot keep 60 (PS2X_GS_ESCALA_DINAMICA)
-        property bool dibujoHardware: true // triangles through the GPU pipeline (PS2X_GS_HW, experimental)
-        property bool imagenNitida: true // no line doubling or anti-flicker (PS2X_GS_NITIDO)
+        property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_HW_SCALE)
         property int fpsLimite: 120
         property bool vsync: false
         property bool mostrarFps: false
@@ -170,9 +167,6 @@ ApplicationWindow {
         ajustes.fxaa = true
         ajustes.anisotropico = "1"
         ajustes.resolucionInterna = "2"
-        ajustes.escalaDinamica = true
-        ajustes.dibujoHardware = true
-        ajustes.imagenNitida = true
         ajustes.fpsLimite = 120
         ajustes.vsync = false
         ajustes.mostrarFps = false
@@ -213,8 +207,7 @@ ApplicationWindow {
             ancho: ajustes.ancho, alto: ajustes.alto,
             aspecto: ajustes.aspecto, estirar: ajustes.estirar,
             filtro: ajustes.filtro, nitidez: ajustes.nitidez, fxaa: ajustes.fxaa, anisotropico: ajustes.anisotropico,
-            escala: escalaElegida(), escalaDinamica: ajustes.escalaDinamica, imagenNitida: ajustes.imagenNitida,
-            dibujoHardware: ajustes.dibujoHardware,
+            escala: escalaElegida(),
             fpsLimite: ajustes.fpsLimite, vsync: ajustes.vsync, mostrarFps: ajustes.mostrarFps,
             elf: elegido.elf, iso: "", ejecutable: ejecutableJuego,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
@@ -301,17 +294,14 @@ ApplicationWindow {
             ajustes.arranqueRapido = false
             ajustes.versionAjustes = 2
         }
-        // Version 3: 2x render resolution by default, with the dynamic resolution that protects 60 FPS.
+        // Version 3: 2x render resolution by default.
         if (ajustes.versionAjustes < 3) {
             ajustes.resolucionInterna = "2"
-            ajustes.escalaDinamica = true
             ajustes.versionAjustes = 3
         }
-        // Version 4: the hardware triangle renderer, turned on once.
-        if (ajustes.versionAjustes < 4) {
-            ajustes.dibujoHardware = true
+        // Version 4 turned on a renderer switch that no longer exists.
+        if (ajustes.versionAjustes < 4)
             ajustes.versionAjustes = 4
-        }
         // Version 5: movies skipped by default while the game was being optimised.
         if (ajustes.versionAjustes < 5) {
             ajustes.saltarVideos = true
@@ -903,7 +893,7 @@ ApplicationWindow {
                               pagina: 2 },
                             { titulo: Tema.t("cardEscala"),
                               valor: ventana.escalaElegida() + "×",
-                              detalle: (512 * ventana.escalaElegida()) + "×" + (448 * ventana.escalaElegida()) + (ajustes.escalaDinamica ? " · " + Tema.t("dinamicaCorta") : ""),
+                              detalle: (512 * ventana.escalaElegida()) + "×" + (448 * ventana.escalaElegida()),
                               pagina: 2 },
                             { titulo: Tema.t("cardFps"),
                               valor: ajustes.fpsLimite > 0 ? ajustes.fpsLimite + " FPS" : Tema.t("sinLimite"),

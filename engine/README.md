@@ -50,4 +50,5 @@
 | 34-vu1-chain-lite | Preserve accounting and timing semantics on the eligible VU1 self-chain fast path | this project |
 | 35-vu1-selfloop | Equivalent generated C++ and x64 JIT self-loops, including budget/depth exits | this project |
 | 36-worker-stage-wait-metrics | Bounded opt-in worker/GS-stage wait attribution, including stage-only stalls; collector integration | this project |
-| 37-vu1-isolated-task-replay | Local bounded MSCAL capture and standalone regression replay with independent native/exact baselines; no FPS gain claimed |
+| 37-vu1-isolated-task-replay | Local bounded MSCAL capture and standalone regression replay with independent native/exact baselines; no FPS gain claimed | this project |
+| 38-sync-barrier-optin-stage-push | Large-VIF1 barrier opt-in, one queue lock per GS stage push, history-ring size check; measured FPS-neutral | this project |

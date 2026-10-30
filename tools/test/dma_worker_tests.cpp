@@ -94,7 +94,7 @@ static bool stageOnly()
 int main()
 {
     const bool ok = check("1", "0", true) && check("0", "1", false)
-        && check(nullptr, "1", true) && check(nullptr, "0", false)
+        && check(nullptr, "1", false) && check(nullptr, "0", false)
         && check("1", "1", false, 65520) && stageOnly();
     std::puts(ok ? "PASS: VIF1 barrier, opt-out, async fallback, instance snapshot and small packets"
                  : "FAIL: VIF1 worker barrier");

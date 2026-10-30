@@ -1,0 +1,74 @@
+Make the large-VIF1 barrier (patch 33) opt-in: GOW_VU1_EARLY_FINISH=1 enables it; it no longer follows
+GOW_GS_FINISH_ASINCRONO. Patch 33 drained the worker and GS stage before every large VIF1 packet, the opposite of the
+'early FINISH' planned in docs/research/handoff-2026-10-25-performance-phases.md (signal FINISH sooner, not wait).
+GS stage push takes the queue lock once per packet: recycled buffers come from a per-producer pool refilled under it.
+Static check that the VU1 history ring size is a power of two (patch 34 masks the index instead of using modulo).
+Measured (Xeon E5-2666 v3 / RX 580, scale 2, scripted ship route, alternating A/B runs): 55.07/52.78 before,
+54.71/52.36 after: no FPS change. Robustness/serialization fix only; no gain claimed.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -260,9 +260,11 @@
+ {
+     ps2SetScratchpadHostPtr(nullptr);
+     // Snapshot per instance, after standalone boot has restored the environment.
++    // gow-native-pc (patch 38): the large-VIF1 barrier is opt-in (GOW_VU1_EARLY_FINISH=1). It drains the worker and the
++    // GS stage before each large VIF1 packet; measured with zero busy waits and no FPS change, it only adds a
++    // serialization point that would remove EE/VU1 overlap whenever the worker is still busy.
+     const char *early = std::getenv("GOW_VU1_EARLY_FINISH");
+-    const char *asyncFinish = std::getenv("GOW_GS_FINISH_ASINCRONO");
+-    m_vu1EarlyFinish = early ? early[0] != '0' : (asyncFinish && asyncFinish[0] != '0');
++    m_vu1EarlyFinish = early && early[0] == '1';
+     const char *worker = std::getenv("PS2X_GS_WORKER");
+     m_gsWorkerEnabled = worker != nullptr && worker[0] == '1';
+     std::fprintf(stderr, "[gow-sync-config] early_finish=%u worker=%u timing=%u\n",
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -922,6 +922,7 @@
+ #endif
+     const uint32_t pc = next & 0x3FF8u;
+     // gow-native-pc (patch 34): fast path for self-loops and idle-timing blocks without scalar pipelines or tails.
++    static_assert((NS::kHist & (NS::kHist - 1u)) == 0u, "the history ring index below is masked, not reduced modulo");
+     if (pc == n.pc && cur.fastSelf && n.cyc == cur.idle) [[likely]]
+     {
+         const uint64_t end = n.start + cur.idleEnd;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+@@ -118,16 +118,15 @@
+     {
+         Stage &s = stage();
+         // gow-native-pc: the packet is copied before taking the lock (the copy under it made the stage thread and the
+-        // VU1 worker wait on each other for every XGKICK); a spare buffer is still taken under the lock
++        // VU1 worker wait on each other for every XGKICK). Patch 38: recycled buffers come from a per-producer pool that
++        // is refilled while the queue lock is held anyway, so a push takes the lock once instead of twice.
++        thread_local std::vector<std::vector<uint8_t>> pool;
+         Packet p;
+         p.path = path;
++        if (!pool.empty())
+         {
+-            std::lock_guard<std::mutex> spareLock(s.mutex);
+-            if (!s.spare.empty())
+-            {
+-                p.data = std::move(s.spare.back());
+-                s.spare.pop_back();
+-            }
++            p.data = std::move(pool.back());
++            pool.pop_back();
+         }
+         p.data.assign(data, data + size);
+         std::unique_lock<std::mutex> lock(s.mutex);
+@@ -135,6 +134,11 @@
+         s.queuedBytes += size;
+         const bool wasEmpty = s.queue.empty();
+         s.queue.push_back(std::move(p));
++        for (size_t take = 0; take < 8u && !s.spare.empty() && pool.size() < 16u; ++take)
++        {
++            pool.push_back(std::move(s.spare.back()));
++            s.spare.pop_back();
++        }
+         lock.unlock();
+         if (wasEmpty)
+             s.work.notify_one();
