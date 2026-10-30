@@ -1,0 +1,2765 @@
+VU1 x86-64 JIT at the speed of the build's generated code, plus native-backend fixes it exposed.
+JIT: every hot statement inline (flags, CLIP, ITOF/FTOI/ABS, Q unit, branches, flag-ring pushes), nrm() cache per block,
+dead MAC stores removed, AVX three-operand encoding (GOW_VU1X_AVX=0: SSE4.1), entry-lane speculation with recompile on a
+failed check (GOW_VU1X_SPECULATE=0 off), one reserved code range so JIT blocks chain past the prologue, GOW_VU1X_DUMP.
+Fixes: re-registering a key keeps its timing table (use after free); chain() checks entry lanes itself; upper/lower
+writes to the same VF register keep the upper result like the exact engine (vu1n_gen.py too); MAXi/MINIi results are not
+assumed clean; recordMissHead does not append heads earlier sessions wrote. Tests: tests/vu1_bench.cpp, GOW_FUZZ_SPECIAL.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index b519f2c..bdf2bed 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -76,14 +76,22 @@ namespace
+ #include "ps2_vu1_jit.inl" // gow-native-pc: background VU1 compiler (GOW_VU1N_JIT)
+ #include "ps2_vu1_x64.inl" // gow-native-pc: in-process x86-64 JIT (GOW_VU1N_X64)
+ 
+-void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail)
++void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes)
+ {
+-    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}, nullptr};
++    // gow-native-pc: a key registered again (a JIT block recompiled, a background module after the x64 JIT) keeps its
++    // entry and its timing table: the same key is the same words, and slots, the running block's context and the timing
++    // history point into `cyc` (replacing the entry freed it under them)
++    NativeEntry &e = nativeRegistry().try_emplace(key).first->second;
++    e.fn = fn;
++    e.pairs = pairs & 0xFFFFu;
++    e.tail = tail;
++    e.readsEntryFlags = (pairs & 0x10000u) != 0u;
++    e.lanes = lanes;
+ }
+ 
+-void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes)
++void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail)
+ {
+-    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}, lanes};
++    vu1nRegisterBlock(key, fn, pairs, tail, nullptr);
+ }
+ 
+ // Issue cycles of the pairs of a block as the exact engine would see them (operand/pipeline stalls included), assuming
+@@ -819,7 +827,9 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+             }
+ #if VU1X_SUPPORTED
+             // gow-native-pc: no native code yet: the x64 JIT translates the block now (GOW_VU1N_X64)
+-            if (it == nativeRegistry().end() && vu1x::enabled() && vu1x::compile(pc, words, count, key))
++            if (it == nativeRegistry().end() && vu1x::enabled() && vu1x::compile(pc, words, count, key,
++                                                                                  static_cast<uint32_t>(reinterpret_cast<const char *>(&vu.m_workingClip) - reinterpret_cast<const char *>(&vu)),
++                                                                                  &vu.m_state))
+                 it = nativeRegistry().find(key);
+ #endif
+             if (it != nativeRegistry().end())
+@@ -870,10 +880,22 @@ void VU1NativeAccess::recordMissHead(uint32_t pc)
+         return;
+     static std::mutex mutex;
+     static std::unordered_set<uint32_t> seen;
++    static bool loaded = false;
+     std::lock_guard<std::mutex> lock(mutex);
++    const std::string path = std::string(dir) + "/vu1n_heads_seen.txt";
++    if (!loaded) // gow-native-pc: the heads earlier sessions wrote, so the file only grows (and changes) for new ones
++    {
++        loaded = true;
++        if (FILE *f = std::fopen(path.c_str(), "r"))
++        {
++            unsigned head = 0;
++            while (std::fscanf(f, "%x", &head) == 1)
++                seen.insert(head);
++            std::fclose(f);
++        }
++    }
+     if (!seen.insert(pc).second)
+         return;
+-    const std::string path = std::string(dir) + "/vu1n_heads_seen.txt";
+     if (FILE *f = std::fopen(path.c_str(), "a"))
+     {
+         std::fprintf(f, "%x\n", pc);
+@@ -915,8 +937,17 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     NS::Slot &sl = ns.slots[pc >> 3];
+     if (!sl.known || !sl.fn)
+         return nullptr;
+-    if (((sl.laneReq[0] & ~n.known0) | (sl.laneReq[1] & ~n.known1)) != 0u)
+-        return nullptr; // an entry lane check: runNative does it (and counts it)
++    // gow-native-pc: an entry lane check here (as runNative's); a failing one returns to runNative, which counts it (and has
++    // a speculative JIT block recompiled)
++    const uint64_t need0 = sl.laneReq[0] & ~n.known0, need1 = sl.laneReq[1] & ~n.known1;
++    if ((need0 | need1) != 0u)
++    {
++        if (!vu1n::lanesClean(vu.m_state, need0, need1))
++            return nullptr;
++        ++ns.laneChecks;
++        n.known0 |= need0;
++        n.known1 |= need1;
++    }
+     n.known0 = (n.known0 & sl.laneKeep[0]) | sl.laneGen[0] | 0xFu;
+     n.known1 = (n.known1 & sl.laneKeep[1]) | sl.laneGen[1];
+     const uint64_t start = vu.m_cycle;
+@@ -1058,6 +1089,15 @@ bool VU1Interpreter::runNative(StepContext &context)
+                 if (!vu1n::lanesClean(m_state, need0, need1))
+                 {
+                     ++ns.laneFails;
++#if VU1X_SUPPORTED
++                    // gow-native-pc: a JIT block compiled for the lanes clean when it was first reached: compile it again
++                    // without that assumption and run it (the exact engine would otherwise take every such entry)
++                    if (vu1x::despeculate(reinterpret_cast<const void *>(sl.fn)))
++                    {
++                        sl.known = false;
++                        continue;
++                    }
++#endif
+                     break;
+                 }
+                 ctx.known0 |= need0;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+index 0d4ba0c..07c550a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -6,23 +6,31 @@
+ // Translation (vu1x::translate) is a line-by-line port of tools/vu1/vu1n_gen.py gen_block(): the same structural checks
+ // (unsupported shapes fall back to the exact engine), the same order of lower/upper ops, the same flag model (MAC / clip
+ // writers visible after kFmacLatency on the exact engine's issue cycles n.cyc, flush at D/T exits, tail records and
+-// ring pushes at the block end), the same clean-operand choice between ld and ldn (with the conservative entry
+-// assumption: only vf00 clean, so the runtime never has to check entry lanes), the same VI backups for branches in a
++// ring pushes at the block end), the same clean-operand choice between ld and ldn, the same VI backups for branches in a
+ // delay slot. Every C++ statement the generator would write becomes one statement here (Stmt): a helper function that
+-// runs exactly that statement with the same vu1n:: helpers (bit-identical by construction), or, with the inline tier on
+-// (default; GOW_VU1X_INLINE=0 turns it off), x86 SSE code for the hot statements (FMAC, MOVE, loads/stores, integer
+-// ALU). Control flow (D/T exits, the end of program, the jump to the next block through VU1NativeAccess::chainFn as a
+-// tail jump) is emitted directly.
++// runs exactly that statement with the same vu1n:: helpers (the reference, bit-identical by construction), and, with the
++// inline tier on (default; GOW_VU1X_INLINE=0 runs the helpers), x86 code for it (see "inline tier": every statement but
++// the exact-engine call-outs, XGKICK, flag reads that can reach an earlier block's flags and the rare path of an enabled
++// D/T exit / an overflowing MADD).
+ //
+-// Code: System V (Linux) and Windows x64 calling conventions; rbx = VU1NativeCtx *, r12 = the block's frame (temporaries:
+-// unclamped FMAC results, MAC / clip values, VI backups, the branch decision), r13 = the next pc at the block end, r14 =
+-// VU1State *, r15 = VU data. Only xmm0-xmm5 are used (callee-saved xmm6-15 on Windows stay untouched). Code memory:
+-// 1 MB read-write-execute chunks, never freed (a block's code stays valid for the process lifetime, like the build's).
+-// Statement data (operands, flag-source lists) lives next to the block, also never freed.
++// Speed (docs/research/vu1-x64-jit.md, tests/vu1_bench.cpp): the inline tier keeps nrm() results of a register for its
++// later reads in the block (frame.nv), stores MAC results only when read later, uses AVX three-operand forms when the
++// CPU has AVX (GOW_VU1X_AVX=0: SSE4.1 only; same bits), and compiles each block for the VF lanes clean in the state it
++// is first run with (speculation, GOW_VU1X_SPECULATE=0 off: the runtime checks those lanes on every entry, a failed
++// check recompiles the block without the assumption, despeculate()). Blocks jump to a JIT successor past its prologue,
++// keeping frame and registers (one reserved code range, see CodeArena).
+ //
+-// Tests: tests/vu1_jit_test.cpp (mode x64: digest must equal the build's compiled-in blocks) and tests/vu1_x64_fuzz_test.cpp
+-// (random programs: x64 JIT digest == background-compiler digest == vu1n_gen.py's code). Docs: docs/research/vu1-x64-jit.md
+-// in gow-native-pc.
++// Code: System V (Linux) and Windows x64 calling conventions; rbx = VU1NativeCtx *, rbp = constant table, r12 = the
++// frame (temporaries: unclamped FMAC results, MAC / clip values, VI backups, cached nrm() values), r13 = the next pc,
++// r14 = VU1State *, r15 = VU data. Only xmm0-xmm5 are used (callee-saved xmm6-15 on Windows stay untouched). Code
++// memory: a reserved 1 GB range committed read-write-execute 1 MB at a time, never freed (a block's code stays valid for
++// the process lifetime, like the build's). Statement data (operands, flag-source lists) lives next to the block, also
++// never freed. GOW_VU1X_DUMP=<dir> writes each block's code (objdump -D -b binary -mi386:x86-64).
++//
++// Tests: tests/vu1_jit_test.cpp (mode x64: digest must equal the build's compiled-in blocks), tests/vu1_x64_fuzz_test.cpp
++// (random programs: x64 JIT digest == background-compiler digest == vu1n_gen.py's code, in every mode above;
++// GOW_FUZZ_SPECIAL=1 with Inf / NaN registers: speculation on == off) and tests/vu1_bench.cpp (speed against the AOT
++// code). Docs: docs/research/vu1-x64-jit.md in gow-native-pc.
+ 
+ #if defined(__x86_64__) || defined(_M_X64)
+ #define VU1X_SUPPORTED 1
+@@ -34,9 +42,15 @@
+ #if !defined(_WIN32)
+ #include <sys/mman.h>
+ #endif
++#if defined(_MSC_VER) && !defined(__clang__)
++#include <intrin.h>
++#endif
+ #include <cstddef>
++#include <bit>
+ #include <deque>
++#include <initializer_list>
+ #include <memory>
++#include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
+ 
+@@ -289,7 +303,8 @@ namespace vu1x
+         const uint32_t dest = (u >> 21) & 0xFu, ft = (u >> 16) & 31u, fd = (u >> 6) & 31u;
+         const uint32_t m = static_cast<uint32_t>(kRev4[dest]);
+         const uint32_t uw = upperInfo(u).writes;
+-        if (isArith(k.kind) && !k.toAcc && fd && dest)
++        // MAX / MINI are not clamped: clean only with normalised VF operands (MAXi / MINIi read the I register raw)
++        if (isArith(k.kind) && !k.toAcc && fd && dest && !((k.kind == K_MAX || k.kind == K_MINI) && (k.src == S_Q || k.src == S_I)))
+             e.setUpper = L128::lanes(fd, m);
+         else if (k.kind == K_ITOF && ft && dest)
+             e.setUpper = L128::lanes(ft, m);
+@@ -299,16 +314,18 @@ namespace vu1x
+                     e.killUpper = e.killUpper | L128::lanes(r);
+         return e;
+     }
++    // vu1n_gen.py apply_pair: lanes both ops of the pair write count as unknown (the upper result wins for the native lower
++    // ops, see suppress below; the lower one for exact-engine call-outs)
+     L128 applyPair(L128 st, const PairEffect &e)
+     {
+-        st = st & ~e.killLower;
+-        return (st & ~e.killUpper) | e.setUpper;
++        return (st & ~e.killLower & ~e.killUpper) | (e.setUpper & ~e.killLower);
+     }
+ 
+     // ------------------------------------------------------------------------------------------------- statements
+     struct alignas(16) Frame
+     {
+         __m128 q[64];     // unclamped FMAC results of MAC writers (q{j})
++        __m128 nv[32];    // inline tier: nrm(vf[r]) kept for later reads of the same register in the block
+         uint32_t m[64];   // MAC values (m{j})
+         uint32_t c[64];   // clip values (c{j})
+         int32_t vib[64];  // VI backups for branches (vib{j})
+@@ -336,6 +353,7 @@ namespace vu1x
+         uint8_t aNorm = 0, bNorm = 0, bc = 0, src = 0, toAcc = 0, mac = 0, clamp = 0, store = 0, shift = 0;
+         uint8_t fsf = 0, ftf = 0, comp = 0, flagT = 0, hasTail = 0, k = 0, j = 0;
+         uint8_t macM = 0; // FMAC: its MAC value (m{i}) is read by a flag op of this block (the inline tier computes it only then)
++        uint8_t qNeed = 0; // FMAC MAC writer: q{i} is read later (flag op, flag push at the end / at a D/T exit, tail record)
+         int8_t prevClip = -1;
+         int32_t imm = 0;
+         uint32_t pc = 0, lower = 0, upper = 0, endPc = 0;
+@@ -347,7 +365,8 @@ namespace vu1x
+     enum InlineKind : uint8_t
+     {
+         IN_NONE, IN_FMAC, IN_MOVE, IN_LQ, IN_SQ, IN_LQI, IN_SQI, IN_IADDIU, IN_ISUBIU, IN_IADDI, IN_IADD, IN_ISUB, IN_IAND, IN_IOR,
+-        IN_ISET
++        IN_ISET, IN_ITOF, IN_FTOI, IN_ABS, IN_CLIP, IN_FLAG, IN_SPECIAL, IN_ILW, IN_ISW, IN_BACKUP, IN_BRANCH, IN_HALT, IN_TAILQ,
++        IN_TAILC, IN_PUSHMAC, IN_PUSHCLIP, IN_NEXT
+     };
+     struct Stmt
+     {
+@@ -365,6 +384,11 @@ namespace vu1x
+         VU1TailDesc tail{};
+         bool hasTail = false;
+         VU1NativeLanes lanes{};
++        // for a later conservative recompile (despeculate): the block's words, key, and whether it assumes lanes clean
++        uint32_t pc = 0, count = 0;
++        uint64_t key = 0;
++        std::vector<uint32_t> words;
++        bool speculative = false, replaced = false;
+     };
+ 
+     // ------------------------------------------------------------------------------------------------- helpers
+@@ -679,7 +703,6 @@ namespace vu1x
+         return 0;
+     }
+     uint32_t hNext(VU1NativeCtx *, Frame *f, const Imm *k) { return k->op ? (f->taken ? f->target : k->endPc) : k->endPc; }
+-    VU1NativeFn chainFnThunk(VU1NativeCtx *n, uint32_t next) { return VU1NativeAccess::chainFn(*n, next); }
+ 
+     // ------------------------------------------------------------------------------------------------- translate
+     struct Translator
+@@ -719,7 +742,9 @@ namespace vu1x
+     }
+ 
+     // gen_block(): false = unsupported shape (the exact engine runs the block, as with vu1n_gen.py's None)
+-    bool translate(uint32_t pc0, const uint32_t *words, uint32_t n, Block &b)
++    // entry: VF lanes assumed to hold no Inf/NaN bits on entry (vu1n_gen.py's `entry`); the ones the code relies on become
++    // b.lanes.req, checked by the runtime before every run of the block (runNative / chain)
++    bool translate(uint32_t pc0, const uint32_t *words, uint32_t n, Block &b, L128 entry)
+     {
+         if (n == 0u || n > 64u)
+             return false;
+@@ -787,7 +812,9 @@ namespace vu1x
+             return fl;
+         };
+         Translator t(b);
+-        L128 st = L128::lanes(0); // entry: vf00 only (VF0_LANES)
++        L128 st = entry | L128::lanes(0); // VF lanes known clean (VF0_LANES always)
++        L128 fromEntry = st;               // of those, the ones that come from the entry assumption
++        L128 used;                         // entry lanes the code relies on (-> req)
+         for (uint32_t i = 0; i < n; ++i)
+         {
+             const uint32_t l = L[i], u = U[i], pc = pc0 + 8u * i;
+@@ -812,7 +839,7 @@ namespace vu1x
+                 const uint32_t nl = L[i + 1], nu = U[i + 1];
+                 if (isBranch(nl, nu) && (lowerInfo(nl).viReads & (1u << li.delay)))
+                 {
+-                    Imm &k = t.add(hBackup);
++                    Imm &k = t.add(hBackup, IN_BACKUP);
+                     k.i = static_cast<uint8_t>(i + 1u);
+                     k.fs = li.delay;
+                 }
+@@ -826,7 +853,7 @@ namespace vu1x
+                     return true;
+                 if (k.kind == K_CLIP)
+                 {
+-                    Imm &x = t.add(hClip);
++                    Imm &x = t.add(hClip, IN_CLIP);
+                     x.i = static_cast<uint8_t>(i), x.fs = static_cast<uint8_t>(fs), x.ft = static_cast<uint8_t>(ft), x.prevClip = clipPrev(i);
+                     return true;
+                 }
+@@ -836,7 +863,8 @@ namespace vu1x
+                 {
+                     if (!ft)
+                         return true;
+-                    Imm &x = t.add(k.kind == K_ITOF ? hItof : k.kind == K_FTOI ? hFtoi : hAbs);
++                    Imm &x = t.add(k.kind == K_ITOF ? hItof : k.kind == K_FTOI ? hFtoi : hAbs,
++                                   k.kind == K_ITOF ? IN_ITOF : k.kind == K_FTOI ? IN_FTOI : IN_ABS);
+                     x.fs = static_cast<uint8_t>(fs), x.ft = static_cast<uint8_t>(ft), x.m = static_cast<uint8_t>(m), x.shift = k.shift;
+                     return true;
+                 }
+@@ -846,17 +874,28 @@ namespace vu1x
+                     x.pc = pc, x.upper = u;
+                     return true;
+                 }
+-                const auto norm = [&](uint32_t r, uint32_t need) -> bool {
++                // ld (true: ldn) for operand r, of which the lanes `need` matter. Without the entry assumption (lanes clean
++                // through this block's own writes) the choice is vu1n_gen.py's. A choice the entry assumption makes must give
++                // the same results as ldn: the lanes read raw must be clean, all four for MADD / MSUB (madd's wide-evaluation
++                // test looks at every lane) unless the operand is a broadcast.
++                const auto norm = [&](uint32_t r, uint32_t need, bool allLanes) -> bool {
+                     if (r == 0)
+                         return false;
+                     const L128 want = L128::lanes(r, need);
+-                    return !((s0 & want) == want);
++                    if (((s0 & ~fromEntry) & want) == want)
++                        return false;
++                    const L128 wantAll = allLanes ? L128::lanes(r, 0xF) : want;
++                    if (!((s0 & wantAll) == wantAll))
++                        return true;
++                    used = used | (wantAll & fromEntry);
++                    return false;
+                 };
++                const bool wide = k.kind == K_MADD || k.kind == K_MSUB;
+                 Imm &x = t.add(hFmac, IN_FMAC);
+                 x.i = static_cast<uint8_t>(i), x.op = k.kind, x.src = k.src, x.bc = k.bc, x.toAcc = k.toAcc;
+                 x.fs = static_cast<uint8_t>(fs), x.ft = static_cast<uint8_t>(ft), x.fd = static_cast<uint8_t>(fd), x.m = static_cast<uint8_t>(m);
+-                x.aNorm = norm(fs, m);
+-                x.bNorm = k.src == S_BC ? norm(ft, 1u << k.bc) : k.src == S_V ? norm(ft, m) : 0;
++                x.aNorm = norm(fs, m, wide);
++                x.bNorm = k.src == S_BC ? norm(ft, 1u << k.bc, false) : k.src == S_V ? norm(ft, m, wide) : 0;
+                 x.mac = isMacW(i) ? 1 : 0;
+                 x.clamp = (k.kind != K_MAX && k.kind != K_MINI) ? 1 : 0;
+                 x.store = (k.toAcc || fd) ? 1 : 0;
+@@ -872,30 +911,33 @@ namespace vu1x
+                 const uint8_t comp = static_cast<uint8_t>((dest & 8) ? 0 : (dest & 4) ? 1 : (dest & 2) ? 2 : 3);
+                 if (l == 0u || l == 0x8000033Cu)
+                     return true;
++                // vu1n_gen.py suppress_vf: the upper op of the pair writes this VF register too: as in the exact engine the
++                // upper result wins, the lower op's VF write is dropped (its other effects stay)
++                const bool sup = ft != 0u && (ui.writes & (1u << ft)) != 0u;
+                 const auto basic = [&](Imm &x) { x.i = static_cast<uint8_t>(i), x.fs = static_cast<uint8_t>(fs), x.ft = static_cast<uint8_t>(ft), x.fd = static_cast<uint8_t>(vid), x.m = static_cast<uint8_t>(m), x.dest = static_cast<uint8_t>(dest), x.comp = comp, x.pc = pc, x.lower = l, x.upper = u; };
+                 switch (op)
+                 {
+-                case 0x00: if (ft) { Imm &x = t.add(hLQ, IN_LQ); basic(x); x.imm = imm11; } return true;
++                case 0x00: if (ft && !sup) { Imm &x = t.add(hLQ, IN_LQ); basic(x); x.imm = imm11; } return true;
+                 case 0x01: { Imm &x = t.add(hSQ, IN_SQ); basic(x); x.imm = imm11; return true; }
+-                case 0x04: if (ft) { Imm &x = t.add(hILW); basic(x); x.imm = imm11; } return true;
+-                case 0x05: { Imm &x = t.add(hISW); basic(x); x.imm = imm11; return true; }
++                case 0x04: if (ft) { Imm &x = t.add(hILW, IN_ILW); basic(x); x.imm = imm11; } return true;
++                case 0x05: { Imm &x = t.add(hISW, IN_ISW); basic(x); x.imm = imm11; return true; }
+                 case 0x08: if (ft) { Imm &x = t.add(hIADDIU, IN_IADDIU); basic(x); x.imm = imm15; } return true;
+                 case 0x09: if (ft) { Imm &x = t.add(hISUBIU, IN_ISUBIU); basic(x); x.imm = imm15; } return true;
+                 case 0x10: case 0x12: case 0x13: case 0x1C:
+                 {
+                     if (op == 0x1C && !ft)
+                         return true;
+-                    Imm &x = t.add(hFlagOp); basic(x); x.op = static_cast<uint8_t>(op); x.imm = static_cast<int32_t>(l & 0xFFFFFFu);
++                    Imm &x = t.add(hFlagOp, IN_FLAG); basic(x); x.op = static_cast<uint8_t>(op); x.imm = static_cast<int32_t>(l & 0xFFFFFFu);
+                     x.flag = flagSrc(i, clipW, true);
+                     if (x.flag.farJ < 0) b.readsEntry = true;
+                     return true;
+                 }
+-                case 0x11: { Imm &x = t.add(hFlagOp); basic(x); x.op = 0x11; x.imm = static_cast<int32_t>(l & 0xFFFFFFu); return true; }
++                case 0x11: { Imm &x = t.add(hFlagOp, IN_FLAG); basic(x); x.op = 0x11; x.imm = static_cast<int32_t>(l & 0xFFFFFFu); return true; }
+                 case 0x18: case 0x1A: case 0x1B:
+                 {
+                     if (!ft)
+                         return true;
+-                    Imm &x = t.add(hFlagOp); basic(x); x.op = static_cast<uint8_t>(op);
++                    Imm &x = t.add(hFlagOp, IN_FLAG); basic(x); x.op = static_cast<uint8_t>(op);
+                     x.flag = flagSrc(i, macW, false);
+                     if (x.flag.farJ < 0) b.readsEntry = true;
+                     return true;
+@@ -924,14 +966,14 @@ namespace vu1x
+                     Imm *x = nullptr;
+                     switch (sp)
+                     {
+-                    case 0x30: case 0x31: case 0x3D: case 0x64: if (ft) x = &t.add(hSpecial, sp == 0x30 ? IN_MOVE : IN_NONE); break;
+-                    case 0x34: case 0x36: if (ft || fs) x = &t.add(hSpecial, sp == 0x34 ? IN_LQI : IN_NONE); break;
++                    case 0x30: case 0x31: case 0x3D: case 0x64: if (ft && !sup) x = &t.add(hSpecial, sp == 0x30 ? IN_MOVE : IN_SPECIAL); break;
++                    case 0x34: case 0x36: if ((ft && !sup) || fs) x = &t.add(hSpecial, sp == 0x34 ? IN_LQI : IN_SPECIAL); break;
+                     case 0x35: x = &t.add(hSpecial, IN_SQI); break;
+-                    case 0x37: x = &t.add(hSpecial); break;
+-                    case 0x38: case 0x39: case 0x3A: x = &t.add(hSpecial); break;
++                    case 0x37: x = &t.add(hSpecial, IN_SPECIAL); break;
++                    case 0x38: case 0x39: case 0x3A: x = &t.add(hSpecial, IN_SPECIAL); break;
+                     case 0x3B: break;
+-                    case 0x3C: case 0x3E: case 0x68: case 0x69: if (ft) x = &t.add(hSpecial); break;
+-                    case 0x3F: case 0x6C: x = &t.add(hSpecial); break;
++                    case 0x3C: case 0x3E: case 0x68: case 0x69: if (ft) x = &t.add(hSpecial, IN_SPECIAL); break;
++                    case 0x3F: case 0x6C: x = &t.add(hSpecial, sp == 0x3F ? IN_SPECIAL : IN_NONE); break;
+                     default:
+                     {
+                         Imm &c = t.add(hCallLower); basic(c);
+@@ -941,6 +983,8 @@ namespace vu1x
+                     if (x)
+                     {
+                         basic(*x);
++                        if (sup && (sp == 0x34 || sp == 0x36))
++                            x->ft = 0; // LQI / LQD: the VI step only
+                         x->op = static_cast<uint8_t>(sp);
+                         x->fsf = static_cast<uint8_t>((l >> 21) & 3u);
+                         x->ftf = static_cast<uint8_t>((l >> 23) & 3u);
+@@ -958,14 +1002,16 @@ namespace vu1x
+             {
+                 const uint32_t op = l >> 25;
+                 const uint32_t ft = (l >> 16) & 31u, fs = (l >> 11) & 31u;
+-                Imm &x = t.add(hBranch);
++                Imm &x = t.add(hBranch, IN_BRANCH);
+                 x.i = static_cast<uint8_t>(i), x.op = static_cast<uint8_t>(op), x.fs = static_cast<uint8_t>(fs), x.ft = static_cast<uint8_t>(ft), x.pc = pc;
+                 x.imm = static_cast<int32_t>((pc + 8u + static_cast<uint32_t>(sx(l, 11) * 8)) & 0x3FFFu);
++                x.endPc = (pc + 16u) & 0x3FFFu; // the block end (the branch is the second to last pair)
+                 x.useVibFs = i > 0 && infos[i - 1].delay == fs && fs != 0;
+                 x.useVibFt = i > 0 && infos[i - 1].delay == ft && ft != 0;
+                 if (!emitUpper(stI))
+                     return false;
+                 st = applyPair(st, eff);
++                fromEntry = fromEntry & ~(eff.killLower | eff.killUpper | eff.setUpper);
+                 continue;
+             }
+             if (iBit)
+@@ -985,11 +1031,12 @@ namespace vu1x
+                 emitLower();
+             }
+             st = applyPair(st, eff);
++            fromEntry = fromEntry & ~(eff.killLower | eff.killUpper | eff.setUpper);
+             for (int halt = 0; halt < 2; ++halt)
+             {
+                 if (!((u >> (halt ? 27 : 28)) & 1u))
+                     continue;
+-                Imm &x = t.add(hHalt, IN_NONE, true);
++                Imm &x = t.add(hHalt, IN_HALT, true);
+                 x.i = static_cast<uint8_t>(i), x.flagT = static_cast<uint8_t>(halt), x.endPc = (pc + 8u) & 0x3FFFu;
+                 x.fm = flushList(i, macW, false);
+                 x.fc = flushList(i, clipW, true);
+@@ -1011,7 +1058,7 @@ namespace vu1x
+                     older.push_back(w[k]);
+             for (size_t k = 0; k < older.size(); ++k)
+             {
+-                Imm &x = t.add(pass ? hTailC : hTailQ);
++                Imm &x = t.add(pass ? hTailC : hTailQ, pass ? IN_TAILC : IN_TAILQ);
+                 x.k = static_cast<uint8_t>(k), x.j = static_cast<uint8_t>(older[k]);
+             }
+         }
+@@ -1020,12 +1067,12 @@ namespace vu1x
+             return false;
+         if (!macW.empty())
+         {
+-            Imm &x = t.add(hPushMacEnd);
++            Imm &x = t.add(hPushMacEnd, IN_PUSHMAC);
+             x.j = static_cast<uint8_t>(macW.back()), x.m = static_cast<uint8_t>(kRev4[(U[macW.back()] >> 21) & 0xFu]), x.hasTail = b.hasTail;
+         }
+         if (!clipW.empty())
+         {
+-            Imm &x = t.add(hPushClipEnd);
++            Imm &x = t.add(hPushClipEnd, IN_PUSHCLIP);
+             x.j = static_cast<uint8_t>(clipW.back()), x.hasTail = b.hasTail;
+         }
+         if (b.hasTail)
+@@ -1045,27 +1092,42 @@ namespace vu1x
+                 b.ebit = true;
+         if (!b.ebit)
+         {
+-            Imm &x = t.add(hNext); // the emitter takes its result as the next pc (chain)
++            Imm &x = t.add(hNext, IN_NEXT); // the next pc (chain): r13d
+             x.op = lastIsBranchBlock ? 1 : 0, x.endPc = b.endPc;
+         }
+-        // MAC values read by flag ops (FMEQ / FMAND / FMOR): the inline tier computes m{j} only for these writers
++        // MAC values read by flag ops (FMEQ / FMAND / FMOR): the inline tier computes m{j} only for these writers, and
++        // stores q{j} only for writers whose unclamped result is read later (macM, the pushes at the end or at a D/T exit,
++        // the tail record)
+         {
+             std::vector<int> fmacOfPair(n, -1);
+             for (const Stmt &stmt : b.stmts)
+                 if (stmt.inl == IN_FMAC)
+                     fmacOfPair[b.imms[stmt.imm].i] = static_cast<int>(stmt.imm);
++            const auto need = [&](int j, bool m) {
++                if (j >= 0 && fmacOfPair[j] >= 0)
++                {
++                    b.imms[fmacOfPair[j]].qNeed = 1;
++                    if (m)
++                        b.imms[fmacOfPair[j]].macM = 1;
++                }
++            };
+             for (const Stmt &stmt : b.stmts)
+             {
+                 const Imm &x = b.imms[stmt.imm];
+-                if (stmt.fn != hFlagOp || !(x.op == 0x18 || x.op == 0x1A || x.op == 0x1B))
+-                    continue;
+-                const auto mark = [&](int j) { if (j >= 0 && fmacOfPair[j] >= 0) b.imms[fmacOfPair[j]].macM = 1; };
+-                for (uint32_t q = 0; q < x.flag.nNear; ++q)
+-                    mark(x.flag.nearJ[q]);
+-                mark(x.flag.farJ);
++                if (stmt.fn == hPushMacEnd || stmt.fn == hTailQ)
++                    need(x.j, false);
++                else if (stmt.fn == hHalt)
++                    for (uint32_t q = 0; q < x.fm.n; ++q)
++                        need(x.fm.j[q], false);
++                else if (stmt.fn == hFlagOp && (x.op == 0x18 || x.op == 0x1A || x.op == 0x1B))
++                {
++                    for (uint32_t q = 0; q < x.flag.nNear; ++q)
++                        need(x.flag.nearJ[q], true);
++                    need(x.flag.farJ, true);
++                }
+             }
+         }
+-        // clean-operand summary (block_summary); req stays 0 (entry assumption: vf00 only)
++        // clean-operand summary (block_summary); req: the entry lanes relied on (vf00 aside)
+         L128 top = L128::all(), bot;
+         for (uint32_t i = 0; i < n; ++i)
+         {
+@@ -1074,7 +1136,9 @@ namespace vu1x
+             bot = applyPair(bot, e);
+         }
+         const L128 keep = top & ~bot;
+-        b.lanes = {{0u, 0u}, {bot.w[0], bot.w[1]}, {keep.w[0], keep.w[1]}};
++        const L128 req = used & ~L128::lanes(0);
++        b.lanes = {{req.w[0], req.w[1]}, {bot.w[0], bot.w[1]}, {keep.w[0], keep.w[1]}};
++        b.speculative = req.w[0] != 0u || req.w[1] != 0u;
+         return true;
+     }
+ 
+@@ -1141,273 +1205,374 @@ namespace vu1x
+     };
+     constexpr uint8_t CC_Z = 0x4, CC_NZ = 0x5;
+ 
+-    // executable memory: 1 MB chunks, read-write-execute, never freed
++    // executable memory, never freed: one reserved 1 GB address range committed read-write-execute 1 MB at a time, so a block
++    // can tell with one range check that the next block's code is JIT code too (it then jumps past that block's prologue
++    // and keeps its frame and registers, see emit). If the range cannot be reserved or is full, separate 1 MB chunks
++    // outside it (those blocks are entered through their prologue).
+     class CodeArena
+     {
+     public:
++        static constexpr size_t kReserve = size_t(1) << 30;
++        static constexpr size_t kStep = size_t(1) << 20;
++        CodeArena()
++        {
++#if defined(_WIN32)
++            m_base = static_cast<uint8_t *>(VirtualAlloc(nullptr, kReserve, MEM_RESERVE, PAGE_NOACCESS));
++#else
++            void *p = mmap(nullptr, kReserve, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++            m_base = p == MAP_FAILED ? nullptr : static_cast<uint8_t *>(p);
++#endif
++            m_cur = m_committed = m_base;
++        }
+         void *put(const std::vector<uint8_t> &code)
+         {
+             const size_t size = (code.size() + 15u) & ~size_t(15);
+-            if (!m_cur || static_cast<size_t>(m_end - m_cur) < size)
++            uint8_t *at = nullptr;
++            if (m_base && static_cast<size_t>(m_committed - m_cur) < size)
++            {
++                const size_t grow = (std::max(size, kStep) + kStep - 1u) / kStep * kStep;
++                if (static_cast<size_t>(m_base + kReserve - m_committed) >= grow && commit(m_committed, grow))
++                {
++                    m_committed += grow;
++                    m_total += grow;
++                }
++            }
++            if (m_base && static_cast<size_t>(m_committed - m_cur) >= size)
++            {
++                at = m_cur;
++                m_cur += size;
++            }
++            else
+             {
+-                const size_t chunk = std::max<size_t>(size, 1u << 20);
++                if (!m_out || static_cast<size_t>(m_outEnd - m_out) < size)
++                {
++                    const size_t chunk = std::max(size, kStep);
+ #if defined(_WIN32)
+-                void *p = VirtualAlloc(nullptr, chunk, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
++                    void *p = VirtualAlloc(nullptr, chunk, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+ #else
+-                void *p = mmap(nullptr, chunk, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+-                if (p == MAP_FAILED)
+-                    p = nullptr;
++                    void *p = mmap(nullptr, chunk, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++                    if (p == MAP_FAILED)
++                        p = nullptr;
+ #endif
+-                if (!p)
+-                    return nullptr;
+-                m_cur = static_cast<uint8_t *>(p);
+-                m_end = m_cur + chunk;
+-                m_total += chunk;
++                    if (!p)
++                        return nullptr;
++                    m_out = static_cast<uint8_t *>(p);
++                    m_outEnd = m_out + chunk;
++                    m_total += chunk;
++                }
++                at = m_out;
++                m_out += size;
+             }
+-            uint8_t *at = m_cur;
+             std::memcpy(at, code.data(), code.size());
+-            m_cur += size;
+ #if defined(_WIN32)
+             FlushInstructionCache(GetCurrentProcess(), at, code.size());
+ #endif
+             return at;
+         }
+         size_t reserved() const { return m_total; }
++        // the reserved range: code there is JIT code (fast chaining)
++        uint64_t lo() const { return reinterpret_cast<uint64_t>(m_base); }
++        uint32_t span() const { return m_base ? static_cast<uint32_t>(kReserve) : 0u; }
+ 
+     private:
+-        uint8_t *m_cur = nullptr, *m_end = nullptr;
++        static bool commit(uint8_t *at, size_t bytes)
++        {
++#if defined(_WIN32)
++            return VirtualAlloc(at, bytes, MEM_COMMIT, PAGE_EXECUTE_READWRITE) != nullptr;
++#else
++            return mprotect(at, bytes, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
++#endif
++        }
++        uint8_t *m_base = nullptr, *m_cur = nullptr, *m_committed = nullptr;
++        uint8_t *m_out = nullptr, *m_outEnd = nullptr; // chunks outside the range
+         size_t m_total = 0;
+     };
+ 
+-    // the inline tier (x86 SSE for hot statements, see emitInline); GOW_VU1X_INLINE=0: every statement is a helper call
++    // ------------------------------------------------------------------------------------------------- inline tier
++    // x86 SSE / integer code for the statements, instruction for instruction what their helper does (the helpers stay the
++    // reference: GOW_VU1X_INLINE=0 runs them, tests/vu1_x64_fuzz_test.cpp compares both, docs/research/vu1-x64-jit.md has
++    // the list). Statements without an inline form (EFU / XGKICK / exact-engine call-outs, flag reads that can reach the
++    // flags of an earlier block, D/T exits that are enabled) call their helper. Registers in every block: rbx = ctx,
++    // rbp = the constant table below, r12 = frame, r13 = next pc, r14 = VU1State, r15 = VU data; xmm0 = blend mask /
++    // temporary, xmm1-xmm5 temporaries, eax / ecx / edx integer temporaries. Legacy SSE memory operands need 16-byte
++    // alignment: the constant table and the frame are aligned, VU registers and VU memory are read with movups only.
+     bool inlineEnabled()
+     {
+         static const bool on = [] { const char *v = std::getenv("GOW_VU1X_INLINE"); return !(v && v[0] == '0'); }();
+         return on;
+     }
+-    bool emitInline(Asm &a, const Imm &k, InlineKind kind); // inline tier (below)
+ 
+-    constexpr uint32_t kFrameOffset = 32; // Windows shadow space below the frame (unused on System V, same layout)
+-    constexpr uint32_t kStackBytes = (kFrameOffset + sizeof(Frame) + 15u) & ~15u;
+-    static_assert(kStackBytes < 4096, "a larger frame needs stack probes on Windows");
+-
+-    std::vector<uint8_t> emit(const Block &blk)
++    alignas(16) const uint32_t kConst[][4] = {
++        {0x7F800000u, 0x7F800000u, 0x7F800000u, 0x7F800000u}, // C_EXP: exponent mask
++        {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u}, // C_SIGN
++        {0x7F7FFFFFu, 0x7F7FFFFFu, 0x7F7FFFFFu, 0x7F7FFFFFu}, // C_FMAX: FLT_MAX bits
++        {0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu}, // C_ABS: abs mask, also INT_MAX (FTOI saturation)
++        {0x7F7FFFFEu, 0x7F7FFFFEu, 0x7F7FFFFEu, 0x7F7FFFFEu}, // C_LIM: madd limit (below FLT_MAX)
++        {0xFF7FFFFFu, 0xFF7FFFFFu, 0xFF7FFFFFu, 0xFF7FFFFFu}, // C_NFMAX: -FLT_MAX
++        {0x4F000000u, 0x4F000000u, 0x4F000000u, 0x4F000000u}, // C_TWO31: 2^31 (FTOI saturation threshold)
++        {0x3D800000u, 0x3D800000u, 0x3D800000u, 0x3D800000u}, // C_ITOF4: 1/16
++        {0x39800000u, 0x39800000u, 0x39800000u, 0x39800000u}, // C_ITOF12: 1/4096
++        {0x38000000u, 0x38000000u, 0x38000000u, 0x38000000u}, // C_ITOF15: 1/32768
++        {0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u}, // C_FTOI0: 1
++        {0x41800000u, 0x41800000u, 0x41800000u, 0x41800000u}, // C_FTOI4: 16
++        {0x45800000u, 0x45800000u, 0x45800000u, 0x45800000u}, // C_FTOI12: 4096
++        {0x47000000u, 0x47000000u, 0x47000000u, 0x47000000u}, // C_FTOI15: 32768
++        {0x0C040800u, 0x0E060A02u, 0x0D050901u, 0x0F070B03u}, // C_REV4: kRev4 as bytes (SSE lane mask -> DEST order)
++    };
++    enum ConstIdx : int32_t
+     {
+-        Asm a;
+-        // Avoid repeated byte-vector reallocations while emitting a new block.
+-        a.c.reserve(256u + blk.stmts.size() * 128u);
+-        // prologue: 5 pushes keep rsp 16-byte aligned (entry rsp = 8 mod 16)
+-        a.push(RBX); a.push(R12); a.push(R13); a.push(R14); a.push(R15);
+-        a.subRsp(kStackBytes);
+-        a.movRR(RBX, kArg0);
+-        a.lea(R12, RSP, static_cast<int32_t>(kFrameOffset));
+-        a.movRM(R14, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, s)));
+-        a.movRM(R15, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, data)));
+-        std::vector<size_t> toRet;
+-        const size_t count = blk.stmts.size();
+-        for (size_t idx = 0; idx < count; ++idx)
+-        {
+-            const Stmt &st = blk.stmts[idx];
+-            const Imm &k = blk.imms[st.imm];
+-            const bool isNext = !blk.ebit && idx + 1 == count;
+-            if (!isNext && st.inl != IN_NONE && inlineEnabled() && emitInline(a, k, st.inl))
+-                continue;
+-            a.movRR(kArg0, RBX);
+-            a.movRR(kArg1, R12);
+-            a.movRI64(kArg2, reinterpret_cast<uint64_t>(&k));
+-            a.call(reinterpret_cast<const void *>(st.fn));
+-            if (st.exitIfNonZero)
+-            {
+-                a.testEaxEax();
+-                toRet.push_back(a.jcc(CC_NZ));
+-            }
+-        }
+-        if (blk.ebit)
+-            a.movEaxImm(kVu1nEnded | blk.endPc);
+-        else
+-        {
+-            // eax = next pc (hNext); the next block's code when chain() allows it, as a tail jump
+-            a.movRR32(R13, RAX);
+-            a.movRR(kArg0, RBX);
+-            a.movRR32(kArg1, R13);
+-            a.call(reinterpret_cast<const void *>(&chainFnThunk));
+-            a.testRaxRax();
+-            const size_t noChain = a.jcc(CC_Z);
+-            a.movRR(kArg0, RBX);
+-            a.addRsp(kStackBytes);
+-            a.pop(R15); a.pop(R14); a.pop(R13); a.pop(R12); a.pop(RBX);
+-            a.jmpR(RAX);
+-            a.patch(noChain, a.c.size());
+-            a.movRR32(RAX, R13);
+-            a.orEaxImm(kVu1nDone);
+-        }
+-        const size_t ret = a.c.size();
+-        for (size_t at : toRet)
+-            a.patch(at, ret);
+-        a.addRsp(kStackBytes);
+-        a.pop(R15); a.pop(R14); a.pop(R13); a.pop(R12); a.pop(RBX);
+-        a.b(0xC3);
+-        return a.c;
+-    }
++        C_EXP = 0, C_SIGN = 16, C_FMAX = 32, C_ABS = 48, C_LIM = 64, C_NFMAX = 80, C_TWO31 = 96, C_ITOF4 = 112, C_ITOF12 = 128,
++        C_ITOF15 = 144, C_FTOI0 = 160, C_FTOI4 = 176, C_FTOI12 = 192, C_FTOI15 = 208, C_REV4 = 224
++    };
++    static_assert(std::bit_cast<uint32_t>(1.0f / 16.0f) == 0x3D800000u && std::bit_cast<uint32_t>(1.0f / 4096.0f) == 0x39800000u &&
++                  std::bit_cast<uint32_t>(1.0f / 32768.0f) == 0x38000000u && std::bit_cast<uint32_t>(16.0f) == 0x41800000u &&
++                  std::bit_cast<uint32_t>(4096.0f) == 0x45800000u && std::bit_cast<uint32_t>(32768.0f) == 0x47000000u &&
++                  std::bit_cast<uint32_t>(2147483648.0f) == 0x4F000000u, "vu1x constant table");
++    constexpr int XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5;
++    constexpr uint8_t CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF, CC_E = 0x4, CC_NE = 0x5, CC_P = 0xA;
+ 
+-    // ------------------------------------------------------------------------------------------------- compile + register
+-    struct State
++    // a memory operand: [base + disp32] or [base + index * scale + disp32]
++    struct Mem
+     {
+-        std::mutex mutex;
+-        CodeArena arena;
+-        std::vector<std::unique_ptr<Block>> blocks;
+-        std::unordered_set<uint64_t> failed;
+-        unsigned long long compiled = 0, unsupported = 0, codeBytes = 0, nanos = 0;
++        int base;
++        int32_t disp;
++        int index = -1;
++        int scale = 1;
+     };
+-    State &state()
+-    {
+-        static State s;
+-        return s;
+-    }
+-    bool enabled()
++    // AVX (VEX.128 encodings, three-operand forms) when the CPU and OS support it; GOW_VU1X_AVX=0: legacy SSE only. Both
++    // give the same bits (the same IEEE operations under the same MXCSR); tests compare them.
++    bool avxEnabled()
+     {
+         static const bool on = [] {
+-            const char *v = std::getenv("GOW_VU1N_X64");
+-            const bool e = v && v[0] && v[0] != '0';
+-            if (e)
+-                std::fprintf(stderr, "[vu1x] x86-64 JIT on (inline tier %s)\n", inlineEnabled() ? "on" : "off");
+-            return e;
++            const char *v = std::getenv("GOW_VU1X_AVX");
++            if (v && v[0] == '0')
++                return false;
++#if defined(_MSC_VER) && !defined(__clang__)
++            int r[4];
++            __cpuid(r, 1);
++            return (r[2] & (1 << 28)) && (r[2] & (1 << 27)) && (_xgetbv(0) & 6u) == 6u;
++#else
++            return __builtin_cpu_supports("avx") != 0;
++#endif
+         }();
+         return on;
+     }
+-    // A block without native code: translate, emit, register (key = vu1n::blockKey). False: unsupported (the exact engine
+-    // keeps it; remembered so the translation is not tried again).
+-    bool compile(uint32_t pc, const uint32_t *words, uint32_t count, uint64_t key)
++
++    // the encoder: [legacy prefix] [REX] opcode bytes, ModRM (+ SIB) and disp32 / a register operand. With AVX the SSE
++    // methods emit the VEX form of the same instruction (two-operand semantics: the destination is also the first source);
++    // the v* methods are the three-operand forms (AVX only).
++    struct E
+     {
+-        State &g = state();
+-        std::lock_guard<std::mutex> lock(g.mutex);
+-        if (g.failed.count(key))
+-            return false;
+-        const auto t0 = std::chrono::steady_clock::now();
+-        auto blk = std::make_unique<Block>();
+-        blk->imms.reserve(8u * count + 16u);
+-        blk->stmts.reserve(8u * count + 16u);
+-        if (!translate(pc, words, count, *blk))
++        Asm &a;
++        bool avx = false;
++        void addr(int reg, const Mem &mm)
+         {
+-            g.failed.insert(key);
+-            ++g.unsupported;
+-            return false;
++            if (mm.index < 0)
++                a.mem(reg, mm.base, mm.disp);
++            else
++            {
++                const int sc = mm.scale == 8 ? 3 : mm.scale == 4 ? 2 : mm.scale == 2 ? 1 : 0;
++                a.modrm(2, reg, 4);
++                a.b(static_cast<uint8_t>((sc << 6) | ((mm.index & 7) << 3) | (mm.base & 7)));
++                a.d32(static_cast<uint32_t>(mm.disp));
++            }
+         }
+-        const std::vector<uint8_t> code = emit(*blk);
+-        void *fn = g.arena.put(code);
+-        if (!fn)
++        void m(uint8_t pre, bool w, std::initializer_list<uint8_t> opc, int reg, const Mem &mm)
+         {
+-            g.failed.insert(key);
+-            return false;
++            if (pre)
++                a.b(pre);
++            const uint8_t rex = static_cast<uint8_t>(0x40 | (w ? 8 : 0) | ((reg & 8) ? 4 : 0) | (mm.index >= 0 && (mm.index & 8) ? 2 : 0) |
++                                                     ((mm.base & 8) ? 1 : 0));
++            if (rex != 0x40)
++                a.b(rex);
++            for (const uint8_t o : opc)
++                a.b(o);
++            addr(reg, mm);
+         }
+-        vu1nRegisterBlock(key, reinterpret_cast<VU1NativeFn>(fn), count | (blk->readsEntry ? 0x10000u : 0u),
+-                          blk->hasTail ? &blk->tail : nullptr, &blk->lanes);
+-        g.blocks.push_back(std::move(blk));
+-        ++g.compiled;
+-        g.codeBytes += code.size();
+-        g.nanos += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+-        return true;
+-    }
+-
+-    // ------------------------------------------------------------------------------------------------- inline tier
+-    // x86 SSE for the hot statements, instruction for instruction what the helper does (the helper stays the reference:
+-    // GOW_VU1X_INLINE=0 runs the helpers, tests/vu1_x64_fuzz_test.cpp compares both). Registers: xmm0 = blend mask /
+-    // temporary, xmm1 = a, xmm2 = b, xmm3-xmm4 = temporaries, xmm5 = ACC; eax / ecx = integer temporaries, rcx = constant
+-    // table. Legacy SSE memory operands need 16-byte alignment: the constant table and the frame are aligned, VU registers
+-    // and VU memory are read with movups only.
+-    alignas(16) const uint32_t kConst[][4] = {
+-        {0x7F800000u, 0x7F800000u, 0x7F800000u, 0x7F800000u}, // 0: exponent mask
+-        {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u}, // 1: sign
+-        {0x7F7FFFFFu, 0x7F7FFFFFu, 0x7F7FFFFFu, 0x7F7FFFFFu}, // 2: FLT_MAX bits
+-        {0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu}, // 3: abs mask
+-        {0x7F7FFFFEu, 0x7F7FFFFEu, 0x7F7FFFFEu, 0x7F7FFFFEu}, // 4: madd limit (below FLT_MAX)
+-        {0xFF7FFFFFu, 0xFF7FFFFFu, 0xFF7FFFFFu, 0xFF7FFFFFu}, // 5: -FLT_MAX
+-    };
+-    enum ConstIdx : int32_t
+-    {
+-        C_EXP = 0, C_SIGN = 16, C_FMAX = 32, C_ABS = 48, C_LIM = 64, C_NFMAX = 80
+-    };
+-    constexpr int XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5;
+-
+-    struct SseAsm
+-    {
+-        Asm &a;
+-        // [prefix] [REX] 0F op /r with a register (mod 3) or [base + disp32]
+-        void opRR(uint8_t prefix, uint8_t op, int reg, int rm, bool op38 = false)
+-        {
+-            if (prefix) a.b(prefix);
+-            a.rex(false, reg, rm);
+-            a.b(0x0F);
+-            if (op38) a.b(0x38);
+-            a.b(op);
++        void r(uint8_t pre, bool w, std::initializer_list<uint8_t> opc, int reg, int rm)
++        {
++            if (pre)
++                a.b(pre);
++            a.rex(w, reg, rm);
++            for (const uint8_t o : opc)
++                a.b(o);
+             a.modrm(3, reg, rm);
+         }
+-        void opRM(uint8_t prefix, uint8_t op, int reg, int base, int32_t disp)
+-        {
+-            if (prefix) a.b(prefix);
+-            a.rex(false, reg, base);
+-            a.b(0x0F);
+-            a.b(op);
+-            a.mem(reg, base, disp);
+-        }
+-        void movupsLoad(int x, int base, int32_t disp) { opRM(0, 0x10, x, base, disp); }
+-        void movupsStore(int base, int32_t disp, int x) { opRM(0, 0x11, x, base, disp); }
+-        void movaps(int dst, int src) { opRR(0, 0x28, dst, src); }
+-        void movssLoad(int x, int base, int32_t disp) { opRM(0xF3, 0x10, x, base, disp); }
+-        void shufps(int dst, int src, uint8_t imm) { opRR(0, 0xC6, dst, src); a.b(imm); }
+-        void blendps(int dst, int src, uint8_t imm) // 66 0F 3A 0C /r ib
+-        {
+-            a.b(0x66); a.rex(false, dst, src); a.b(0x0F); a.b(0x3A); a.b(0x0C); a.modrm(3, dst, src); a.b(imm);
+-        }
+-        void pblendvb(int dst, int src) { opRR(0x66, 0x10, dst, src, true); } // dst = xmm0 ? src : dst
+-        void arith(uint8_t op, int dst, int src) { opRR(0, op, dst, src); }   // 58 add, 59 mul, 5C sub, 5D min, 5F max
+-        void arithM(uint8_t op, int dst, int base, int32_t disp) { opRM(0, op, dst, base, disp); } // 54 and, 56 or, 5D, 5F
+-        void pM(uint8_t op, int dst, int base, int32_t disp) { opRM(0x66, op, dst, base, disp); } // 76 pcmpeqd, 66 pcmpgtd
+-        void pRR(uint8_t op, int dst, int src) { opRR(0x66, op, dst, src); } // EB por
+-        void pmovmskb(int gp, int x) { opRR(0x66, 0xD7, gp, x); }
++        // VEX: 3-byte prefix C4 (R X B inverted, map), (W, vvvv inverted, L = 0, pp), then the opcode. opc as the legacy
++        // form: {0x0F, op}, {0x0F, 0x38, op} or {0x0F, 0x3A, op}. vreg: the extra source (NDS), 0 when unused (1111).
++        uint8_t vexPrefix(uint8_t pre, std::initializer_list<uint8_t> opc, int reg, int vreg, int index, int base)
++        {
++            const uint8_t *o = opc.begin();
++            const int map = opc.size() == 3 ? (o[1] == 0x38 ? 2 : 3) : 1;
++            const int pp = pre == 0x66 ? 1 : pre == 0xF3 ? 2 : pre == 0xF2 ? 3 : 0;
++            a.b(0xC4);
++            a.b(static_cast<uint8_t>(((reg & 8) ? 0 : 0x80) | ((index >= 0 && (index & 8)) ? 0 : 0x40) | ((base & 8) ? 0 : 0x20) | map));
++            a.b(static_cast<uint8_t>(((~vreg & 15) << 3) | pp));
++            return o[opc.size() - 1];
++        }
++        void vm(uint8_t pre, std::initializer_list<uint8_t> opc, int reg, int vreg, const Mem &mm)
++        {
++            a.b(vexPrefix(pre, opc, reg, vreg, mm.index, mm.base));
++            addr(reg, mm);
++        }
++        void vr(uint8_t pre, std::initializer_list<uint8_t> opc, int reg, int vreg, int rm)
++        {
++            a.b(vexPrefix(pre, opc, reg, vreg, -1, rm));
++            a.modrm(3, reg, rm);
++        }
++        // an SSE instruction: nds = the VEX form reads the destination as its first source
++        void sr(uint8_t pre, std::initializer_list<uint8_t> opc, int d, int s, bool nds) { if (avx) vr(pre, opc, d, nds ? d : 0, s); else r(pre, false, opc, d, s); }
++        void sm(uint8_t pre, std::initializer_list<uint8_t> opc, int d, const Mem &mm, bool nds) { if (avx) vm(pre, opc, d, nds ? d : 0, mm); else m(pre, false, opc, d, mm); }
++        // SSE
++        void movupsL(int x, const Mem &mm) { sm(0, {0x0F, 0x10}, x, mm, false); }
++        void movupsS(const Mem &mm, int x) { sm(0, {0x0F, 0x11}, x, mm, false); }
++        void movssL(int x, const Mem &mm) { sm(0xF3, {0x0F, 0x10}, x, mm, false); }
++        void movssS(const Mem &mm, int x) { sm(0xF3, {0x0F, 0x11}, x, mm, false); }
++        void movaps(int d, int s) { sr(0, {0x0F, 0x28}, d, s, false); }
++        void ps(uint8_t op, int d, int s) { sr(0, {0x0F, op}, d, s, true); }               // 54 and 56 or 57 xor 58 add 59 mul 5C sub 5D min 5F max 14 unpcklps 15 unpckhps
++        void psM(uint8_t op, int d, const Mem &mm) { sm(0, {0x0F, op}, d, mm, true); }
++        void pd(uint8_t op, int d, int s) { sr(0x66, {0x0F, op}, d, s, true); }            // 76 pcmpeqd 66 pcmpgtd EB por EF pxor DB pand
++        void pdM(uint8_t op, int d, const Mem &mm) { sm(0x66, {0x0F, op}, d, mm, true); }
++        void pmaxsd(int d, int s) { sr(0x66, {0x0F, 0x38, 0x3D}, d, s, true); }
++        void ptest(int d, int s) { sr(0x66, {0x0F, 0x38, 0x17}, d, s, false); }
++        void cmpps(int d, int s, uint8_t pred) { sr(0, {0x0F, 0xC2}, d, s, true); a.b(pred); } // 1 lt, 2 le
++        void shufps(int d, int s, uint8_t imm) { sr(0, {0x0F, 0xC6}, d, s, true); a.b(imm); }
++        void blendps(int d, int s, uint8_t imm) { sr(0x66, {0x0F, 0x3A, 0x0C}, d, s, true); a.b(imm); }
++        void blendvpsM(int d, const Mem &mm) // mask: xmm0
++        {
++            if (avx) { vm(0x66, {0x0F, 0x3A, 0x4A}, d, d, mm); a.b(0x00); }
++            else m(0x66, false, {0x0F, 0x38, 0x14}, d, mm);
++        }
++        void pblendvb(int d, int s) // mask: xmm0
++        {
++            if (avx) { vr(0x66, {0x0F, 0x3A, 0x4C}, d, d, s); a.b(0x00); }
++            else r(0x66, false, {0x0F, 0x38, 0x10}, d, s);
++        }
++        void cvtdq2ps(int d, int s) { sr(0, {0x0F, 0x5B}, d, s, false); }
++        void cvttps2dq(int d, int s) { sr(0xF3, {0x0F, 0x5B}, d, s, false); }
++        void ss(uint8_t op, int d, int s) { sr(0xF3, {0x0F, op}, d, s, true); }            // 5E divss 51 sqrtss
++        void ucomiss(int d, int s) { sr(0, {0x0F, 0x2E}, d, s, false); }
++        void movmskps(int gp, int x) { sr(0, {0x0F, 0x50}, gp, x, false); }
++        void pmovmskb(int gp, int x) { sr(0x66, {0x0F, 0xD7}, gp, x, false); }
++        void movdToX(int x, int gp) { sr(0x66, {0x0F, 0x6E}, x, gp, false); }
++        // AVX three-operand forms: d = s1 op s2
++        void v3(uint8_t pre, uint8_t op, int d, int s1, int s2) { vr(pre, {0x0F, op}, d, s1, s2); }
++        void v3M(uint8_t pre, uint8_t op, int d, int s1, const Mem &mm) { vm(pre, {0x0F, op}, d, s1, mm); }
++        void vblendvps(int d, int s1, const Mem &mm, int mask) { vm(0x66, {0x0F, 0x3A, 0x4A}, d, s1, mm); a.b(static_cast<uint8_t>(mask << 4)); }
++        void vpblendvb(int d, int s1, int s2, int mask) { vr(0x66, {0x0F, 0x3A, 0x4C}, d, s1, s2); a.b(static_cast<uint8_t>(mask << 4)); }
++        void vblendpsM(int d, int s1, const Mem &mm, uint8_t imm) { vm(0x66, {0x0F, 0x3A, 0x0C}, d, s1, mm); a.b(imm); }
++        void vcmppsM(int d, int s1, const Mem &mm, uint8_t pred) { vm(0, {0x0F, 0xC2}, d, s1, mm); a.b(pred); }
++        void vbroadcastssM(int x, const Mem &mm) { vm(0x66, {0x0F, 0x38, 0x18}, x, 0, mm); }
++        void vshufps(int d, int s1, int s2, uint8_t imm) { vr(0, {0x0F, 0xC6}, d, s1, s2); a.b(imm); }
++        // integer
++        void ld32(int reg, const Mem &mm) { m(0, false, {0x8B}, reg, mm); }
++        void st32(const Mem &mm, int reg) { m(0, false, {0x89}, reg, mm); }
++        void ld64(int reg, const Mem &mm) { m(0, true, {0x8B}, reg, mm); }
++        void st64(const Mem &mm, int reg) { m(0, true, {0x89}, reg, mm); }
++        void st32i(const Mem &mm, uint32_t v) { m(0, false, {0xC7}, 0, mm); a.d32(v); }
++        void movzx8(int reg, const Mem &mm) { m(0, false, {0x0F, 0xB6}, reg, mm); }
++        void movzx16(int reg, const Mem &mm) { m(0, false, {0x0F, 0xB7}, reg, mm); }
++        void movsx16(int reg, const Mem &mm) { m(0, false, {0x0F, 0xBF}, reg, mm); }
++        void movsx16R(int d, int s) { r(0, false, {0x0F, 0xBF}, d, s); }
++        void movzx8R(int d, int s) { r(0, false, {0x0F, 0xB6}, d, s); } // s: al / cl / dl
++        void alu32i(int digit, int reg, int32_t v) { r(0, false, {0x81}, digit, reg); a.d32(static_cast<uint32_t>(v)); } // 0 add 1 or 4 and 5 sub 7 cmp
++        void alu32(uint8_t op, int rm, int reg) { r(0, false, {op}, reg, rm); }           // op rm, reg: 01 add 09 or 21 and 29 sub 31 xor 39 cmp 85 test
++        void alu64(uint8_t op, int rm, int reg) { r(0, true, {op}, reg, rm); }
++        void alu32M(uint8_t op, int reg, const Mem &mm) { m(0, false, {op}, reg, mm); }   // op reg, [m]: 03 add 0B or 23 and 2B sub
++        void alu64M(uint8_t op, int reg, const Mem &mm) { m(0, true, {op}, reg, mm); }
++        void testi(int reg, uint32_t v) { r(0, false, {0xF7}, 0, reg); a.d32(v); }
++        void shl32(int reg, uint8_t n) { r(0, false, {0xC1}, 4, reg); a.b(n); }
++        void setcc(uint8_t cc, int reg8) { r(0, false, {0x0F, static_cast<uint8_t>(0x90 | cc)}, 0, reg8); }
++        void cmov(uint8_t cc, int d, int s) { r(0, false, {0x0F, static_cast<uint8_t>(0x40 | cc)}, d, s); }
++        void movi32(int reg, uint32_t v) { if (reg & 8) a.b(0x41); a.b(static_cast<uint8_t>(0xB8 + (reg & 7))); a.d32(v); }
+     };
+-    constexpr uint8_t OP_ADD = 0x58, OP_MUL = 0x59, OP_SUB = 0x5C, OP_MIN = 0x5D, OP_MAX = 0x5F, OP_AND = 0x54, OP_OR = 0x56;
+ 
+     int32_t vfOff(uint32_t r) { return static_cast<int32_t>(offsetof(VU1State, vf) + r * 16u); }
+     int32_t viOff(uint32_t r) { return static_cast<int32_t>(offsetof(VU1State, vi) + r * 4u); }
++    Mem vfM(uint32_t r, uint32_t lane = 0) { return {R14, vfOff(r) + static_cast<int32_t>(lane * 4u)}; }
++    Mem viM(uint32_t r) { return {R14, viOff(r)}; }
++    Mem stM(size_t off) { return {R14, static_cast<int32_t>(off)}; }
++    Mem ctxM(size_t off) { return {RBX, static_cast<int32_t>(off)}; }
++    Mem frM(size_t off) { return {R12, static_cast<int32_t>(off)}; }
++    Mem cM(int32_t c) { return {RBP, c}; }
++    Mem frQ(uint32_t j) { return frM(offsetof(Frame, q) + j * 16u); }
++    Mem frMac(uint32_t j) { return frM(offsetof(Frame, m) + j * 4u); }
++    Mem frClip(uint32_t j) { return frM(offsetof(Frame, c) + j * 4u); }
++    Mem frVib(uint32_t j) { return frM(offsetof(Frame, vib) + j * 4u); }
+ 
+-    void loadConstBase(Asm &a) { a.movRI64(RCX, reinterpret_cast<uint64_t>(&kConst[0][0])); }
+-    // R = nrm(R) (vu1n::nrm): lanes with exponent 255 become +-FLT_MAX. Uses xmm0, xmm3; rcx = constant table.
+-    void emitNrm(SseAsm &x, int r)
+-    {
+-        x.movaps(XMM0, r);
+-        x.arithM(OP_AND, XMM0, RCX, C_EXP);
+-        x.pM(0x76, XMM0, RCX, C_EXP);           // pcmpeqd: exponent == 255
+-        x.movaps(XMM3, r);
+-        x.arithM(OP_AND, XMM3, RCX, C_SIGN);
+-        x.arithM(OP_OR, XMM3, RCX, C_FMAX);     // sign | 0x7F7FFFFF
+-        x.pblendvb(r, XMM3);
++    // R = nrm(R) (vu1n::nrm): lanes with exponent 255 become +-FLT_MAX. Uses xmm0, xmm3.
++    void emitNrm(E &e, int r)
++    {
++        if (e.avx)
++        {
++            e.v3M(0x66, 0xDB, XMM0, r, cM(C_EXP));      // vpand
++            e.v3M(0x66, 0x76, XMM0, XMM0, cM(C_EXP));   // vpcmpeqd: exponent == 255
++            e.v3M(0x66, 0xDB, XMM3, r, cM(C_SIGN));
++            e.v3M(0x66, 0xEB, XMM3, XMM3, cM(C_FMAX));  // sign | 0x7F7FFFFF
++            e.vpblendvb(r, r, XMM3, XMM0);
++            return;
++        }
++        e.movaps(XMM0, r);
++        e.psM(0x54, XMM0, cM(C_EXP));
++        e.pdM(0x76, XMM0, cM(C_EXP));          // exponent == 255
++        e.movaps(XMM3, r);
++        e.psM(0x54, XMM3, cM(C_SIGN));
++        e.psM(0x56, XMM3, cM(C_FMAX));         // sign | 0x7F7FFFFF
++        e.pblendvb(r, XMM3);
++    }
++    // R = qnorm(R) per lane (vu1n::qnorm / qfinish): exponent 0 -> signed zero, exponent 255 -> +-FLT_MAX. Uses xmm0, xmm3.
++    void emitQnorm(E &e, int r)
++    {
++        if (e.avx)
++        {
++            e.v3M(0x66, 0xDB, XMM0, r, cM(C_EXP));
++            e.v3(0x66, 0xEF, XMM3, XMM3, XMM3);
++            e.v3(0x66, 0x76, XMM0, XMM0, XMM3);         // exponent == 0
++            e.v3M(0x66, 0xDB, XMM3, r, cM(C_SIGN));
++            e.vpblendvb(r, r, XMM3, XMM0);
++            emitNrm(e, r);
++            return;
++        }
++        e.movaps(XMM0, r);
++        e.psM(0x54, XMM0, cM(C_EXP));
++        e.pd(0xEF, XMM3, XMM3);
++        e.pd(0x76, XMM0, XMM3);                // exponent == 0
++        e.movaps(XMM3, r);
++        e.psM(0x54, XMM3, cM(C_SIGN));
++        e.pblendvb(r, XMM3);
++        emitNrm(e, r);
+     }
+-    // stf<M>: lanes of M (SSE order) of xmm r into [base + disp]; M = 0 stores nothing. Uses xmm4.
+-    void emitStf(SseAsm &x, int base, int32_t disp, int r, uint32_t m)
++    // stf<M>: lanes of M (SSE order) of xmm r into the operand; M = 0 stores nothing. Uses xmm4.
++    void emitStf(E &e, const Mem &mm, int r, uint32_t mask)
+     {
+-        if (m == 15u)
+-            x.movupsStore(base, disp, r);
+-        else if (m != 0u)
++        if (mask == 15u)
++            e.movupsS(mm, r);
++        else if (mask != 0u && e.avx) // the lanes outside the mask from memory
+         {
+-            x.movupsLoad(XMM4, base, disp);
+-            x.blendps(XMM4, r, static_cast<uint8_t>(m));
+-            x.movupsStore(base, disp, XMM4);
++            e.vblendpsM(XMM4, r, mm, static_cast<uint8_t>(~mask & 15u));
++            e.movupsS(mm, XMM4);
++        }
++        else if (mask != 0u)
++        {
++            e.movupsL(XMM4, mm);
++            e.blendps(XMM4, r, static_cast<uint8_t>(mask));
++            e.movupsS(mm, XMM4);
+         }
+     }
+-    void movR32M(Asm &a, int dst, int base, int32_t disp) { a.rex(false, dst, base); a.b(0x8B); a.mem(dst, base, disp); }
+-    void movM32R(Asm &a, int base, int32_t disp, int src) { a.rex(false, src, base); a.b(0x89); a.mem(src, base, disp); }
+-    void movM32I(Asm &a, int base, int32_t disp, uint32_t v) { a.rex(false, 0, base); a.b(0xC7); a.mem(0, base, disp); a.d32(v); }
+-    void aluR32M(Asm &a, uint8_t op, int dst, int base, int32_t disp) { a.rex(false, dst, base); a.b(op); a.mem(dst, base, disp); } // 03 add 2B sub 23 and 0B or
+-    void addEaxImm(Asm &a, int32_t v) { a.b(0x05); a.d32(static_cast<uint32_t>(v)); }
+-    void movsxEaxAx(Asm &a) { a.b(0x0F); a.b(0xBF); a.b(0xC0); }
+-    void movzxEaxM16(Asm &a, int base, int32_t disp) { a.rex(false, RAX, base); a.b(0x0F); a.b(0xB7); a.mem(RAX, base, disp); }
+     // rax = VU data address of quadword eax: r15 + ((eax * 16) & n.mask)
+-    void emitQaddr(Asm &a)
++    void emitQaddr(E &e)
++    {
++        e.shl32(RAX, 4);
++        e.alu32M(0x23, RAX, ctxM(offsetof(VU1NativeCtx, mask)));
++        e.alu64(0x01, RAX, R15);
++    }
++    // vi[reg] = sx16(vi[reg] + delta)
++    void emitViStep(E &e, uint32_t reg, int32_t delta)
+     {
+-        a.b(0xC1); a.b(0xE0); a.b(0x04);                                            // shl eax, 4
+-        aluR32M(a, 0x23, RAX, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, mask))); // and eax, [rbx + mask]
+-        a.b(0x4C); a.b(0x01); a.b(0xF8);                                            // add rax, r15
++        e.ld32(RAX, viM(reg));
++        e.alu32i(0, RAX, delta);
++        e.movsx16R(RAX, RAX);
++        e.st32(viM(reg), RAX);
+     }
+     void emitCallHelper(Asm &a, HelperFn fn, const Imm &k)
+     {
+@@ -1417,171 +1582,928 @@ namespace vu1x
+         a.call(reinterpret_cast<const void *>(fn));
+     }
+ 
+-    bool emitFmac(Asm &a, const Imm &k)
+-    {
+-        SseAsm x{a};
+-        loadConstBase(a);
+-        // a = ld / ldn (vf[fs])
+-        x.movupsLoad(XMM1, R14, vfOff(k.fs));
+-        if (k.aNorm)
+-            emitNrm(x, XMM1);
+-        // b
++    // Code out of the straight line (rare paths), emitted after the block's return: a jump from `from` lands there, the
++    // helper runs the whole statement, and the code continues at `resume`.
++    struct Cold
++    {
++        size_t from, resume;
++        HelperFn fn;
++        const Imm *k;
++    };
++    // per statement: VF registers it reads normalised (ldn) and VF registers it may write (all: a helper)
++    struct Use
++    {
++        uint32_t ldn = 0, writes = 0;
++    };
++    struct Ctx
++    {
++        Asm &a;
++        E e;
++        std::vector<Cold> cold;
++        uint32_t workingClipOff;
++        const std::vector<Use> *use = nullptr;
++        size_t idx = 0;      // the statement being emitted
++        uint32_t cached = 0; // VF registers whose nrm() value is in frame.nv
++    };
++    // x = ldn(vf[r]) (vu1n::ldn), from frame.nv when an earlier statement left it there; stored there when a later
++    // statement reads the register normalised again before anything writes it. Uses xmm0, xmm3.
++    void loadNorm(Ctx &cx, int x, uint32_t r)
++    {
++        const uint32_t bit = 1u << r;
++        const Mem nv = frM(offsetof(Frame, nv) + r * 16u);
++        if (cx.cached & bit)
++        {
++            cx.e.movupsL(x, nv);
++            return;
++        }
++        cx.e.movupsL(x, vfM(r));
++        emitNrm(cx.e, x);
++        const std::vector<Use> &use = *cx.use;
++        if (use[cx.idx].writes & bit)
++            return;
++        for (size_t t = cx.idx + 1; t < use.size(); ++t)
++        {
++            if (use[t].ldn & bit)
++            {
++                cx.e.movupsS(nv, x);
++                cx.cached |= bit;
++                return;
++            }
++            if (use[t].writes & bit)
++                return;
++        }
++    }
++
++    // m{i} = macValRt(q{i}, m) (vu1n::macValRt) from the frame. Uses xmm1-xmm3, eax, ecx, edx.
++    void emitMacVal(E &e, const Imm &k)
++    {
++        const int32_t m = k.m;
++        e.movupsL(XMM1, frQ(k.i));
++        if (e.avx)
++            e.v3M(0, 0x54, XMM2, XMM1, cM(C_ABS));
++        else
++        {
++            e.movaps(XMM2, XMM1);
++            e.psM(0x54, XMM2, cM(C_ABS));     // |b|
++        }
++        e.pd(0xEF, XMM3, XMM3);
++        e.pd(0x76, XMM3, XMM2);                // |b| == 0
++        e.movmskps(RAX, XMM3);
++        e.alu32i(4, RAX, m);                   // z
++        e.movmskps(RCX, XMM1);
++        e.alu32i(4, RCX, m);                   // sign
++        if (e.avx)
++            e.v3M(0, 0x54, XMM3, XMM1, cM(C_EXP));
++        else
++        {
++            e.movaps(XMM3, XMM1);
++            e.psM(0x54, XMM3, cM(C_EXP));
++        }
++        e.pdM(0x76, XMM3, cM(C_EXP));          // exponent 255
++        e.pdM(0x76, XMM2, cM(C_FMAX));         // |b| == FLT_MAX (round-toward-zero overflow)
++        e.pd(0xEB, XMM3, XMM2);
++        e.movmskps(RDX, XMM3);
++        e.alu32i(4, RDX, m);                   // overflow
++        e.movzx8(RAX, {RBP, C_REV4, RAX, 1});
++        e.movzx8(RCX, {RBP, C_REV4, RCX, 1});
++        e.movzx8(RDX, {RBP, C_REV4, RDX, 1});
++        e.shl32(RCX, 4);
++        e.shl32(RDX, 12);
++        e.alu32(0x09, RAX, RCX);
++        e.alu32(0x09, RAX, RDX);
++        e.st32(frMac(k.i), RAX);
++    }
++
++    bool emitFmac(Ctx &cx, const Imm &k)
++    {
++        E &e = cx.e;
++        Asm &a = cx.a;
++        if (k.aNorm)                            // a = ld / ldn (vf[fs])
++            loadNorm(cx, XMM1, k.fs);
++        else
++            e.movupsL(XMM1, vfM(k.fs));
+         switch (k.src)
+         {
+         case S_BC:
+-            x.movupsLoad(XMM2, R14, vfOff(k.ft));
+             if (k.bNorm)
+-                emitNrm(x, XMM2);
+-            x.shufps(XMM2, XMM2, static_cast<uint8_t>(k.bc * 0x55u));
++                loadNorm(cx, XMM2, k.ft);
++            else
++                e.movupsL(XMM2, vfM(k.ft));
++            e.shufps(XMM2, XMM2, static_cast<uint8_t>(k.bc * 0x55u));
+             break;
+         case S_Q:
+         case S_I:
+-            x.movssLoad(XMM2, R14, static_cast<int32_t>(k.src == S_Q ? offsetof(VU1State, q) : offsetof(VU1State, i)));
+-            x.shufps(XMM2, XMM2, 0x00);
++            if (e.avx)
++                e.vbroadcastssM(XMM2, stM(k.src == S_Q ? offsetof(VU1State, q) : offsetof(VU1State, i)));
++            else
++            {
++                e.movssL(XMM2, stM(k.src == S_Q ? offsetof(VU1State, q) : offsetof(VU1State, i)));
++                e.shufps(XMM2, XMM2, 0x00);
++            }
+             break;
+         default:
+-            x.movupsLoad(XMM2, R14, vfOff(k.ft));
+             if (k.bNorm)
+-                emitNrm(x, XMM2);
++                loadNorm(cx, XMM2, k.ft);
++            else
++                e.movupsL(XMM2, vfM(k.ft));
+             break;
+         }
+-        size_t slow = 0;
+-        bool hasSlow = false;
++        bool slow = false;
++        size_t slowAt = 0;
+         switch (k.op)
+         {
+-        case K_ADD: x.arith(OP_ADD, XMM1, XMM2); break;
+-        case K_SUB: x.arith(OP_SUB, XMM1, XMM2); break;
+-        case K_MUL: x.arith(OP_MUL, XMM1, XMM2); break;
+-        case K_MAX: x.arith(OP_MAX, XMM1, XMM2); break;
+-        case K_MINI: x.arith(OP_MIN, XMM1, XMM2); break;
++        case K_ADD: e.ps(0x58, XMM1, XMM2); break;
++        case K_SUB: e.ps(0x5C, XMM1, XMM2); break;
++        case K_MUL: e.ps(0x59, XMM1, XMM2); break;
++        case K_MAX: e.ps(0x5F, XMM1, XMM2); break;
++        case K_MINI: e.ps(0x5D, XMM1, XMM2); break;
+         case K_MADD:
+         case K_MSUB:
+             // vu1n::madd: p = a * b; r = acc +/- p; any lane of p or r beyond 0x7F7FFFFE -> the helper (wide evaluation)
+-            x.arith(OP_MUL, XMM1, XMM2);                                          // xmm1 = p
+-            x.movupsLoad(XMM5, R14, static_cast<int32_t>(offsetof(VU1State, acc)));
+-            x.arith(k.op == K_MADD ? OP_ADD : OP_SUB, XMM5, XMM1);                // xmm5 = r
+-            x.movaps(XMM0, XMM1);
+-            x.arithM(OP_AND, XMM0, RCX, C_ABS);
+-            x.pM(0x66, XMM0, RCX, C_LIM);                                         // pcmpgtd
+-            x.movaps(XMM3, XMM5);
+-            x.arithM(OP_AND, XMM3, RCX, C_ABS);
+-            x.pM(0x66, XMM3, RCX, C_LIM);
+-            x.pRR(0xEB, XMM0, XMM3);                                              // por
+-            x.pmovmskb(RAX, XMM0);
+-            a.testEaxEax();
+-            slow = a.jcc(CC_NZ);
+-            hasSlow = true;
+-            x.movaps(XMM1, XMM5);                                                 // r in xmm1
++            e.ps(0x59, XMM1, XMM2);                                   // xmm1 = p
++            e.movupsL(XMM5, stM(offsetof(VU1State, acc)));
++            e.ps(k.op == K_MADD ? 0x58 : 0x5C, XMM5, XMM1);           // xmm5 = r
++            // hot lanes: max(|p|, |r|) > limit (signed compare of non-negative bit patterns: the same lanes as the helper's
++            // (|p| > limit) | (|r| > limit))
++            if (e.avx)
++            {
++                e.v3M(0, 0x54, XMM0, XMM1, cM(C_ABS));
++                e.v3M(0, 0x54, XMM3, XMM5, cM(C_ABS));
++            }
++            else
++            {
++                e.movaps(XMM0, XMM1);
++                e.psM(0x54, XMM0, cM(C_ABS));
++                e.movaps(XMM3, XMM5);
++                e.psM(0x54, XMM3, cM(C_ABS));
++            }
++            e.pmaxsd(XMM0, XMM3);
++            e.pdM(0x66, XMM0, cM(C_LIM));                             // pcmpgtd
++            e.ptest(XMM0, XMM0);
++            slowAt = a.jcc(CC_NZ);
++            slow = true;
++            e.movaps(XMM1, XMM5);
+             break;
+         default:
+             return false;
+         }
+-        // r = xmm1
+-        if (k.mac)
+-            x.movupsStore(R12, static_cast<int32_t>(offsetof(Frame, q) + k.i * 16u), XMM1); // q{i}: unclamped
++        if (k.mac && k.qNeed)
++            e.movupsS(frQ(k.i), XMM1);                                // q{i}: unclamped
+         if (k.clamp)
+         {
+-            x.arithM(OP_MAX, XMM1, RCX, C_NFMAX);
+-            x.arithM(OP_MIN, XMM1, RCX, C_FMAX);
++            e.psM(0x5F, XMM1, cM(C_NFMAX));
++            e.psM(0x5D, XMM1, cM(C_FMAX));
+         }
+         if (k.store)
+-            emitStf(x, R14, k.toAcc ? static_cast<int32_t>(offsetof(VU1State, acc)) : vfOff(k.fd), XMM1, k.m);
+-        size_t done = 0;
+-        if (hasSlow)
+-            done = a.jmp();
+-        if (hasSlow)
++            emitStf(e, k.toAcc ? stM(offsetof(VU1State, acc)) : vfM(k.fd), XMM1, k.m);
++        if (slow)
++            cx.cold.push_back({slowAt, a.c.size(), hFmac, &k}); // the whole statement from the unchanged state
++        if (k.mac && k.macM)
++            emitMacVal(e, k);
++        return true;
++    }
++
++    // ITOF / FTOI / ABS (vu1n::itof / ftoi / absOp)
++    void emitConvert(Ctx &cx, const Imm &k, InlineKind kind)
++    {
++        E &e = cx.e;
++        if (kind == IN_ITOF)
+         {
+-            a.patch(slow, a.c.size());
+-            emitCallHelper(a, hFmac, k); // the whole statement, from the unchanged state
++            e.movupsL(XMM1, vfM(k.fs));
++            e.cvtdq2ps(XMM1, XMM1);
++            if (k.shift)
++                e.psM(0x59, XMM1, cM(k.shift == 4 ? C_ITOF4 : k.shift == 12 ? C_ITOF12 : C_ITOF15));
++            emitStf(e, vfM(k.ft), XMM1, k.m);
++            return;
++        }
++        loadNorm(cx, XMM1, k.fs);
++        if (kind == IN_ABS)
++        {
++            e.psM(0x54, XMM1, cM(C_ABS));
++            emitStf(e, vfM(k.ft), XMM1, k.m);
++            return;
++        }
++        e.psM(0x5F, XMM1, cM(C_NFMAX));                               // clampv
++        e.psM(0x5D, XMM1, cM(C_FMAX));
++        e.psM(0x59, XMM1, cM(k.shift == 0 ? C_FTOI0 : k.shift == 4 ? C_FTOI4 : k.shift == 12 ? C_FTOI12 : C_FTOI15));
++        if (e.avx)
++            e.vcmppsM(XMM0, XMM1, cM(C_TWO31), 0x0D);                 // v >= 2^31 (GE_OS; no NaN here)
++        else
++        {
++            e.movupsL(XMM0, cM(C_TWO31));
++            e.cmpps(XMM0, XMM1, 2);                                   // 2^31 <= v
++        }
++        e.cvttps2dq(XMM2, XMM1);
++        e.blendvpsM(XMM2, cM(C_ABS));                                 // -> INT_MAX
++        emitStf(e, vfM(k.ft), XMM2, k.m);
++    }
++
++    // c{i} = clipVal(s, fs, ft, prev) (vu1n::clipVal)
++    void emitClip(Ctx &cx, const Imm &k)
++    {
++        E &e = cx.e;
++        loadNorm(cx, XMM1, k.fs);                                     // v
++        loadNorm(cx, XMM2, k.ft);
++        e.shufps(XMM2, XMM2, 0xFF);
++        e.psM(0x54, XMM2, cM(C_ABS));                                 // w = |t.w|
++        if (e.avx)
++        {
++            e.v3M(0, 0x57, XMM3, XMM2, cM(C_SIGN));                   // -w
++            e.vr(0, {0x0F, 0xC2}, XMM4, XMM2, XMM1);                  // w < v
++            e.a.b(1);
++            e.cmpps(XMM1, XMM3, 1);                                   // v < -w
++            e.v3(0, 0x14, XMM0, XMM4, XMM1);                          // [gt.x lt.x gt.y lt.y]
++        }
++        else
++        {
++            e.movaps(XMM3, XMM2);
++            e.psM(0x57, XMM3, cM(C_SIGN));                            // -w
++            e.movaps(XMM4, XMM2);
++            e.cmpps(XMM4, XMM1, 1);                                   // w < v
++            e.cmpps(XMM1, XMM3, 1);                                   // v < -w
++            e.movaps(XMM0, XMM4);
++            e.ps(0x14, XMM0, XMM1);                                   // [gt.x lt.x gt.y lt.y]
++        }
++        e.movmskps(RAX, XMM0);
++        e.ps(0x15, XMM4, XMM1);                                       // [gt.z lt.z gt.w lt.w]
++        e.movmskps(RCX, XMM4);
++        e.alu32i(4, RCX, 3);
++        e.shl32(RCX, 4);
++        e.alu32(0x09, RAX, RCX);
++        if (k.prevClip >= 0)
++            e.ld32(RCX, frClip(static_cast<uint32_t>(k.prevClip)));
++        else
++        {
++            e.ld64(RCX, ctxM(offsetof(VU1NativeCtx, vu)));
++            e.ld32(RCX, {RCX, static_cast<int32_t>(cx.workingClipOff)}); // VU1NativeAccess::clipChain
++        }
++        e.shl32(RCX, 6);
++        e.alu32(0x09, RAX, RCX);
++        e.alu32i(4, RAX, 0xFFFFFF);
++        e.st32(frClip(k.i), RAX);
++    }
++
++    // flag ops (hFlagOp). False when the source can be a flag of an earlier block (the helper reads the flag rings).
++    bool emitFlag(Ctx &cx, const Imm &k)
++    {
++        E &e = cx.e;
++        Asm &a = cx.a;
++        const uint32_t imm24 = static_cast<uint32_t>(k.imm) & 0xFFFFFFu;
++        if (k.op == 0x11) // FCSET
++        {
++            e.st32i(frClip(k.i), imm24);
++            return true;
++        }
++        if (k.flag.farJ < 0)
++            return false;
++        // eax = flagValue(): the newest near writer whose latency has passed at this pair's issue cycle, else the far one
++        const auto src = [&](uint32_t j) { return k.flag.isClip ? frClip(j) : frMac(j); };
++        std::vector<size_t> done;
++        if (k.flag.nNear)
++            e.ld64(RDX, ctxM(offsetof(VU1NativeCtx, cyc)));
++        for (uint32_t q = 0; q < k.flag.nNear; ++q)
++        {
++            const uint32_t j = k.flag.nearJ[q];
++            e.movzx8(RAX, {RDX, static_cast<int32_t>(k.flag.i)});
++            e.movzx8(RCX, {RDX, static_cast<int32_t>(j)});
++            e.alu32(0x29, RAX, RCX);
++            e.alu32i(7, RAX, static_cast<int32_t>(kFlat));
++            const size_t notYet = a.jcc(CC_L);
++            e.ld32(RAX, src(j));
++            done.push_back(a.jmp());
++            a.patch(notYet, a.c.size());
++        }
++        e.ld32(RAX, src(static_cast<uint32_t>(k.flag.farJ)));
++        for (const size_t at : done)
++            a.patch(at, a.c.size());
++        const auto setVi = [&](uint32_t reg, uint8_t cc) {
++            e.setcc(cc, RAX);
++            e.movzx8R(RAX, RAX);
++            e.st32(viM(reg), RAX);
++        };
++        switch (k.op)
++        {
++        case 0x10: e.alu32i(4, RAX, 0xFFFFFF); e.alu32i(7, RAX, static_cast<int32_t>(imm24)); setVi(1, CC_E); break;   // FCEQ
++        case 0x12: e.testi(RAX, imm24); setVi(1, CC_NE); break;                                                        // FCAND
++        case 0x13: e.alu32i(1, RAX, static_cast<int32_t>(imm24)); e.alu32i(7, RAX, 0xFFFFFF); setVi(1, CC_E); break;  // FCOR
++        case 0x18: // FMEQ
++            e.alu32i(4, RAX, 0xFFFF);
++            e.movzx16(RCX, viM(k.fs));
++            e.alu32(0x39, RAX, RCX);
++            setVi(k.ft, CC_E);
++            break;
++        case 0x1A: case 0x1B: // FMAND / FMOR
++            e.movzx16(RCX, viM(k.fs));
++            e.alu32(k.op == 0x1A ? 0x21 : 0x09, RAX, RCX);
++            e.st32(viM(k.ft), RAX);
++            break;
++        case 0x1C: e.alu32i(4, RAX, 0xFFF); e.st32(viM(k.ft), RAX); break;                                             // FCGET
++        default: return false;
+         }
+-        if (hasSlow)
+-            a.patch(done, a.c.size());
+-        if (k.mac && k.macM)
+-            emitCallHelper(a, hMacVal, k); // m{i} from q{i} (both paths stored it)
+         return true;
+     }
+ 
+-    bool emitInline(Asm &a, const Imm &k, InlineKind kind)
++    // Q unit (vu1n::divOp / sqrtOp / rsqrtOp): xmm1 = numerator, xmm2 = denominator, both qnorm'ed
++    void emitQOp(Ctx &cx, const Imm &k)
++    {
++        E &e = cx.e;
++        Asm &a = cx.a;
++        if (k.op == 0x39) // SQRT: q = qfinish(sqrt(|qnorm(ft.ftf)|))
++        {
++            e.movssL(XMM1, vfM(k.ft, k.ftf));
++            emitQnorm(e, XMM1);
++            e.psM(0x54, XMM1, cM(C_ABS));
++            e.ss(0x51, XMM1, XMM1);
++            emitQnorm(e, XMM1);
++            e.movssS(stM(offsetof(VU1State, q)), XMM1);
++            return;
++        }
++        e.movssL(XMM1, vfM(k.fs, k.fsf));
++        emitQnorm(e, XMM1);
++        e.movssL(XMM2, vfM(k.ft, k.ftf));
++        emitQnorm(e, XMM2);
++        if (k.op == 0x3A) // RSQRT: den = sqrt(|den|)
++        {
++            e.psM(0x54, XMM2, cM(C_ABS));
++            e.ss(0x51, XMM2, XMM2);
++        }
++        e.pd(0xEF, XMM3, XMM3);
++        e.ucomiss(XMM2, XMM3);
++        const size_t ne = a.jcc(CC_NE);
++        const size_t nan = a.jcc(CC_P);
++        // den == 0: DIV -> sign(num) != sign(den) ? -FLT_MAX : FLT_MAX; RSQRT (den = sqrt >= 0) -> sign(num) ? -FLT_MAX : FLT_MAX
++        if (k.op == 0x38)
++            e.ps(0x57, XMM1, XMM2);
++        e.psM(0x54, XMM1, cM(C_SIGN));
++        e.psM(0x56, XMM1, cM(C_FMAX));
++        const size_t fin = a.jmp();
++        a.patch(ne, a.c.size());
++        a.patch(nan, a.c.size());
++        e.ss(0x5E, XMM1, XMM2);
++        a.patch(fin, a.c.size());
++        emitQnorm(e, XMM1);
++        e.movssS(stM(offsetof(VU1State, q)), XMM1);
++    }
++
++    // the 0x40 special group (hSpecial); false: no inline form (XGKICK)
++    bool emitSpecial(Ctx &cx, const Imm &k)
++    {
++        E &e = cx.e;
++        switch (k.op)
++        {
++        case 0x31: // MR32
++            e.movupsL(XMM1, vfM(k.fs));
++            e.shufps(XMM1, XMM1, 0x39);
++            emitStf(e, vfM(k.ft), XMM1, k.m);
++            return true;
++        case 0x36: // LQD
++            if (k.fs)
++                emitViStep(e, k.fs, -1);
++            if (k.ft)
++            {
++                e.movzx16(RAX, viM(k.fs));
++                emitQaddr(e);
++                e.movupsL(XMM1, {RAX, 0});
++                emitStf(e, vfM(k.ft), XMM1, k.m);
++            }
++            return true;
++        case 0x37: // SQD
++            if (k.ft)
++                emitViStep(e, k.ft, -1);
++            e.movzx16(RAX, viM(k.ft));
++            emitQaddr(e);
++            e.movupsL(XMM1, vfM(k.fs));
++            emitStf(e, {RAX, 0}, XMM1, k.m);
++            return true;
++        case 0x38: case 0x39: case 0x3A:
++            emitQOp(cx, k);
++            return true;
++        case 0x3C: // MTIR: vi[ft] = sx16(bits of vf[fs].fsf)
++            e.movsx16(RAX, vfM(k.fs, k.fsf));
++            e.st32(viM(k.ft), RAX);
++            return true;
++        case 0x3D: // MFIR: vf[ft] (m) = sx16(vi[fs]) as raw bits
++            e.movsx16(RAX, viM(k.fs));
++            e.movdToX(XMM1, RAX);
++            e.shufps(XMM1, XMM1, 0x00);
++            emitStf(e, vfM(k.ft), XMM1, k.m);
++            return true;
++        case 0x3E: // ILWR
++            e.movzx16(RAX, viM(k.fs));
++            emitQaddr(e);
++            e.movsx16(RAX, {RAX, static_cast<int32_t>(k.comp * 4u)});
++            e.st32(viM(k.ft), RAX);
++            return true;
++        case 0x3F: // ISWR
++            e.movzx16(RAX, viM(k.fs));
++            emitQaddr(e);
++            e.movzx16(RCX, viM(k.ft));
++            for (int c = 0; c < 4; ++c)
++                if (k.dest & (8 >> c))
++                    e.st32({RAX, c * 4}, RCX);
++            return true;
++        case 0x64: // MFP
++            e.movssL(XMM1, stM(offsetof(VU1State, p)));
++            e.shufps(XMM1, XMM1, 0x00);
++            emitStf(e, vfM(k.ft), XMM1, k.m);
++            return true;
++        case 0x68: case 0x69: // XTOP / XITOP
++            e.ld32(RAX, stM(k.op == 0x68 ? offsetof(VU1State, top) : offsetof(VU1State, itop)));
++            e.alu32i(4, RAX, 0x3FF);
++            e.st32(viM(k.ft), RAX);
++            return true;
++        default:
++            return false;
++        }
++    }
++
++    // branch pair: r13d = the next pc (hBranch + hNext), the link register written as hBranch does
++    void emitBranch(Ctx &cx, const Imm &k)
++    {
++        E &e = cx.e;
++        const uint32_t link = (k.pc + 16u) / 8u;
++        const uint32_t target = static_cast<uint32_t>(k.imm);
++        switch (k.op)
++        {
++        case 0x20: e.movi32(R13, target); return;
++        case 0x21:
++            if (k.ft)
++                e.st32i(viM(k.ft), link);
++            e.movi32(R13, target);
++            return;
++        case 0x24: case 0x25:
++            e.movzx16(RAX, viM(k.fs));
++            e.shl32(RAX, 3);
++            e.alu32i(4, RAX, 0x3FFF);
++            e.r(0, false, {0x89}, RAX, R13); // mov r13d, eax
++            if (k.op == 0x25 && k.ft)
++                e.st32i(viM(k.ft), link);
++            return;
++        default:
++            break;
++        }
++        e.movsx16(RAX, k.useVibFs ? frVib(k.i) : viM(k.fs));
++        uint8_t cc;
++        if (k.op == 0x28 || k.op == 0x29)
++        {
++            e.movsx16(RCX, k.useVibFt ? frVib(k.i) : viM(k.ft));
++            e.alu32(0x39, RAX, RCX);
++            cc = k.op == 0x28 ? CC_E : CC_NE;
++        }
++        else
++        {
++            e.alu32(0x85, RAX, RAX);
++            cc = k.op == 0x2C ? CC_L : k.op == 0x2D ? CC_G : k.op == 0x2E ? CC_LE : CC_GE;
++        }
++        e.movi32(R13, k.endPc);
++        e.movi32(RDX, target);
++        e.cmov(cc, R13, RDX);
++    }
++
++    // flag ring push at the block end (VU1NativeAccess::pushMacRaw / pushClipTail), ring in rdx, its next slot in eax
++    void emitRingPush(Ctx &cx, const Imm &k, bool clip)
++    {
++        E &e = cx.e;
++        if (clip) // m_workingClip = c{j}
++        {
++            e.ld32(RAX, frClip(k.j));
++            e.ld64(RCX, ctxM(offsetof(VU1NativeCtx, vu)));
++            e.st32({RCX, static_cast<int32_t>(cx.workingClipOff)}, RAX);
++        }
++        e.ld64(RDX, ctxM(clip ? offsetof(VU1NativeCtx, clipRing) : offsetof(VU1NativeCtx, macRing)));
++        e.ld32(RAX, {RDX, static_cast<int32_t>(offsetof(VU1FlagRing, next))});
++        // evict: slot 4 = slot next
++        e.r(0, false, {0x89}, RAX, RCX); // mov ecx, eax
++        e.shl32(RCX, 4);
++        const int32_t raw = static_cast<int32_t>(offsetof(VU1FlagRing, raw)), value = static_cast<int32_t>(offsetof(VU1FlagRing, value));
++        const int32_t mask = static_cast<int32_t>(offsetof(VU1FlagRing, mask)), tail = static_cast<int32_t>(offsetof(VU1FlagRing, tail));
++        const int32_t issue = static_cast<int32_t>(offsetof(VU1FlagRing, issue));
++        e.movupsL(XMM0, {RDX, raw, RCX, 1});
++        e.movupsS({RDX, raw + 64}, XMM0);
++        e.ld32(RCX, {RDX, value, RAX, 4});
++        e.st32({RDX, value + 16}, RCX);
++        e.ld32(RCX, {RDX, mask, RAX, 4});
++        e.st32({RDX, mask + 16}, RCX);
++        e.ld64(RCX, {RDX, tail, RAX, 8});
++        e.st64({RDX, tail + 32}, RCX);
++        // issue = n.start + cyc[j]
++        e.ld64(RCX, ctxM(offsetof(VU1NativeCtx, cyc)));
++        e.movzx8(RCX, {RCX, static_cast<int32_t>(k.j)});
++        e.alu64M(0x03, RCX, ctxM(offsetof(VU1NativeCtx, start)));
++        e.st64({RDX, issue, RAX, 8}, RCX);
++        if (clip)
++        {
++            e.ld32(RCX, frClip(k.j));
++            e.st32({RDX, value, RAX, 4}, RCX);
++            e.st32i({RDX, mask, RAX, 4}, 0u);
++        }
++        else
++        {
++            e.movupsL(XMM0, frQ(k.j));
++            e.r(0, false, {0x89}, RAX, RCX);
++            e.shl32(RCX, 4);
++            e.movupsS({RDX, raw, RCX, 1}, XMM0);
++            e.st32i({RDX, mask, RAX, 4}, k.m);
++        }
++        if (k.hasTail)
++            e.ld64(RCX, ctxM(offsetof(VU1NativeCtx, tail)));
++        else
++            e.alu32(0x31, RCX, RCX);
++        e.st64({RDX, tail, RAX, 8}, RCX);
++        e.alu32i(0, RAX, 1);
++        e.alu32i(4, RAX, 3);
++        e.st32({RDX, static_cast<int32_t>(offsetof(VU1FlagRing, next))}, RAX);
++    }
++
++    bool emitInline(Ctx &cx, const Imm &k, InlineKind kind)
+     {
+-        SseAsm x{a};
++        E &e = cx.e;
+         switch (kind)
+         {
+         case IN_FMAC:
+-            return emitFmac(a, k);
++            return emitFmac(cx, k);
+         case IN_MOVE: // stf<m>(vf[ft], ld(vf[fs]))
+-            x.movupsLoad(XMM1, R14, vfOff(k.fs));
+-            emitStf(x, R14, vfOff(k.ft), XMM1, k.m);
++            e.movupsL(XMM1, vfM(k.fs));
++            emitStf(e, vfM(k.ft), XMM1, k.m);
+             return true;
+         case IN_LQ: // vf[ft] <- data[(vi[fs] + imm) * 16 & mask]
+-            movR32M(a, RAX, R14, viOff(k.fs));
+-            addEaxImm(a, k.imm);
+-            emitQaddr(a);
+-            x.movupsLoad(XMM1, RAX, 0);
+-            emitStf(x, R14, vfOff(k.ft), XMM1, k.m);
++            e.ld32(RAX, viM(k.fs));
++            e.alu32i(0, RAX, k.imm);
++            emitQaddr(e);
++            e.movupsL(XMM1, {RAX, 0});
++            emitStf(e, vfM(k.ft), XMM1, k.m);
+             return true;
+         case IN_SQ: // data[(vi[ft] + imm) * 16 & mask] <- vf[fs]
+-            movR32M(a, RAX, R14, viOff(k.ft));
+-            addEaxImm(a, k.imm);
+-            emitQaddr(a);
+-            x.movupsLoad(XMM1, R14, vfOff(k.fs));
+-            emitStf(x, RAX, 0, XMM1, k.m);
++            e.ld32(RAX, viM(k.ft));
++            e.alu32i(0, RAX, k.imm);
++            emitQaddr(e);
++            e.movupsL(XMM1, vfM(k.fs));
++            emitStf(e, {RAX, 0}, XMM1, k.m);
+             return true;
+         case IN_LQI: // if ft: vf[ft] <- data[(u16)vi[fs]]; if fs: vi[fs] = sx16(vi[fs] + 1)
+             if (k.ft)
+             {
+-                movzxEaxM16(a, R14, viOff(k.fs));
+-                emitQaddr(a);
+-                x.movupsLoad(XMM1, RAX, 0);
+-                emitStf(x, R14, vfOff(k.ft), XMM1, k.m);
++                e.movzx16(RAX, viM(k.fs));
++                emitQaddr(e);
++                e.movupsL(XMM1, {RAX, 0});
++                emitStf(e, vfM(k.ft), XMM1, k.m);
+             }
+             if (k.fs)
+-            {
+-                movR32M(a, RAX, R14, viOff(k.fs));
+-                addEaxImm(a, 1);
+-                movsxEaxAx(a);
+-                movM32R(a, R14, viOff(k.fs), RAX);
+-            }
++                emitViStep(e, k.fs, 1);
+             return true;
+         case IN_SQI: // data[(u16)vi[ft]] <- vf[fs]; if ft: vi[ft] = sx16(vi[ft] + 1)
+-            movzxEaxM16(a, R14, viOff(k.ft));
+-            emitQaddr(a);
+-            x.movupsLoad(XMM1, R14, vfOff(k.fs));
+-            emitStf(x, RAX, 0, XMM1, k.m);
++            e.movzx16(RAX, viM(k.ft));
++            emitQaddr(e);
++            e.movupsL(XMM1, vfM(k.fs));
++            emitStf(e, {RAX, 0}, XMM1, k.m);
+             if (k.ft)
+-            {
+-                movR32M(a, RAX, R14, viOff(k.ft));
+-                addEaxImm(a, 1);
+-                movsxEaxAx(a);
+-                movM32R(a, R14, viOff(k.ft), RAX);
+-            }
++                emitViStep(e, k.ft, 1);
++            return true;
++        case IN_ILW: // vi[ft] = ldWord(qaddr(vi[fs] + imm), comp)
++            e.ld32(RAX, viM(k.fs));
++            e.alu32i(0, RAX, k.imm);
++            emitQaddr(e);
++            e.movsx16(RAX, {RAX, static_cast<int32_t>(k.comp * 4u)});
++            e.st32(viM(k.ft), RAX);
++            return true;
++        case IN_ISW: // stWords(qaddr(vi[fs] + imm), vi[ft], dest)
++            e.ld32(RAX, viM(k.fs));
++            e.alu32i(0, RAX, k.imm);
++            emitQaddr(e);
++            e.movzx16(RCX, viM(k.ft));
++            for (int c = 0; c < 4; ++c)
++                if (k.dest & (8 >> c))
++                    e.st32({RAX, c * 4}, RCX);
+             return true;
+         case IN_IADDIU: case IN_ISUBIU: case IN_IADDI: // vi[ft] = sx16(vi[fs] +/- imm)
+-            movR32M(a, RAX, R14, viOff(k.fs));
+-            addEaxImm(a, kind == IN_ISUBIU ? -k.imm : k.imm);
+-            movsxEaxAx(a);
+-            movM32R(a, R14, viOff(k.ft), RAX);
++            e.ld32(RAX, viM(k.fs));
++            e.alu32i(0, RAX, kind == IN_ISUBIU ? -k.imm : k.imm);
++            e.movsx16R(RAX, RAX);
++            e.st32(viM(k.ft), RAX);
+             return true;
+         case IN_IADD: case IN_ISUB: case IN_IAND: case IN_IOR: // vi[fd] = vi[fs] op vi[ft] (sx16 for add / sub)
+-            movR32M(a, RAX, R14, viOff(k.fs));
+-            aluR32M(a, kind == IN_IADD ? 0x03 : kind == IN_ISUB ? 0x2B : kind == IN_IAND ? 0x23 : 0x0B, RAX, R14, viOff(k.ft));
++            e.ld32(RAX, viM(k.fs));
++            e.alu32M(kind == IN_IADD ? 0x03 : kind == IN_ISUB ? 0x2B : kind == IN_IAND ? 0x23 : 0x0B, RAX, viM(k.ft));
+             if (kind == IN_IADD || kind == IN_ISUB)
+-                movsxEaxAx(a);
+-            movM32R(a, R14, viOff(k.fd), RAX);
++                e.movsx16R(RAX, RAX);
++            e.st32(viM(k.fd), RAX);
+             return true;
+         case IN_ISET: // s.i = qnorm(immediate), folded now
+         {
+             float imm;
+             std::memcpy(&imm, &k.lower, 4);
+-            const float v = qnorm(imm);
+-            uint32_t bits;
+-            std::memcpy(&bits, &v, 4);
+-            movM32I(a, R14, static_cast<int32_t>(offsetof(VU1State, i)), bits);
++            e.st32i(stM(offsetof(VU1State, i)), std::bit_cast<uint32_t>(qnorm(imm)));
+             return true;
+         }
++        case IN_ITOF: case IN_FTOI: case IN_ABS:
++            emitConvert(cx, k, kind);
++            return true;
++        case IN_CLIP:
++            emitClip(cx, k);
++            return true;
++        case IN_FLAG:
++            return emitFlag(cx, k);
++        case IN_SPECIAL:
++            return emitSpecial(cx, k);
++        case IN_BACKUP: // vib{i} = vi[fs]
++            e.ld32(RAX, viM(k.fs));
++            e.st32(frVib(k.i), RAX);
++            return true;
++        case IN_BRANCH:
++            emitBranch(cx, k);
++            return true;
++        case IN_TAILQ: // n.tail->q[k] = q{j}
++            e.ld64(RAX, ctxM(offsetof(VU1NativeCtx, tail)));
++            e.movupsL(XMM0, frQ(k.j));
++            e.movupsS({RAX, static_cast<int32_t>(offsetof(VU1FlagTail, q) + k.k * 16u)}, XMM0);
++            return true;
++        case IN_TAILC: // n.tail->c[k] = c{j}
++            e.ld64(RAX, ctxM(offsetof(VU1NativeCtx, tail)));
++            e.ld32(RCX, frClip(k.j));
++            e.st32({RAX, static_cast<int32_t>(offsetof(VU1FlagTail, c) + k.k * 4u)}, RCX);
++            return true;
++        case IN_PUSHMAC:
++            emitRingPush(cx, k, false);
++            return true;
++        case IN_PUSHCLIP:
++            emitRingPush(cx, k, true);
++            return true;
+         default:
+             return false;
+         }
+     }
++
++    constexpr uint32_t kFrameOffset = 32; // Windows shadow space below the frame (unused on System V, same layout)
++    constexpr uint32_t kStackBytes = (kFrameOffset + sizeof(Frame) + 15u) & ~15u;
++    static_assert(kStackBytes + 8u < 4096, "a larger frame needs stack probes on Windows");
++
++    // prologue: 6 pushes + 8 bytes keep rsp 16-byte aligned (entry rsp = 8 mod 16); the same bytes in every block
++    void emitPrologue(Asm &a)
++    {
++        a.push(RBX); a.push(RBP); a.push(R12); a.push(R13); a.push(R14); a.push(R15);
++        a.subRsp(kStackBytes + 8u);
++        a.movRR(RBX, kArg0);
++        a.lea(R12, RSP, static_cast<int32_t>(kFrameOffset));
++        a.movRM(R14, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, s)));
++        a.movRM(R15, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, data)));
++        a.movRI64(RBP, reinterpret_cast<uint64_t>(&kConst[0][0]));
++    }
++    uint32_t prologueSize()
++    {
++        static const uint32_t size = [] { Asm a; emitPrologue(a); return static_cast<uint32_t>(a.c.size()); }();
++        return size;
++    }
++
++    // arena: the reserved code range (lo, span) for the JIT -> JIT jump past the prologue
++    std::vector<uint8_t> emit(const Block &blk, uint32_t workingClipOff, uint64_t arenaLo, uint32_t arenaSpan)
++    {
++        Asm a;
++        // Avoid repeated byte-vector reallocations while emitting a new block.
++        a.c.reserve(256u + blk.stmts.size() * 160u);
++        Ctx cx{a, E{a, avxEnabled()}, {}, workingClipOff};
++        const bool inl = inlineEnabled();
++        emitPrologue(a);
++        std::vector<size_t> toRet;
++        bool branchInline = false;
++        const size_t count = blk.stmts.size();
++        // VF registers each statement reads normalised / may write (for the frame.nv cache, see loadNorm)
++        std::vector<Use> use(count);
++        for (size_t idx = 0; idx < count; ++idx)
++        {
++            const Stmt &st = blk.stmts[idx];
++            const Imm &k = blk.imms[st.imm];
++            Use &u = use[idx];
++            const uint32_t ft = 1u << k.ft;
++            switch (st.inl)
++            {
++            case IN_FMAC:
++                u.ldn = (k.aNorm ? 1u << k.fs : 0u) | (k.bNorm ? ft : 0u);
++                u.writes = k.store && !k.toAcc ? 1u << k.fd : 0u;
++                break;
++            case IN_CLIP: u.ldn = (1u << k.fs) | ft; break;
++            case IN_FTOI: case IN_ABS: u.ldn = 1u << k.fs; u.writes = ft; break;
++            case IN_ITOF: case IN_MOVE: case IN_LQ: case IN_LQI: u.writes = ft; break;
++            case IN_SPECIAL: u.writes = (k.op == 0x31 || k.op == 0x36 || k.op == 0x3D || k.op == 0x64) ? ft : 0u; break;
++            case IN_SQ: case IN_SQI: case IN_ILW: case IN_ISW: case IN_IADDIU: case IN_ISUBIU: case IN_IADDI: case IN_IADD:
++            case IN_ISUB: case IN_IAND: case IN_IOR: case IN_ISET: case IN_FLAG: case IN_BACKUP: case IN_BRANCH: case IN_HALT:
++            case IN_TAILQ: case IN_TAILC: case IN_PUSHMAC: case IN_PUSHCLIP: case IN_NEXT:
++                break;
++            default: u.writes = ~0u; break; // a helper: anything
++            }
++        }
++        cx.use = &use;
++        for (size_t idx = 0; idx < count; ++idx)
++        {
++            const Stmt &st = blk.stmts[idx];
++            const Imm &k = blk.imms[st.imm];
++            cx.idx = idx;
++            if (inl)
++            {
++                if (st.inl == IN_NEXT) // r13d = next pc: set by the branch, else the block end
++                {
++                    if (!branchInline)
++                        cx.e.movi32(R13, k.endPc);
++                    continue;
++                }
++                if (st.inl == IN_HALT) // D/T exit: only when enabled, through the helper (flushes the flags, returns the end)
++                {
++                    cx.e.movzx8(RAX, stM(k.flagT ? offsetof(VU1State, tBitEnabled) : offsetof(VU1State, dBitEnabled)));
++                    a.testEaxEax();
++                    const size_t skip = a.jcc(CC_Z);
++                    emitCallHelper(a, st.fn, k);
++                    toRet.push_back(a.jmp());
++                    a.patch(skip, a.c.size());
++                    continue;
++                }
++                if (st.inl != IN_NONE && emitInline(cx, k, st.inl))
++                {
++                    branchInline |= st.inl == IN_BRANCH;
++                    cx.cached &= ~use[idx].writes;
++                    continue;
++                }
++            }
++            cx.cached = 0u; // a helper may write any VF register
++            emitCallHelper(a, st.fn, k);
++            if (st.exitIfNonZero)
++            {
++                a.testEaxEax();
++                toRet.push_back(a.jcc(CC_NZ));
++            }
++            if (st.inl == IN_NEXT)
++                a.movRR32(R13, RAX); // hNext's result
++        }
++        const auto epilogue = [&] {
++            a.addRsp(kStackBytes + 8u);
++            a.pop(R15); a.pop(R14); a.pop(R13); a.pop(R12); a.pop(RBP); a.pop(RBX);
++        };
++        if (blk.ebit)
++            a.movEaxImm(kVu1nEnded | blk.endPc);
++        else
++        {
++            // r13d = next pc; the next block's code when chain() allows it, as a tail jump
++            a.movRR(kArg0, RBX);
++            a.movRR32(kArg1, R13);
++            a.call(reinterpret_cast<const void *>(&VU1NativeAccess::chainFn));
++            a.testRaxRax();
++            const size_t noChain = a.jcc(CC_Z);
++            if (arenaSpan)
++            {
++                // JIT code (in the reserved range): the same frame, ctx, VU state, data and constants; skip its prologue
++                a.movRR(RCX, RAX);
++                a.movRI64(RDX, arenaLo);
++                a.b(0x48); a.b(0x29); a.b(0xD1);                                  // sub rcx, rdx
++                a.b(0x48); a.b(0x81); a.modrm(3, 7, RCX); a.d32(arenaSpan);       // cmp rcx, span
++                const size_t other = a.jcc(0x3);                                  // jae: not JIT code
++                a.b(0x48); a.b(0x05); a.d32(prologueSize());                      // add rax, prologue
++                a.jmpR(RAX);
++                a.patch(other, a.c.size());
++            }
++            a.movRR(kArg0, RBX);
++            epilogue();
++            a.jmpR(RAX);
++            a.patch(noChain, a.c.size());
++            a.movRR32(RAX, R13);
++            a.orEaxImm(kVu1nDone);
++        }
++        const size_t ret = a.c.size();
++        for (size_t at : toRet)
++            a.patch(at, ret);
++        epilogue();
++        a.b(0xC3);
++        for (const Cold &c : cx.cold)
++        {
++            a.patch(c.from, a.c.size());
++            emitCallHelper(a, c.fn, *c.k);
++            a.patch(a.jmp(), c.resume);
++        }
++        return a.c;
++    }
++
++    // ------------------------------------------------------------------------------------------------- compile + register
++    struct State
++    {
++        std::mutex mutex;
++        CodeArena arena;
++        std::vector<std::unique_ptr<Block>> blocks;
++        std::unordered_set<uint64_t> failed;
++        std::unordered_map<const void *, Block *> byFn; // block code -> its block (despeculate)
++        uint32_t workingClipOff = 0;
++        unsigned long long compiled = 0, unsupported = 0, codeBytes = 0, nanos = 0, despeculated = 0;
++    };
++    State &state()
++    {
++        static State s;
++        return s;
++    }
++    // GOW_VU1X_SPECULATE=0: compile every block for vf00-only entry lanes (as vu1n_gen.py with no entry analysis)
++    bool speculateEnabled()
++    {
++        static const bool on = [] { const char *v = std::getenv("GOW_VU1X_SPECULATE"); return !(v && v[0] == '0'); }();
++        return on;
++    }
++    bool enabled()
++    {
++        static const bool on = [] {
++            const char *v = std::getenv("GOW_VU1N_X64");
++            const bool e = v && v[0] && v[0] != '0';
++            if (e)
++                std::fprintf(stderr, "[vu1x] x86-64 JIT on (inline tier %s, %s, speculation %s)\n", inlineEnabled() ? "on" : "off",
++                             avxEnabled() ? "AVX" : "SSE4.1", speculateEnabled() ? "on" : "off");
++            return e;
++        }();
++        return on;
++    }
++    // the VF lanes of a state that hold no Inf/NaN bits (exponent != 255), bit r*4 + lane
++    L128 cleanLanes(const VU1State &st)
++    {
++        L128 out;
++        for (uint32_t r = 0; r < 32; ++r)
++            for (uint32_t c = 0; c < 4; ++c)
++            {
++                uint32_t bits;
++                std::memcpy(&bits, &st.vf[r][c], 4);
++                if ((bits & 0x7F800000u) != 0x7F800000u)
++                    out = out | L128::lanes(r, 1u << c);
++            }
++        return out;
++    }
++
++    // translate + emit + register under `key`; the caller holds g.mutex
++    bool build(State &g, uint32_t pc, const uint32_t *words, uint32_t count, uint64_t key, L128 entry)
++    {
++        const auto t0 = std::chrono::steady_clock::now();
++        auto blk = std::make_unique<Block>();
++        blk->imms.reserve(8u * count + 16u);
++        blk->stmts.reserve(8u * count + 16u);
++        if (!translate(pc, words, count, *blk, entry))
++        {
++            g.failed.insert(key);
++            ++g.unsupported;
++            return false;
++        }
++        const std::vector<uint8_t> code = emit(*blk, g.workingClipOff, g.arena.lo(), g.arena.span());
++        void *fn = g.arena.put(code);
++        if (!fn)
++        {
++            g.failed.insert(key);
++            return false;
++        }
++        // GOW_VU1X_DUMP=<dir>: each block's x86 code as <dir>/<pc>_<key>.bin (objdump -D -b binary -mi386:x86-64 to read it)
++        static const char *dumpDir = std::getenv("GOW_VU1X_DUMP");
++        if (dumpDir && *dumpDir)
++        {
++            char name[64];
++            std::snprintf(name, sizeof(name), "/%04x_%016llx%s.bin", pc, static_cast<unsigned long long>(key), blk->speculative ? "_s" : "");
++            if (FILE *f = std::fopen((std::string(dumpDir) + name).c_str(), "wb"))
++            {
++                std::fwrite(code.data(), 1, code.size(), f);
++                std::fclose(f);
++            }
++        }
++        blk->pc = pc, blk->count = count, blk->key = key;
++        if (blk->speculative)
++            blk->words.assign(words, words + count * 2u);
++        vu1nRegisterBlock(key, reinterpret_cast<VU1NativeFn>(fn), count | (blk->readsEntry ? 0x10000u : 0u),
++                          blk->hasTail ? &blk->tail : nullptr, &blk->lanes);
++        g.byFn[fn] = blk.get();
++        g.blocks.push_back(std::move(blk));
++        ++g.compiled;
++        g.codeBytes += code.size();
++        g.nanos += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
++        return true;
++    }
++
++    // A block without native code: translate, emit, register (key = vu1n::blockKey). False: unsupported (the exact engine
++    // keeps it; remembered so the translation is not tried again). entryState: the VU state the block is about to run
++    // with; its clean VF lanes are the entry assumption (speculation: the code skips nrm() on them, the runtime checks
++    // them on every entry and despeculate() replaces the block when a check fails).
++    bool compile(uint32_t pc, const uint32_t *words, uint32_t count, uint64_t key, uint32_t workingClipOff, const VU1State *entryState)
++    {
++        State &g = state();
++        std::lock_guard<std::mutex> lock(g.mutex);
++        if (g.failed.count(key))
++            return false;
++        g.workingClipOff = workingClipOff;
++        return build(g, pc, words, count, key, entryState && speculateEnabled() ? cleanLanes(*entryState) : L128{});
++    }
++
++    // An entry lane check failed for the block whose code is fn: when it is a speculative JIT block, compile it again for
++    // vf00-only entry lanes (req = 0, never checked) under the same key. True: re-registered (set the slot up again).
++    bool despeculate(const void *fn)
++    {
++        State &g = state();
++        std::lock_guard<std::mutex> lock(g.mutex);
++        const auto it = g.byFn.find(fn);
++        if (it == g.byFn.end() || !it->second->speculative)
++            return false;
++        if (it->second->replaced) // already recompiled (for another interpreter's slot): the registry has the new code
++            return true;
++        Block &old = *it->second;
++        old.replaced = true;
++        ++g.despeculated;
++        const std::vector<uint32_t> words = old.words;
++        return build(g, old.pc, words.data(), old.count, old.key, L128{});
++    }
+ }
+ 
+ VU1NativeFn VU1NativeAccess::chainFn(VU1NativeCtx &n, uint32_t next)
+@@ -1591,6 +2513,13 @@ VU1NativeFn VU1NativeAccess::chainFn(VU1NativeCtx &n, uint32_t next)
+     return sl ? sl->fn : nullptr;
+ }
+ 
++// tests / diagnostics: blocks the x64 JIT compiled, could not translate, and recompiled after a failed entry lane check
++unsigned long long vu1xDespeculated()
++{
++    vu1x::State &g = vu1x::state();
++    std::lock_guard<std::mutex> lock(g.mutex);
++    return g.despeculated;
++}
+ // tests / diagnostics: blocks the x64 JIT compiled and could not translate
+ void vu1xStats(unsigned long long &compiled, unsigned long long &unsupported, unsigned long long &codeBytes, unsigned long long &nanos)
+ {
+diff --git a/tests/vu1_bench.cpp b/tests/vu1_bench.cpp
+new file mode 100644
+index 0000000..e10d511
+--- /dev/null
++++ b/tests/vu1_bench.cpp
+@@ -0,0 +1,437 @@
++// gow-native-pc: VU1 backend benchmark (x86-64 JIT against the build's generator code), without game data.
++//
++// A synthetic micro memory holds four programs written like PS2 renderer microcode (the shapes God of War's VU1 code
++// has: unrolled pairs, broadcast matrix multiplies, Q divides, CLIP + FCAND, FTOI/ITOF, LQI/SQI streams, XGKICK):
++//   transform  per vertex: LQI position / ST / colour, MULAx-MADDAy-MADDAz-MADDw matrix, CLIPw, DIV + WAITQ, MULq,
++//              ADD screen offset, FTOI4 / FTOI0, FCAND + ISW of the ADC bit, SQI x3, IBNE loop, XGKICK
++//   light      per vertex: normal matrix, three light dot products (MUL + ADDAy / MADDAz broadcast), MAX with 0,
++//              colour mix (MULAx / MADDAy / MADDz), MINIi clamp (I-bit immediate), FTOI0, SQ with offsets, IBGTZ loop
++//   skin       per vertex: ILW bone index, IADD matrix address, LQ x4 with offsets, MULAx / MADDA weighted blend of two
++//              bones, MR32, MFIR / ITOF4, IADDI / IBNE
++//   cull       per triangle: OPMULA / OPMSUB cross product (exact-engine call-outs in both backends), MUL + ADDA dot,
++//              FMAND / FMEQ on the sign bits, IBEQ skip, SQI, loop
++// Modes (one binary, the same blocks, the same inputs):
++//   vu1_bench exact  [reps]   the exact engine alone (GOW_VU1_NATIVE_OFF)
++//   vu1_bench hybrid [reps]   the game's setup: blocks compiled into this build (vu1n_gen.py, the AOT path) + the x86-64
++//                             JIT for blocks the build lacks (GOW_VU1N_X64)
++//   vu1_bench jit    [reps]   the x86-64 JIT alone (GOW_VU1X_ONLY drops the compiled-in blocks)
++//   vu1_bench --write <file>  the synthetic micro memory (input of the AOT parts, tools/ci/pruebas_vu1.cmake)
++// hybrid and jit must print the same digest (the JIT is bit-identical to the generator's code); "jit/hybrid" in the
++// summary is the JIT's cost against the AOT code on the same programs, the number to drive below 1.0x-ish.
++// With -DGOW_VU1_BENCH_DIR=<folder of 16 KB .bin images> at configure time (e.g. the user's data/<game>/vu1_capture:
++// game-derived, never committed) those images are compiled in too and every program start in them (pc 0, after a zero
++// gap, after an E-bit delay slot) is run with seeded inputs as one more line.
++#include "runtime/ps2_memory.h"
++#include "runtime/ps2_vu1.h"
++#include "runtime/ps2_vu1_native.h"
++#include "runtime/gs/gs_frontend.h"
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <random>
++#include <string>
++#include <vector>
++
++#if defined(__x86_64__) || defined(_M_X64)
++void vu1xStats(unsigned long long &compiled, unsigned long long &unsupported, unsigned long long &codeBytes, unsigned long long &nanos);
++#endif
++
++#ifndef GOW_VU1_BENCH_LIST
++#define GOW_VU1_BENCH_LIST ""
++#endif
++
++namespace
++{
++constexpr uint32_t kNop = 0x2ffu, kLowerNop = 0x8000033cu, kE = 1u << 30, kI = 1u << 31;
++constexpr uint32_t X = 8, Y = 4, Z = 2, W = 1, XYZ = 0xE, XYZW = 0xF;
++
++void setEnv(const char *k, const char *v)
++{
++#if defined(_WIN32)
++    _putenv_s(k, v);
++#else
++    setenv(k, v, 1);
++#endif
++}
++
++// ---- encoders (VU1 instruction formats; field names as in the PS2 VU manual)
++uint32_t up(uint32_t op, uint32_t dest, uint32_t ft, uint32_t fs, uint32_t fd) { return op | (dest << 21) | (ft << 16) | (fs << 11) | (fd << 6); }
++uint32_t upA(uint32_t code, uint32_t dest, uint32_t ft, uint32_t fs) { return 0x3Cu | (code & 3u) | ((code >> 2) << 6) | (dest << 21) | (ft << 16) | (fs << 11); }
++uint32_t loSp(uint32_t sp, uint32_t dest, uint32_t ft, uint32_t fs) { return 0x80000000u | (dest << 21) | (ft << 16) | (fs << 11) | ((sp >> 2) << 6) | 0x3Cu | (sp & 3u); }
++uint32_t lo(uint32_t op, uint32_t dest, uint32_t ft, uint32_t fs, int32_t imm11) { return (op << 25) | (dest << 21) | (ft << 16) | (fs << 11) | (static_cast<uint32_t>(imm11) & 0x7FFu); }
++uint32_t iaddiu(uint32_t it, uint32_t is, uint32_t imm) { return (0x08u << 25) | ((imm >> 11) << 21) | (it << 16) | (is << 11) | (imm & 0x7FFu); }
++uint32_t iaddi(uint32_t it, uint32_t is, int32_t imm5) { return (0x40u << 25) | (it << 16) | (is << 11) | ((static_cast<uint32_t>(imm5) & 0x1Fu) << 6) | 0x32u; }
++uint32_t ialu(uint32_t fn, uint32_t id, uint32_t is, uint32_t it) { return (0x40u << 25) | (it << 16) | (is << 11) | (id << 6) | fn; }
++uint32_t br(uint32_t op, uint32_t it, uint32_t is, int32_t off) { return (op << 25) | (it << 16) | (is << 11) | (static_cast<uint32_t>(off) & 0x7FFu); }
++uint32_t divq(uint32_t fs, uint32_t fsf, uint32_t ft, uint32_t ftf) { return loSp(0x38u, (ftf << 2) | fsf, ft, fs); }
++uint32_t fbits(float f) { uint32_t b; std::memcpy(&b, &f, 4); return b; }
++// upper ops
++enum : uint32_t { ADDbc = 0x00, MADDbc = 0x08, MAXbc = 0x10, MULbc = 0x18, MULq = 0x1C, MINIi = 0x1F, ADD = 0x28, MUL = 0x2A, MAX = 0x2B, SUB = 0x2C, MSUB = 0x2D };
++enum : uint32_t { ADDAbc = 0x00, MADDAbc = 0x08, ITOF4 = 0x11, FTOI0 = 0x14, FTOI4 = 0x15, MULAbc = 0x18, CLIP = 0x1F, OPMULA = 0x2E, MULA = 0x2A, ADDA = 0x28 };
++constexpr uint32_t OPMSUB = 0x2E; // upper op 0x2E (vector form)
++enum : uint32_t { LQ = 0x00, SQ = 0x01, ILW = 0x04, ISW = 0x05, FCAND = 0x12, FMEQ = 0x18, FMAND = 0x1A, IBEQ = 0x28, IBNE = 0x29, IBGTZ = 0x2D };
++enum : uint32_t { MR32 = 0x31, LQI = 0x34, SQI = 0x35, WAITQ = 0x3B, MFIR = 0x3D, XGKICK = 0x6C };
++
++using Pairs = std::vector<std::pair<uint32_t, uint32_t>>;
++void endProgram(Pairs &p) { p.push_back({kLowerNop, kNop | kE}); p.push_back({kLowerNop, kNop}); }
++int32_t back(const Pairs &p, size_t loop) { return static_cast<int32_t>(loop) - static_cast<int32_t>(p.size()) - 1; }
++
++struct Program
++{
++    uint32_t pc;
++    const char *name;
++};
++
++// Data layout: qword 0 = header (x: count, integer), inputs from qword 1, outputs from 0x200, constants at 0x300.
++std::vector<uint8_t> microMemory(std::vector<Program> &programs)
++{
++    std::vector<uint8_t> code(PS2_VU1_CODE_SIZE);
++    uint32_t at = 0;
++    const auto place = [&](Pairs &p, const char *name) {
++        programs.push_back({at, name});
++        std::memcpy(code.data() + at, p.data(), p.size() * 8u);
++        at += static_cast<uint32_t>(p.size()) * 8u + 64u;
++    };
++    { // transform: vf10-13 matrix, vf15 screen offset; vi5 count, vi2 in, vi3 out, vi4 kick address
++        Pairs p = {
++            {lo(ILW, X, 5, 0, 0), kNop},
++            {iaddiu(2, 0, 1), kNop},
++            {iaddiu(3, 0, 0x200), kNop},
++            {iaddiu(4, 0, 0x1FF), kNop},
++            {iaddiu(7, 0, 0x20), kNop},
++        };
++        const size_t loop = p.size();
++        Pairs body = {
++            {loSp(LQI, XYZW, 1, 2), kNop},
++            {loSp(LQI, XYZW, 2, 2), upA(MULAbc + 0, XYZW, 1, 10)},
++            {loSp(LQI, XYZW, 3, 2), upA(MADDAbc + 1, XYZW, 1, 11)},
++            {kLowerNop, upA(MADDAbc + 2, XYZW, 1, 12)},
++            {kLowerNop, up(MADDbc + 3, XYZW, 1, 13, 4)},
++            {kLowerNop, upA(CLIP, XYZ, 4, 4)},
++            {divq(0, 3, 4, 3), kNop},
++            {kLowerNop, up(MULbc + 3, XYZW, 0, 3, 3)},          // colour * vf0w (a stand-in for a scale)
++            {loSp(WAITQ, 0, 0, 0), up(ADD, XYZW, 3, 3, 3)},
++            {lo(FCAND, 0, 0, 0, 0) | 0x3Fu, up(MULq, XYZ, 0, 4, 4)},
++            {iaddiu(6, 1, 0), up(MULq, XYZ, 0, 2, 2)},
++            {kLowerNop, up(ADD, XYZ, 15, 4, 4)},
++            {kLowerNop, upA(FTOI4, XYZW, 4, 4)},
++            {kLowerNop, upA(FTOI0, XYZW, 3, 3)},
++            {loSp(SQI, XYZW, 3, 2), kNop},
++            {loSp(SQI, XYZW, 3, 3), kNop},
++            {loSp(SQI, XYZW, 3, 4), kNop},
++            {lo(ISW, W, 6, 3, -1), kNop},
++            {iaddi(5, 5, -1), kNop},
++        };
++        p.insert(p.end(), body.begin(), body.end());
++        p.push_back({br(IBNE, 0, 5, back(p, loop)), kNop});
++        p.push_back({kLowerNop, kNop});
++        p.push_back({loSp(XGKICK, 0, 0, 4), kNop});
++        endProgram(p);
++        place(p, "transform");
++    }
++    { // light: vf16-18 normal matrix, vf19-21 light directions (rows), vf22-24 light colours, vf25 ambient
++        Pairs p = {
++            {lo(ILW, X, 5, 0, 0), kNop},
++            {iaddiu(2, 0, 1), kNop},
++            {iaddiu(3, 0, 0x200), kNop},
++        };
++        const size_t loop = p.size();
++        Pairs body = {
++            {lo(LQ, XYZ, 1, 2, 0), kNop},
++            {kLowerNop, upA(MULAbc + 0, XYZ, 1, 16)},
++            {kLowerNop, upA(MADDAbc + 1, XYZ, 1, 17)},
++            {kLowerNop, up(MADDbc + 2, XYZ, 1, 18, 2)},              // vf2 = normal in view space
++            {kLowerNop, upA(MULAbc + 0, XYZ, 2, 19)},
++            {kLowerNop, upA(MADDAbc + 1, XYZ, 2, 20)},
++            {kLowerNop, up(MADDbc + 2, XYZ, 2, 21, 3)},              // vf3 = three dot products
++            {kLowerNop, up(MAXbc + 0, XYZ, 0, 3, 3)},                // max(dot, 0)
++            {kLowerNop, upA(MULAbc + 0, XYZ, 3, 22)},
++            {kLowerNop, upA(MADDAbc + 1, XYZ, 3, 23)},
++            {kLowerNop, upA(MADDAbc + 2, XYZ, 3, 24)},
++            {kLowerNop, up(MADDbc + 3, XYZ, 0, 25, 4)},              // + ambient * vf0w
++            {fbits(255.0f), up(MINIi, XYZ, 0, 4, 4) | kI},           // I = 255 (I-bit pair), clamp later pairs
++            {kLowerNop, up(MINIi, XYZ, 0, 4, 4)},
++            {kLowerNop, upA(FTOI0, XYZ, 4, 4)},
++            {lo(SQ, XYZ, 4, 3, 0), kNop},
++            {iaddiu(2, 2, 1), kNop},
++            {iaddiu(3, 3, 1), kNop},
++            {iaddi(5, 5, -1), kNop},
++        };
++        p.insert(p.end(), body.begin(), body.end());
++        p.push_back({br(IBGTZ, 0, 5, back(p, loop)), kNop});
++        p.push_back({kLowerNop, kNop});
++        endProgram(p);
++        place(p, "light");
++    }
++    { // skin: bone matrices at 0x300 (4 qwords each), per vertex: position, weights (x, y), bone indices (z, w as ints)
++        Pairs p = {
++            {lo(ILW, X, 5, 0, 0), kNop},
++            {iaddiu(2, 0, 1), kNop},
++            {iaddiu(3, 0, 0x200), kNop},
++        };
++        const size_t loop = p.size();
++        Pairs body = {
++            {lo(LQ, XYZW, 1, 2, 0), kNop},                           // position
++            {lo(LQ, XYZW, 2, 2, 1), kNop},                           // weights
++            {lo(ILW, Z, 6, 2, 1), kNop},                             // bone 0 index
++            {lo(ILW, W, 7, 2, 1), kNop},                             // bone 1 index
++            {ialu(0x30, 8, 6, 6), kNop},                             // vi8 = 2 * index
++            {ialu(0x30, 8, 8, 8), kNop},                             // vi8 = 4 * index
++            {ialu(0x30, 9, 7, 7), kNop},
++            {ialu(0x30, 9, 9, 9), kNop},
++            {lo(LQ, XYZW, 10, 8, 0x300), kNop},
++            {lo(LQ, XYZW, 11, 8, 0x301), upA(MULAbc + 0, XYZW, 1, 10)},
++            {lo(LQ, XYZW, 12, 8, 0x302), upA(MADDAbc + 1, XYZW, 1, 11)},
++            {lo(LQ, XYZW, 13, 8, 0x303), upA(MADDAbc + 2, XYZW, 1, 12)},
++            {lo(LQ, XYZW, 14, 9, 0x300), up(MADDbc + 3, XYZW, 1, 13, 4)},  // vf4 = bone 0 * position
++            {lo(LQ, XYZW, 15, 9, 0x301), upA(MULAbc + 0, XYZW, 1, 14)},
++            {lo(LQ, XYZW, 16, 9, 0x302), upA(MADDAbc + 1, XYZW, 1, 15)},
++            {lo(LQ, XYZW, 17, 9, 0x303), upA(MADDAbc + 2, XYZW, 1, 16)},
++            {kLowerNop, up(MADDbc + 3, XYZW, 1, 17, 5)},                    // vf5 = bone 1 * position
++            {kLowerNop, upA(MULAbc + 0, XYZW, 2, 4)},                       // ACC = vf4 * wx
++            {kLowerNop, up(MADDbc + 1, XYZW, 2, 5, 6)},                     // vf6 = ACC + vf5 * wy
++            {loSp(MR32, XYZW, 7, 6), kNop},
++            {loSp(MFIR, X, 8, 6), kNop},
++            {kLowerNop, upA(ITOF4, X, 8, 8)},
++            {lo(SQ, XYZW, 6, 3, 0), kNop},
++            {lo(SQ, XYZW, 7, 3, 1), kNop},
++            {iaddiu(2, 2, 2), kNop},
++            {iaddiu(3, 3, 2), kNop},
++            {iaddi(5, 5, -1), kNop},
++        };
++        p.insert(p.end(), body.begin(), body.end());
++        p.push_back({br(IBNE, 0, 5, back(p, loop)), kNop});
++        p.push_back({kLowerNop, kNop});
++        endProgram(p);
++        place(p, "skin");
++    }
++    { // cull: triangles (three positions), backface test on the sign of the cross product's z
++        Pairs p = {
++            {lo(ILW, X, 5, 0, 0), kNop},
++            {iaddiu(2, 0, 1), kNop},
++            {iaddiu(3, 0, 0x200), kNop},
++            {iaddiu(7, 0, 0x0020), kNop},                            // MAC sign bit of z
++        };
++        const size_t loop = p.size();
++        Pairs body = {
++            {loSp(LQI, XYZW, 1, 2), kNop},
++            {loSp(LQI, XYZW, 2, 2), kNop},
++            {loSp(LQI, XYZW, 3, 2), up(SUB, XYZ, 1, 2, 4)},           // e1 = v1 - v0
++            {kLowerNop, up(SUB, XYZ, 1, 3, 5)},                       // e2 = v2 - v0
++            {kLowerNop, upA(OPMULA, XYZ, 5, 4)},
++            {kLowerNop, up(OPMSUB, XYZ, 4, 5, 6)},                    // n = e1 x e2
++            {kLowerNop, up(MUL, XYZ, 1, 6, 8)},
++            {kLowerNop, upA(ADDAbc + 0, XYZ, 8, 0)},
++            {kLowerNop, up(MSUB, XYZW, 0, 0, 9) },                    // MAC writer near the flag reader
++            {kLowerNop, kNop},
++            {kLowerNop, kNop},
++            {kLowerNop, kNop},
++            {lo(FMAND, 0, 8, 7, 0), kNop},                            // vi8 = MAC & sign mask
++            {lo(FMEQ, 0, 9, 7, 0), kNop},
++        };
++        p.insert(p.end(), body.begin(), body.end());
++        p.push_back({br(IBEQ, 8, 0, 4), kNop});                       // facing away: skip the stores
++        p.push_back({kLowerNop, kNop});
++        p.push_back({loSp(SQI, XYZW, 3, 1), kNop});
++        p.push_back({loSp(SQI, XYZW, 3, 2), kNop});
++        p.push_back({loSp(SQI, XYZW, 3, 3), kNop});
++        p.push_back({iaddi(5, 5, -1), kNop});
++        p.push_back({br(IBNE, 0, 5, back(p, loop)), kNop});
++        p.push_back({kLowerNop, kNop});
++        endProgram(p);
++        place(p, "cull");
++    }
++    return code;
++}
++
++uint64_t mix(uint64_t h, const void *p, size_t n)
++{
++    for (size_t i = 0; i < n; ++i)
++        h = (h ^ static_cast<const uint8_t *>(p)[i]) * 1099511628211ull;
++    return h;
++}
++
++std::vector<uint32_t> programStarts(const uint8_t *code)
++{
++    std::vector<uint32_t> out;
++    const auto pair = [&](uint32_t i, uint32_t &l, uint32_t &u) { std::memcpy(&l, code + i * 8u, 4); std::memcpy(&u, code + i * 8u + 4u, 4); };
++    const uint32_t pairs = PS2_VU1_CODE_SIZE / 8u;
++    std::vector<bool> start(pairs, false);
++    for (uint32_t i = 0; i < pairs; ++i)
++    {
++        uint32_t l, u, pl = 0, pu = 0;
++        pair(i, l, u);
++        if (l == 0u && u == 0u)
++            continue;
++        if (i > 0)
++            pair(i - 1, pl, pu);
++        if (i == 0 || (pl == 0u && pu == 0u))
++            start[i] = true;
++        if (((u >> 30) & 1u) && i + 2u < pairs)
++            start[i + 2u] = true;
++    }
++    for (uint32_t i = 0; i < pairs; ++i)
++    {
++        uint32_t l, u;
++        pair(i, l, u);
++        if (start[i] && !(l == 0u && u == 0u))
++            out.push_back(i * 8u);
++    }
++    return out;
++}
++
++struct Inputs
++{
++    VU1State state{};
++    std::vector<uint32_t> data;
++};
++
++// seeded inputs: finite floats in VF registers and VU memory, small integers where programs read counts and indices
++Inputs makeInputs(uint32_t seed, uint32_t count)
++{
++    std::mt19937 rng(seed);
++    const auto flt = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rng); };
++    Inputs in;
++    in.data.assign(PS2_VU1_DATA_SIZE / 4, 0u);
++    for (int r = 1; r < 32; ++r)
++        for (int c = 0; c < 4; ++c)
++            in.state.vf[r][c] = flt(-2.0f, 2.0f);
++    in.state.vf[0][3] = 1.0f;
++    for (int c = 0; c < 4; ++c)
++        in.state.vf[15][c] = 2048.0f;
++    in.state.q = 1.0f, in.state.i = 1.0f, in.state.p = 1.0f;
++    for (size_t q = 1; q < 0x200; ++q)
++        for (int c = 0; c < 4; ++c)
++            in.data[q * 4 + c] = fbits(c == 3 ? 1.0f : flt(-100.0f, 100.0f));
++    for (size_t q = 2; q < 0x200; q += 2) // skin: bone indices 0..7 in z / w of the weights qwords
++        in.data[q * 4 + 2] = rng() % 8u, in.data[q * 4 + 3] = rng() % 8u;
++    for (size_t q = 0x300; q < 0x320; ++q)
++        for (int c = 0; c < 4; ++c)
++            in.data[q * 4 + c] = fbits(flt(-1.0f, 1.0f));
++    in.data[0] = count;
++    in.data[0x1FF * 4] = 0x8000u; // transform's XGKICK address: an empty GIF tag with EOP
++    return in;
++}
++}
++
++int main(int argc, char **argv)
++{
++    const std::string mode = argc > 1 ? argv[1] : "";
++    if (mode == "--write" && argc > 2)
++    {
++        std::vector<Program> programs;
++        const auto code = microMemory(programs);
++        std::ofstream(argv[2], std::ios::binary).write(reinterpret_cast<const char *>(code.data()), static_cast<std::streamsize>(code.size()));
++        return 0;
++    }
++    if (mode == "exact")
++        setEnv("GOW_VU1_NATIVE_OFF", "1");
++    else if (mode == "hybrid")
++        setEnv("GOW_VU1N_X64", "1");
++    else if (mode == "jit")
++        setEnv("GOW_VU1N_X64", "1"), setEnv("GOW_VU1X_ONLY", "1");
++    else
++    {
++        std::fprintf(stderr, "usage: vu1_bench exact|hybrid|jit [reps]   |   vu1_bench --write <file>\n");
++        return 2;
++    }
++    const unsigned reps = argc > 2 ? static_cast<unsigned>(std::max(1, std::atoi(argv[2]))) : 2000u;
++
++    PS2Memory mem;
++    if (!mem.initialize())
++        return 2;
++    GS gs;
++    gs.init(mem.getGSVRAM(), 4u * 1024u * 1024u, &mem.gs());
++    uint64_t digest = 1469598103934665603ull;
++    // one line per workload: the synthetic programs, then each external image (all its program starts)
++    struct Work
++    {
++        std::string name;
++        std::vector<uint8_t> code;
++        std::vector<uint32_t> pcs;
++        uint32_t count;
++    };
++    std::vector<Work> work;
++    {
++        std::vector<Program> programs;
++        const auto code = microMemory(programs);
++        for (const Program &p : programs)
++            work.push_back({p.name, code, {p.pc}, 48u});
++    }
++    {
++        std::string list = GOW_VU1_BENCH_LIST;
++        for (size_t p = 0; p < list.size();)
++        {
++            const size_t e = list.find(';', p);
++            const std::string file = list.substr(p, e == std::string::npos ? std::string::npos : e - p);
++            p = e == std::string::npos ? list.size() : e + 1;
++            std::ifstream in(file, std::ios::binary);
++            std::vector<uint8_t> code((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++            if (code.size() == PS2_VU1_CODE_SIZE)
++                work.push_back({file.substr(file.find_last_of("/\\") + 1), code, programStarts(code.data()), 16u});
++        }
++    }
++    double total = 0.0;
++    unsigned long long nativeTotal = 0;
++    for (const Work &w : work)
++    {
++        std::memcpy(mem.getVU1Code(), w.code.data(), PS2_VU1_CODE_SIZE);
++        const Inputs in = makeInputs(77u, w.count);
++        VU1Interpreter vu; // one interpreter reused, as the game's VU1
++        const auto runOnce = [&](uint32_t pc) {
++            vu.state() = in.state;
++            std::memcpy(mem.getVU1Data(), in.data.data(), PS2_VU1_DATA_SIZE);
++            vu.execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem, pc, 0u, 0u, 200000u);
++        };
++        unsigned long long cycles = 0;
++        for (uint32_t pc : w.pcs) // first pass: JIT compilation; its results go into the digest
++        {
++            runOnce(pc);
++            const VU1State &s = vu.state();
++            digest = mix(digest, s.vf, sizeof(s.vf));
++            digest = mix(digest, s.vi, sizeof(s.vi));
++            digest = mix(digest, s.acc, sizeof(s.acc));
++            digest = mix(digest, &s.q, 4);
++            digest = mix(digest, &s.mac, 4);
++            digest = mix(digest, &s.clip, 4);
++            digest = mix(digest, &s.pc, 4);
++            digest = mix(digest, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
++            cycles += s.cycles;
++        }
++        const unsigned long long before = VU1NativeAccess::nativeBlocksRun(vu);
++        // timed: VU memory reset is outside the clock (a 16 KB copy would dominate small programs)
++        double best = 1e30;
++        for (int round = 0; round < 3; ++round)
++        {
++            double t = 0.0;
++            for (unsigned r = 0; r < reps; ++r)
++                for (uint32_t pc : w.pcs)
++                {
++                    vu.state() = in.state;
++                    std::memcpy(mem.getVU1Data(), in.data.data(), PS2_VU1_DATA_SIZE);
++                    const auto t0 = std::chrono::steady_clock::now();
++                    vu.execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem, pc, 0u, 0u, 200000u);
++                    t += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
++                }
++            best = std::min(best, t / reps);
++        }
++        const unsigned long long native = (VU1NativeAccess::nativeBlocksRun(vu) - before) / (3ull * reps);
++        nativeTotal += native;
++        total += best;
++        std::printf("%-26s %9.2f us per pass  %7llu VU cycles  %6llu native blocks\n", w.name.c_str(), best, cycles, native);
++    }
++    std::printf("mode %s: total %.2f us per pass\n", mode.c_str(), total);
++#if defined(__x86_64__) || defined(_M_X64)
++    unsigned long long compiled = 0, unsupported = 0, bytes = 0, ns = 0;
++    vu1xStats(compiled, unsupported, bytes, ns);
++    if (compiled || unsupported)
++        std::printf("x64 JIT: %llu blocks compiled (%llu bytes, %.1f us each), %llu left to the exact engine\n", compiled, bytes,
++                    compiled ? ns / 1000.0 / compiled : 0.0, unsupported);
++#endif
++    std::printf("digest %016llx\n", static_cast<unsigned long long>(digest));
++    (void)nativeTotal;
++    return 0;
++}
+diff --git a/tests/vu1_x64_fuzz_test.cpp b/tests/vu1_x64_fuzz_test.cpp
+index c6b3a9b..3878d55 100644
+--- a/tests/vu1_x64_fuzz_test.cpp
++++ b/tests/vu1_x64_fuzz_test.cpp
+@@ -7,6 +7,9 @@
+ //   vu1_x64_fuzz_test exact [images] [trials]     the exact engine alone (compares platforms / compilers)
+ //   vu1_x64_fuzz_test module <work dir> <vu1n_gen.py> <python> <clang++> "<flags>" [images] [trials]
+ //                                                  background compiler: vu1n_gen.py's code built by clang
++// GOW_FUZZ_SPECIAL=1: some register lanes hold Inf / NaN bit patterns (exponent 255) on entry, so the JIT's entry lane
++// speculation fails and its blocks are recompiled (despeculated); compare x64 with GOW_VU1X_SPECULATE=0 then (the exact
++// engine runs blocks with dirty entry lanes in the other backends, so only the JIT modes are comparable).
+ // The digests must be equal: the JIT then runs exactly the code the build's generator writes. Same seed, same programs;
+ // the first pass over each image is left out (the background compiler needs it to see the code). No JR / JALR: their
+ // targets are not block heads the generator knows, so the two backends would legitimately cover different blocks.
+@@ -24,6 +27,7 @@
+ void vu1nJitWaitIdle();
+ #if defined(__x86_64__) || defined(_M_X64)
+ void vu1xStats(unsigned long long &compiled, unsigned long long &unsupported, unsigned long long &codeBytes, unsigned long long &nanos);
++unsigned long long vu1xDespeculated();
+ #endif
+ 
+ namespace
+@@ -106,8 +110,16 @@ struct Gen
+         default: return sp(u(2) ? 0x70 : 0x7B, 0, 0, fs);                                     // ESADD / WAITP (call-outs)
+         }
+     }
++    bool special = false;
+     float flt()
+     {
++        if (special && u(10) == 0) // exponent 255: +-Inf, NaN payloads
++        {
++            const uint32_t b = 0x7F800000u | (u(2) ? 0x80000000u : 0u) | (u(2) ? (r() & 0x7FFFFFu) : 0u);
++            float f;
++            std::memcpy(&f, &b, 4);
++            return f;
++        }
+         switch (u(6))
+         {
+         case 0: return 0.0f;
+@@ -210,6 +222,7 @@ int main(int argc, char **argv)
+     const char *seedEnv = std::getenv("GOW_FUZZ_SEED"); // other programs: another seed (same for every mode)
+     std::mt19937 rng(seedEnv ? static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10)) : 424242u);
+     Gen g(rng);
++    g.special = std::getenv("GOW_FUZZ_SPECIAL") != nullptr;
+     uint64_t digest = 1469598103934665603ull;
+     // GOW_FUZZ_DUMP=<file>: one line per run (image, trial, pc, run digest, native blocks) to find where two modes differ
+     FILE *dump = std::getenv("GOW_FUZZ_DUMP") ? std::fopen(std::getenv("GOW_FUZZ_DUMP"), "w") : nullptr;
+@@ -286,8 +299,9 @@ int main(int argc, char **argv)
+     unsigned long long compiled = 0, unsupported = 0, bytes = 0, ns = 0;
+     vu1xStats(compiled, unsupported, bytes, ns);
+     if (compiled || unsupported)
+-        std::printf("x64 JIT: %llu blocks compiled (%llu bytes, %.1f us each), %llu left to the exact engine\n", compiled, bytes,
+-                    compiled ? ns / 1000.0 / compiled : 0.0, unsupported);
++        std::printf("x64 JIT: %llu blocks compiled (%llu bytes, %.1f us each), %llu left to the exact engine, %llu recompiled "
++                    "after a failed entry lane check\n", compiled, bytes, compiled ? ns / 1000.0 / compiled : 0.0, unsupported,
++                    vu1xDespeculated());
+ #endif
+     std::printf("digest %016llx\n", static_cast<unsigned long long>(digest));
+     return 0;
+diff --git a/tools/ci/pruebas_vu1.cmake b/tools/ci/pruebas_vu1.cmake
+index 6792166..1dd0454 100644
+--- a/tools/ci/pruebas_vu1.cmake
++++ b/tools/ci/pruebas_vu1.cmake
+@@ -77,3 +77,34 @@ if(NOT MSVC)
+         target_compile_options(${t} PRIVATE -march=native -ffp-contract=off)
+     endforeach()
+ endif()
++
++# gow-native-pc: VU1 backend benchmark (tests/vu1_bench.cpp): renderer-like synthetic programs compiled in through
++# vu1n_gen.py like the game's blocks (the AOT path); the same binary times the exact engine, hybrid (AOT + x64 JIT, the
++# game's setup) and the JIT alone, with digests that must match. -DGOW_VU1_BENCH_DIR=<folder of 16 KB .bin images> adds
++# real micro memories (e.g. the user's data/<game>/vu1_capture: game-derived data, never committed).
++set(GOW_VU1_BENCH_OUT "${CMAKE_BINARY_DIR}/gow_vu1_bench_aot")
++set(GOW_VU1_BENCH_IMAGES)
++if(GOW_VU1_BENCH_DIR)
++    file(GLOB GOW_VU1_BENCH_IMAGES "${GOW_VU1_BENCH_DIR}/*.bin")
++endif()
++set(GOW_VU1_BENCH_PARTS)
++foreach(part RANGE 0 3)
++    list(APPEND GOW_VU1_BENCH_PARTS "${GOW_VU1_BENCH_OUT}/vu1n_part${part}.cpp")
++endforeach()
++add_executable(gow_vu1_bench_writer "${CMAKE_CURRENT_LIST_DIR}/../../tests/vu1_bench.cpp")
++target_link_libraries(gow_vu1_bench_writer PRIVATE ps2_runtime)
++add_custom_command(OUTPUT ${GOW_VU1_BENCH_PARTS}
++    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GOW_VU1_BENCH_OUT}"
++    COMMAND "$<TARGET_FILE:gow_vu1_bench_writer>" --write "${GOW_VU1_BENCH_OUT}/synthetic.bin"
++    COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_LIST_DIR}/../vu1/vu1n_gen.py" "${GOW_VU1_BENCH_OUT}" "${GOW_VU1_BENCH_OUT}/synthetic.bin" ${GOW_VU1_BENCH_IMAGES} --parts 4
++    DEPENDS gow_vu1_bench_writer ${GOW_VU1_BENCH_IMAGES} "${CMAKE_CURRENT_LIST_DIR}/../vu1/vu1n_gen.py"
++    VERBATIM)
++add_executable(gow_vu1_bench "${CMAKE_CURRENT_LIST_DIR}/../../tests/vu1_bench.cpp" ${GOW_VU1_BENCH_PARTS})
++target_link_libraries(gow_vu1_bench PRIVATE ps2_runtime)
++if(GOW_VU1_BENCH_IMAGES)
++    string(REPLACE ";" "\\;" GOW_VU1_BENCH_LIST "${GOW_VU1_BENCH_IMAGES}")
++    target_compile_definitions(gow_vu1_bench PRIVATE "GOW_VU1_BENCH_LIST=\"${GOW_VU1_BENCH_LIST}\"")
++endif()
++if(NOT MSVC)
++    target_compile_options(gow_vu1_bench PRIVATE -march=native -ffp-contract=off)
++endif()
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index b99ed06..81809b0 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -165,7 +165,7 @@ def upper_info(u):
+ # A VF lane is clean when its exponent is not 255 (no Inf / NaN bits): reading it through vu1n::ldn (which turns exponent
+ # 255 into +-FLT_MAX, like the exact engine's operand normalisation) gives the same value as a plain vu1n::ld. State: a
+ # 128-bit mask, bit r*4 + lane (SSE lane order, bit 0 = x) set when VF r's lane is known clean. Results of ADD / SUB / MUL
+-# / MADD / MSUB (clamped), MAX / MINI (of normalised operands) and ITOF are clean; every other VF write (lower ops, FTOI,
++# / MADD / MSUB (clamped), MAX / MINI of VF operands (normalised; not MAXi / MINIi: I is read raw) and ITOF are clean; every other VF write (lower ops, FTOI,
+ # ABS, ops run by the exact engine) makes the register unknown. A pair's effect is affine (lanes set, cleared or kept),
+ # so a block is summarised by gen (clean on exit whatever the entry) and keep (unchanged by the block).
+ ALL_LANES = (1 << 128) - 1
+@@ -190,7 +190,9 @@ def pair_effect(l, u):
+     m = REV4[dest]
+     uw = upper_info(u)[0]
+     kill_upper = set_upper = 0
+-    if kind in ('add', 'sub', 'mul', 'madd', 'msub', 'max', 'mini') and not toacc and fd and dest:
++    # MAX / MINI are not clamped: clean only with normalised VF operands (MAXi / MINIi read the I register raw)
++    if kind in ('add', 'sub', 'mul', 'madd', 'msub', 'max', 'mini') and not toacc and fd and dest and \
++            not (kind in ('max', 'mini') and src in ('q', 'i')):
+         set_upper = lanes(fd, m)
+     elif kind == 'itof' and ft and dest:
+         set_upper = lanes(ft, m)
+@@ -201,9 +203,10 @@ def pair_effect(l, u):
+ 
+ 
+ def apply_pair(st, effect):
++    # lanes both ops of the pair write count as unknown: the upper result wins for the native lower ops (suppress_vf), the
++    # lower one for exact-engine call-outs (callLower writes after the upper op)
+     kill_lower, kill_upper, set_upper = effect
+-    st &= ~kill_lower
+-    return ((st & ~kill_upper) | set_upper) & ALL_LANES
++    return ((st & ~kill_lower & ~kill_upper) | (set_upper & ~kill_lower)) & ALL_LANES
+ 
+ 
+ def block_summary(pairs):
+@@ -409,8 +412,11 @@ def dest_comp(dest):
+     return 0 if dest & 8 else 1 if dest & 4 else 2 if dest & 2 else 3
+ 
+ 
+-def emit_lower(l, pc, upper, bkp, mac_expr, clip_expr, clip_var):
+-    """Lines for a non-branch lower op. bkp: dict reg->variable name for branch backups (unused here)."""
++def emit_lower(l, pc, upper, bkp, mac_expr, clip_expr, clip_var, suppress_vf=()):
++    """Lines for a non-branch lower op. bkp: dict reg->variable name for branch backups (unused here).
++    suppress_vf: VF registers the upper op of the same pair writes. As in the exact engine (ps2_vu1_step.inl,
++    upperVfShadowReg / suppressedLowerVf) the upper result wins: the lower op's VF write to them is dropped (its other
++    effects, e.g. LQI's VI increment, stay)."""
+     op = l >> 25
+     f = lower_fields(l)
+     dest, ft, fs, vid, imm11 = f['dest'], f['ft'], f['fs'], f['vid'], f['imm11']
+@@ -421,7 +427,7 @@ def emit_lower(l, pc, upper, bkp, mac_expr, clip_expr, clip_var):
+     def vi_set(reg, expr):
+         return [f"s.vi[{reg}] = {expr};"] if reg else []
+     if op == 0x00:
+-        if ft:
++        if ft and ft not in suppress_vf:
+             L.append(f"{{ uint32_t a = vu1n::qaddr(n, s.vi[{fs}] + {imm11}); vu1n::stf<{m}>(s.vf[{ft}], vu1n::ldq(n, a)); }}")
+         return L
+     if op == 0x01:
+@@ -463,6 +469,8 @@ def emit_lower(l, pc, upper, bkp, mac_expr, clip_expr, clip_var):
+         if fn == 0x35:
+             return vi_set(vid, f"s.vi[{fs}] | s.vi[{ft}]")
+         sp = lower_special(l)
++        if ft in suppress_vf and sp in (0x30, 0x31, 0x34, 0x36, 0x3D, 0x64):
++            ft = 0  # the VF write is dropped (MOVE / MR32 / MFIR / MFP write nothing else; LQI / LQD keep their VI step)
+         if sp == 0x30:
+             return [f"vu1n::stf<{m}>(s.vf[{ft}], vu1n::ld(s, {fs}));"] if ft else []
+         if sp == 0x31:
+@@ -694,7 +702,7 @@ def gen_block(pc0, pairs, tail_out=None, entry=VF0_LANES, req_out=None):
+             continue
+         # ordinary pair
+         up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used)
+-        lo = [] if iBit else emit_lower(l, pc, u, None, mac_src(i), clip_src(i), f"c{i}")
++        lo = [] if iBit else emit_lower(l, pc, u, None, mac_src(i), clip_src(i), f"c{i}", uw)
+         if iBit:
+             lines.extend(up)
+             lines.append(f"s.i = vu1n::qnorm(*(const float *)&(const uint32_t &)(0x{l:08x}u)); // I register")

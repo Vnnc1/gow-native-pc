@@ -1,0 +1,54 @@
+Use wide intermediates for SPU2 master-volume multiplication.
+Fixes polarity wrap with loud simultaneous voices in both batch and per-frame mixers.
+Regression: tools/test/sound_regression.cpp fails before this patch and passes after it.
+This does not establish the cause of every reported cutscene/dropout.
+
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+index c5286c5..961f301 100644
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+@@ -24,9 +24,9 @@ namespace ps2x::iop::detail
+             IdEsa = 0x1C, IdEea = 0x1D, IdTsa = 0x1E, IdIrqa = 0x1F, IdSsa = 0x20, IdLsa = 0x21, IdNax = 0x22,
+         };
+ 
+-        int16_t clamp16(int32_t value) noexcept
++        int16_t clamp16(int64_t value) noexcept
+         {
+-            return static_cast<int16_t>(std::clamp(value, -32768, 32767));
++            return static_cast<int16_t>(std::clamp<int64_t>(value, -32768, 32767));
+         }
+ 
+         // voice / core volume: fixed mode (bit 15 = 0) = 15-bit signed; sweep mode applies its target at once
+@@ -584,12 +584,13 @@ namespace ps2x::iop::detail
+         }
+         // core 0 through its master volume, added to core 1's dry output, all through core 1's master volume
+         // (simplified MMIX routing)
++        // Sum of 24 voices exceeds int16 range; multiply in 64 bits before final saturation.
+         const int32_t master[2][2] = {{volumeOf(m_cores[0].mvolL), volumeOf(m_cores[0].mvolR)},
+                                       {volumeOf(m_cores[1].mvolL), volumeOf(m_cores[1].mvolR)}};
+         for (uint32_t side = 0; side < 2u; ++side)
+         {
+-            const int32_t core0 = (coreOut[0][side] * master[0][side]) >> 14;
+-            out[side] = clamp16(((core0 + coreOut[1][side]) * master[1][side]) >> 14);
++            const int32_t core0 = (static_cast<int64_t>(coreOut[0][side]) * master[0][side]) >> 14;
++            out[side] = clamp16(((static_cast<int64_t>(core0) + coreOut[1][side]) * master[1][side]) >> 14);
+         }
+         // GOW_SND_VOICEDUMP=1: while a core input stream (a movie) plays, once per second for its first 10 seconds, every
+         // voice that is still sounding (active, pitch and envelope non-zero) with its volumes and sample addresses
+@@ -662,13 +663,14 @@ namespace ps2x::iop::detail
+             for (size_t t = 0; t < frames; ++t)
+                 streamSample(core, mixL[t], mixR[t]);
+         }
++        // Sum of 24 voices exceeds int16 range; multiply in 64 bits before final saturation.
+         const int32_t master[2][2] = {{volumeOf(m_cores[0].mvolL), volumeOf(m_cores[0].mvolR)},
+                                       {volumeOf(m_cores[1].mvolL), volumeOf(m_cores[1].mvolR)}};
+         for (size_t t = 0; t < frames; ++t)
+             for (uint32_t side = 0; side < 2u; ++side)
+             {
+-                const int32_t core0 = (m_mix[side * frames + t] * master[0][side]) >> 14;
+-                out[t * 2u + side] = clamp16(((core0 + m_mix[(2u + side) * frames + t]) * master[1][side]) >> 14);
++                const int32_t core0 = (static_cast<int64_t>(m_mix[side * frames + t]) * master[0][side]) >> 14;
++                out[t * 2u + side] = clamp16(((static_cast<int64_t>(core0) + m_mix[(2u + side) * frames + t]) * master[1][side]) >> 14);
+             }
+         static std::FILE *raw = [] { const char *path = std::getenv("GOW_AUDIO_RAW"); return path ? std::fopen(path, "wb") : nullptr; }();
+         if (raw)

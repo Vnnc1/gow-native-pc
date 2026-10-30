@@ -1,0 +1,224 @@
+Separate opt-in worker and GS-stage wait metrics, including stage-only stalls. Snapshot settings per memory instance and bound counters to three sites. No wait ordering or DMA behavior change; procedural worker/stage tests cover the contract.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_sync_metrics.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_sync_metrics.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_sync_metrics.h
+@@ -0,0 +1,66 @@
++#pragma once
++// Bounded, opt-in wall-time diagnostics. CPU/GPU utilization cannot be inferred from these waits.
++#include <array>
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++#include <cstdint>
++
++class GowSyncMetrics
++{
++public:
++    struct Entry {
++        uint64_t calls = 0, workerWaits = 0, stageWaits = 0, workerNs = 0, stageNs = 0, queuePeak = 0;
++    };
++    // Site 0: large VIF1 barrier; 1: MMIO; 2: other explicit synchronizations.
++    static constexpr unsigned Sites = 3;
++    const bool enabled = [] {
++        const char *v = std::getenv("GOW_SYNC_DIAG");
++        if (!v) v = std::getenv("PS2X_GS_WORKER_DIAG");
++        return v && v[0] == '1';
++    }();
++    void add(unsigned site, bool worker, bool stage, uint64_t workerNs, uint64_t stageNs, size_t queue)
++    {
++        if (!enabled || site >= Sites) return;
++        std::lock_guard<std::mutex> lock(m_mutex);
++        for (auto *table : {&m_total, &m_window}) {
++            auto &e = (*table)[site];
++            ++e.calls; e.workerWaits += worker; e.stageWaits += stage;
++            e.workerNs += workerNs; e.stageNs += stageNs;
++            e.queuePeak = std::max(e.queuePeak, static_cast<uint64_t>(queue));
++        }
++        const auto now = Clock::now();
++        if (now - m_start >= std::chrono::seconds(5)) emit(now, false);
++    }
++    std::array<Entry, Sites> snapshot() const
++    {
++        std::lock_guard<std::mutex> lock(m_mutex);
++        return m_total;
++    }
++    void flush()
++    {
++        if (!enabled) return;
++        std::lock_guard<std::mutex> lock(m_mutex);
++        emit(Clock::now(), true);
++    }
++private:
++    using Clock = std::chrono::steady_clock;
++    mutable std::mutex m_mutex;
++    std::array<Entry, Sites> m_total{}, m_window{};
++    Clock::time_point m_start = Clock::now();
++    void emit(Clock::time_point now, bool final)
++    {
++        const double seconds = std::chrono::duration<double>(now - m_start).count();
++        for (unsigned site = 0; site < Sites; ++site) {
++            const auto &e = m_window[site];
++            if (e.calls) std::fprintf(stderr,
++                "[gow-sync] site=%u window=%.6f syncs=%llu worker_waits=%llu stage_waits=%llu worker_ms=%.6f stage_ms=%.6f queue_peak=%llu final=%u\n",
++                site, seconds, (unsigned long long)e.calls, (unsigned long long)e.workerWaits,
++                (unsigned long long)e.stageWaits, e.workerNs / 1e6, e.stageNs / 1e6,
++                (unsigned long long)e.queuePeak, unsigned(final));
++        }
++        m_window = {}; m_start = now;
++    }
++};
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -15,6 +15,7 @@
+ #include <thread>
+ 
+ #include "gs/ps2_gif_arbiter.h"
++#include "gow_sync_metrics.h"
+ #if defined(_MSC_VER)
+ #include <intrin.h>
+ #elif defined(USE_SSE2NEON)
+@@ -400,6 +401,7 @@
+     // Invariant: VIF1/VU1/GIF/GS-frontend state is touched by the worker while it has jobs, and by any other
+     // thread only after syncGsWorker(); every such entry point below calls it.
+     void syncGsWorker(const char *site = "stub");
++    auto syncMetrics() const { return m_syncMetrics.snapshot(); }
+     void stopGsWorker();
+     bool onGsWorkerThread() const { return m_gsWorkerEnabled && std::this_thread::get_id() == m_gsWorkerId; }
+     // VU0 FBRST as the EE had it when the running worker job was queued (MSCAL D/T-bit enables).
+@@ -495,6 +497,7 @@
+     void gsWorkerLoop();
+     bool m_gsWorkerEnabled = false;
+     bool m_vu1EarlyFinish = false; // bound large VIF1 submissions while asynchronous FINISH is used
++    GowSyncMetrics m_syncMetrics;
+     std::thread m_gsWorker;
+     std::thread::id m_gsWorkerId;
+     std::mutex m_gsWorkerMutex;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -265,6 +265,8 @@
+     m_vu1EarlyFinish = early ? early[0] != '0' : (asyncFinish && asyncFinish[0] != '0');
+     const char *worker = std::getenv("PS2X_GS_WORKER");
+     m_gsWorkerEnabled = worker != nullptr && worker[0] == '1';
++    std::fprintf(stderr, "[gow-sync-config] early_finish=%u worker=%u timing=%u\n",
++                 unsigned(m_vu1EarlyFinish), unsigned(m_gsWorkerEnabled), unsigned(m_syncMetrics.enabled));
+     if (m_gsWorkerEnabled)
+     {
+         m_gsWorker = std::thread([this] { gsWorkerLoop(); });
+@@ -276,6 +278,7 @@
+ PS2Memory::~PS2Memory()
+ {
+     stopGsWorker();
++    m_syncMetrics.flush();
+     if (m_rdram)
+     {
+         delete[] m_rdram;
+@@ -2100,59 +2103,26 @@
+         waitGsWorkerIdle(site, 0u);
+ }
+ 
+-namespace
+-{
+-    // PS2X_GS_WORKER_DIAG=1: every 5 s, the sync sites that made the EE wait for the worker.
+-    struct GsWorkerSyncDiag
+-    {
+-        struct Entry { uint64_t syncs = 0, waits = 0, waitUs = 0; };
+-        std::mutex mutex;
+-        std::map<std::string, Entry> sites;
+-        std::chrono::steady_clock::time_point next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+-    };
+-    bool gsWorkerSyncDiagEnabled()
+-    {
+-        static const bool on = [] { const char *v = std::getenv("PS2X_GS_WORKER_DIAG"); return v && v[0] == '1'; }();
+-        return on;
+-    }
+-}
+-
+ void PS2Memory::waitGsWorkerIdle(const char *site, uint32_t address)
+ {
++    using Clock = std::chrono::steady_clock;
++    const bool diag = m_syncMetrics.enabled;
++    const auto start = diag ? Clock::now() : Clock::time_point{};
+     std::unique_lock<std::mutex> lock(m_gsWorkerMutex);
+     const bool busy = !m_gsWorkerJobs.empty() || m_gsWorkerBusy;
+-    const auto start = std::chrono::steady_clock::now();
++    const size_t queue = diag ? m_gsWorkerJobs.size() + size_t(m_gsWorkerBusy) : 0u;
+     if (busy)
+         m_gsWorkerIdleCv.wait(lock, [this] { return m_gsWorkerJobs.empty() && !m_gsWorkerBusy; });
+     lock.unlock();
+-    ps2_gs_stage::waitIdle(); // GOW-Port: the GS frontend stage is part of the worker (gs_stage.h)
+-    if (!gsWorkerSyncDiagEnabled())
+-        return;
+-    static GsWorkerSyncDiag diag;
+-    const auto now = std::chrono::steady_clock::now();
+-    char key[48];
+-    if (site)
+-        std::snprintf(key, sizeof(key), "%s", site);
+-    else
+-        std::snprintf(key, sizeof(key), "mmio 0x%08X", address & ~0xFu);
+-    std::lock_guard<std::mutex> diagLock(diag.mutex);
+-    auto &entry = diag.sites[key];
+-    ++entry.syncs;
+-    if (busy)
+-    {
+-        ++entry.waits;
+-        entry.waitUs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - start).count());
+-    }
+-    if (now >= diag.next)
+-    {
+-        diag.next = now + std::chrono::seconds(5);
+-        for (const auto &[name, e] : diag.sites)
+-            if (e.waits)
+-                std::fprintf(stderr, "[gs-worker:sync] %s syncs=%llu waits=%llu wait_ms=%.1f\n", name.c_str(),
+-                             static_cast<unsigned long long>(e.syncs), static_cast<unsigned long long>(e.waits),
+-                             e.waitUs / 1000.0);
+-        diag.sites.clear();
+-    }
++    const auto workerDone = diag ? Clock::now() : Clock::time_point{};
++    const bool stageBusy = ps2_gs_stage::waitIdle();
++    if (!diag) return;
++    const auto now = Clock::now();
++    const unsigned bucket = !site ? 1u : std::strcmp(site, "large VIF1 submit") == 0 ? 0u : 2u;
++    m_syncMetrics.add(bucket, busy, stageBusy,
++        std::chrono::duration_cast<std::chrono::nanoseconds>(workerDone - start).count(),
++        std::chrono::duration_cast<std::chrono::nanoseconds>(now - workerDone).count(), queue);
++    (void)address; // Aggregate MMIO sites to keep reports bounded.
+ }
+ 
+ void PS2Memory::stopGsWorker()
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_stage.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_stage.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_stage.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_stage.h
+@@ -26,5 +26,6 @@
+     void push(GifPathId path, const uint8_t *data, uint32_t size);
+ 
+     // Returns when every queued packet has been processed. No-op on the stage thread itself.
+-    void waitIdle();
++    // Returns whether queued/in-flight work required a wait (for opt-in diagnostics).
++    bool waitIdle();
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+@@ -140,12 +140,14 @@
+             s.work.notify_one();
+     }
+ 
+-    void waitIdle()
++    bool waitIdle()
+     {
+         if (!running() || onStageThread())
+-            return;
++            return false;
+         Stage &s = stage();
+         std::unique_lock<std::mutex> lock(s.mutex);
++        const bool busy = !s.queue.empty() || s.busy;
+         s.idle.wait(lock, [&s] { return s.queue.empty() && !s.busy; });
++        return busy;
+     }
+ }

@@ -1,0 +1,1044 @@
+Background VU1 compiler (GOW_VU1N_JIT, experimental): VU1 blocks the game reaches without native code are compiled while
+it runs, with the build's own generator and compiler, and switch to native code a few seconds later.
+- ps2_vu1_jit.inl (new): a slot set up without native code queues its 16 KB micro memory (once per code generation); a
+  worker thread at low priority writes the images, runs tools/vu1/vu1n_gen.py --dll (blocks the game already has left
+  out), compiles the module (clang, the build's flags: GOW_VU1N_JIT_CXX / _PY / _GEN / _FLAGS) as a DLL / shared object
+  and loads it; runNative registers its blocks at the next entry and sets the dispatch slots up again. Modules are kept
+  in <GOW_VU1N_JIT>/<stamp> (generator + ABI + compiler command) and loaded at the next start. Processes run hidden
+  (CREATE_NO_WINDOW) below normal priority.
+- ps2_vu1_native.h: VU1JitApi, the table through which a module reaches the VU1NativeAccess functions that are not
+  inline here (chain, callLower, callUpper, xgkick) and registers its blocks; kVu1JitAbi (sizes of what the blocks touch)
+  makes a module of other headers register nothing. NativeState: jitSeen / jitQueuedAt.
+- vu1n_gen.py: --dll <name> writes one module (VU1NativeAccess thunks + exported vu1n_jit_blocks()) and <name>.keys;
+  --skip-keys leaves out known blocks. Without them the output is unchanged.
+- tests/vu1_jit_test.cpp + tools/ci/pruebas_vu1.cmake: a procedural micro memory (transform loop with LQI, MULA/MADDA/
+  MADD, CLIP, DIV/WAITQ, MULq, FCGET, FMAND, SQI, IBNE; an FMAC/flag mix) run in the exact engine and through the
+  background compiler. Checked on Linux (clang 18): 4000 random cases, the module's results have the same digest as the
+  same blocks compiled into the executable (bit-identical; both differ from the exact engine in the same 284 edge cases
+  with Inf/NaN/denormal inputs, the native backend's known DIV rounding); transform loop 17.4 us exact engine, 0.89 us
+  background-compiled, 0.82 us compiled in; one micro memory compiled in ~1.5 s.
+Off unless GOW_VU1N_JIT is set (the launcher sets it for clang builds when "Compile new areas while playing" is on).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 37d021a..6288d76 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -208,6 +208,8 @@ struct VU1Interpreter::NativeState
+     unsigned long long laneChecks = 0, laneFails = 0; // gow-native-pc: clean-operand entry checks run / failed
+     unsigned long long selfBlocks = 0, selfPairs = 0;  // gow-native-pc: blocks that branched back to themselves (diag)
+     std::unordered_map<uint32_t, unsigned> missPcs, missHits;
++    uint32_t jitSeen = 0;          // gow-native-pc: background compiler modules registered (ps2_vu1_jit.inl)
++    uint64_t jitQueuedAt = ~0ull;  // code generation (codeChanges) whose micro memory was queued for it
+     unsigned limit = ~0u, count = 0; // verify bisection: native blocks allowed in this run
+     VU1State snap;                   // state on entry of block number `limit` (verify bisection)
+     std::vector<uint32_t> trace;     // pcs of the native blocks executed while bisecting
+@@ -259,8 +261,34 @@ struct VU1NativeAccess
+     // GOW_VU1N_RECORD / GOW_VU1N_REPLAY (bit-exact A/B of generator changes, see ps2_vu1_native.inl)
+     static void recordReplay(VU1Interpreter &vu, void *context, uint32_t maxCycles);
+     static uint64_t silentNativeHash(VU1Interpreter &vu, void *context);
++    static constexpr size_t kSlotSize = sizeof(VU1Interpreter::NativeState::Slot); // gow-native-pc: kVu1JitAbi
++    static unsigned long long nativeBlocksRun(const VU1Interpreter &vu); // gow-native-pc: tests (blocks run natively)
+ };
+ 
++// gow-native-pc: background VU1 compiler (ps2_vu1_jit.inl, GOW_VU1N_JIT). Blocks the game reaches without native code are
++// generated (tools/vu1/vu1n_gen.py --dll) and compiled while it runs, into a module (DLL / shared object) that does not
++// link against the game: the VU1NativeAccess functions its blocks call that are not inline in this header come through
++// this table, filled by the runtime. abi: kVu1JitAbi of the runtime; a module built from other headers registers nothing.
++struct VU1JitApi
++{
++    uint64_t abi;
++    void (*reg)(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes);
++    void *(*chain)(VU1NativeCtx &, uint32_t); // VU1Interpreter::NativeState::Slot *
++    void (*callLower)(VU1NativeCtx &, uint32_t, uint32_t, uint32_t);
++    void (*callUpper)(VU1NativeCtx &, uint32_t, uint32_t);
++    void (*xgkick)(VU1NativeCtx &, uint32_t);
++};
++// version (bump when the generated code's contract changes) and the sizes of what the blocks touch
++constexpr uint64_t kVu1JitAbi = (1ull << 48) | (static_cast<uint64_t>(sizeof(VU1State)) << 32) |
++                                (static_cast<uint64_t>(sizeof(VU1NativeCtx)) << 16) |
++                                (VU1NativeAccess::kSlotSize + sizeof(VU1JitApi));
++using VU1JitModuleFn = uint32_t (*)(const VU1JitApi *);
++#if defined(_WIN32)
++#define VU1N_JIT_EXPORT __declspec(dllexport)
++#else
++#define VU1N_JIT_EXPORT __attribute__((visibility("default")))
++#endif
++
+ 
+ // The VU arithmetic must not be reassociated, contracted or assumed finite (the runtime builds with /fp:fast).
+ #if defined(_MSC_VER)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_jit.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_jit.inl
+new file mode 100644
+index 0000000..1f68f48
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_jit.inl
+@@ -0,0 +1,401 @@
++// gow-native-pc: background VU1 compiler (included at the end of ps2_vu1_native.inl). Opt-in: GOW_VU1N_JIT=<work folder>.
++//
++// A VU1 block the game reaches without native code runs in the exact engine (slow: an area the first-play recording did
++// not visit drops to ~26 fps). With the compiler on, the micro memory (16 KB) holding such a block is queued, once per
++// code generation; a worker thread at low priority writes the queued images to <work>/in, runs the same generator as the
++// build (tools/vu1/vu1n_gen.py --dll, blocks the game already has left out), compiles the module with the build's clang
++// and loads it. The VU1 thread registers its blocks at the next runNative entry and sets the dispatch slots up again, so
++// the area switches to native code a few seconds after it was first reached, while the game keeps running. The blocks
++// are the build's own code (same generator, same helpers through VU1JitApi): bit-exact with the build's native blocks,
++// checked by GOW_VU1N_VERIFY like them. Modules stay in <work>/<stamp> and are loaded at the next start, until the
++// generator, the headers or the compiler command change (stamp).
++//
++// Environment (the launcher sets them for clang builds): GOW_VU1N_JIT_CXX = clang++, GOW_VU1N_JIT_PY = python,
++// GOW_VU1N_JIT_GEN = vu1n_gen.py, GOW_VU1N_JIT_FLAGS = compiler flags (include folders, -O / -f options of the build).
++// GOW_VU1N_JIT_DELAY = milliseconds the worker waits for more images before a batch (default 400). Log lines: [vu1n-jit].
++//
++// Threads: images are queued by the VU1 thread (slot setup), modules are built and loaded by the worker, and blocks are
++// registered by the VU1 thread (the registry is only read there). One VU1 thread, as in this runtime.
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#else
++#include <dlfcn.h>
++#include <sys/wait.h>
++#endif
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <filesystem>
++#include <fstream>
++#include <sstream>
++#include <thread>
++
++namespace vu1jit
++{
++    namespace fs = std::filesystem;
++
++    std::string env(const char *name)
++    {
++        const char *v = std::getenv(name);
++        return v ? std::string(v) : std::string();
++    }
++
++    uint64_t fnv64(const void *p, size_t n, uint64_t h = 1469598103934665603ull)
++    {
++        const auto *b = static_cast<const uint8_t *>(p);
++        for (size_t i = 0; i < n; ++i)
++            h = (h ^ b[i]) * 1099511628211ull;
++        return h;
++    }
++
++    std::string hex(uint64_t v)
++    {
++        char s[17];
++        std::snprintf(s, sizeof(s), "%016llx", static_cast<unsigned long long>(v));
++        return s;
++    }
++
++    std::string quote(const std::string &s) { return "\"" + s + "\""; }
++
++    // Runs a command line hidden (no console window from the game's GUI process), below normal priority, and waits.
++    // Output goes to the log file. Returns the exit code (-1: could not start).
++    int runHidden(const std::string &cmd, const std::string &log)
++    {
++#if defined(_WIN32)
++        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
++        HANDLE out = CreateFileA(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS,
++                                 FILE_ATTRIBUTE_NORMAL, nullptr);
++        STARTUPINFOA si{};
++        si.cb = sizeof(si);
++        si.dwFlags = STARTF_USESTDHANDLES;
++        si.hStdOutput = si.hStdError = out;
++        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
++        PROCESS_INFORMATION pi{};
++        std::string line = cmd;
++        const BOOL ok = CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE,
++                                       CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr, nullptr, &si, &pi);
++        if (out != INVALID_HANDLE_VALUE)
++            CloseHandle(out);
++        if (!ok)
++            return -1;
++        WaitForSingleObject(pi.hProcess, INFINITE);
++        DWORD code = 1;
++        GetExitCodeProcess(pi.hProcess, &code);
++        CloseHandle(pi.hThread);
++        CloseHandle(pi.hProcess);
++        return static_cast<int>(code);
++#else
++        const int rc = std::system(("nice -n 10 " + cmd + " >> " + quote(log) + " 2>&1").c_str());
++        return rc == -1 ? -1 : WEXITSTATUS(rc);
++#endif
++    }
++
++    VU1JitModuleFn loadModule(const fs::path &path)
++    {
++#if defined(_WIN32)
++        HMODULE m = LoadLibraryW(path.wstring().c_str());
++        return m ? reinterpret_cast<VU1JitModuleFn>(reinterpret_cast<void *>(GetProcAddress(m, "vu1n_jit_blocks"))) : nullptr;
++#else
++        void *m = dlopen(path.string().c_str(), RTLD_NOW | RTLD_LOCAL);
++        if (!m)
++            std::fprintf(stderr, "[vu1n-jit] %s\n", dlerror());
++        return m ? reinterpret_cast<VU1JitModuleFn>(dlsym(m, "vu1n_jit_blocks")) : nullptr;
++#endif
++    }
++
++    void registerIfNew(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes)
++    {
++        if (nativeRegistry().count(key) == 0u) // the build's own block wins (same code)
++            vu1nRegisterBlock(key, fn, pairs, tail, lanes);
++    }
++
++    const VU1JitApi &api()
++    {
++        static const VU1JitApi a{kVu1JitAbi, &registerIfNew,
++                                 [](VU1NativeCtx &n, uint32_t next) -> void * { return VU1NativeAccess::chain(n, next); },
++                                 &VU1NativeAccess::callLower,
++                                 &VU1NativeAccess::callUpper, &VU1NativeAccess::xgkick};
++        return a;
++    }
++
++    class Compiler
++    {
++    public:
++        static Compiler *get()
++        {
++            static Compiler *c = []() -> Compiler * {
++                const std::string dir = env("GOW_VU1N_JIT");
++                if (dir.empty() || dir == "0")
++                    return nullptr;
++                auto *x = new Compiler(dir);
++                if (!x->m_ok)
++                {
++                    delete x;
++                    return nullptr;
++                }
++                return x;
++            }();
++            return c;
++        }
++
++        // VU1 thread, slot setup without native code: queue this micro memory once per code generation.
++        void noteMiss(const uint8_t *code, uint64_t codeChanges, uint64_t &queuedAt)
++        {
++            if (queuedAt == codeChanges)
++                return;
++            queuedAt = codeChanges;
++            if (!m_knownTaken)
++                takeKnown();
++            const uint64_t h = fnv64(code, PS2_VU1_CODE_SIZE);
++            std::lock_guard<std::mutex> lock(m_mutex);
++            if (!m_images.insert(h).second)
++                return; // already compiled or queued
++            m_queue.emplace_back(h, std::vector<uint8_t>(code, code + PS2_VU1_CODE_SIZE));
++            ++m_queuedImages;
++            m_wake.notify_one();
++        }
++
++        // VU1 thread, runNative entry: register the modules the worker loaded. True when blocks were added (the caller's
++        // slots must be set up again).
++        bool poll(uint32_t &seen)
++        {
++            const uint32_t ready = m_readyCount.load(std::memory_order_acquire);
++            if (ready == seen)
++                return false;
++            seen = ready;
++            std::vector<VU1JitModuleFn> mods;
++            {
++                std::lock_guard<std::mutex> lock(m_mutex);
++                mods.swap(m_ready);
++            }
++            uint32_t blocks = 0;
++            for (VU1JitModuleFn f : mods)
++                blocks += f(&api());
++            if (blocks)
++                std::fprintf(stderr, "[vu1n-jit] %u blocks now native\n", blocks);
++            return true;
++        }
++
++        // tests: wait until the queue is empty and nothing is being compiled
++        void waitIdle()
++        {
++            std::unique_lock<std::mutex> lock(m_mutex);
++            m_idle.wait(lock, [&] { return m_queue.empty() && !m_busy; });
++        }
++
++    private:
++        explicit Compiler(const std::string &dir)
++        {
++            m_cxx = env("GOW_VU1N_JIT_CXX");
++            m_py = env("GOW_VU1N_JIT_PY");
++            m_gen = env("GOW_VU1N_JIT_GEN");
++            m_flags = env("GOW_VU1N_JIT_FLAGS");
++            if (const std::string d = env("GOW_VU1N_JIT_DELAY"); !d.empty())
++                m_delayMs = std::atoi(d.c_str());
++            if (m_cxx.empty() || m_py.empty() || m_gen.empty())
++            {
++                std::fprintf(stderr, "[vu1n-jit] off: GOW_VU1N_JIT_CXX, GOW_VU1N_JIT_PY and GOW_VU1N_JIT_GEN are needed\n");
++                return;
++            }
++            // stamp: modules of another generator / header set / compiler command are not reused
++            std::string genText;
++            {
++                std::ifstream g(m_gen, std::ios::binary);
++                std::stringstream ss;
++                ss << g.rdbuf();
++                genText = ss.str();
++            }
++            const std::string cmdId = m_cxx + "|" + m_flags;
++            uint64_t stamp = fnv64(genText.data(), genText.size(), kVu1JitAbi);
++            stamp = fnv64(cmdId.data(), cmdId.size(), stamp);
++            std::error_code ec;
++            m_dir = fs::path(dir) / hex(stamp);
++            fs::create_directories(m_dir / "in", ec);
++            if (ec)
++            {
++                std::fprintf(stderr, "[vu1n-jit] off: cannot create %s\n", m_dir.string().c_str());
++                return;
++            }
++            m_ok = true;
++            m_thread = std::thread([this] { worker(); });
++            m_thread.detach();
++            std::fprintf(stderr, "[vu1n-jit] on: %s\n", m_dir.string().c_str());
++        }
++
++        // the registry's keys (the build's blocks and earlier modules): left out of new modules
++        void takeKnown()
++        {
++            std::lock_guard<std::mutex> lock(m_mutex);
++            for (const auto &e : nativeRegistry())
++                m_known.insert(e.first);
++            m_knownTaken = true;
++        }
++
++        void readKeys(const fs::path &file)
++        {
++            std::ifstream f(file);
++            std::string line;
++            while (std::getline(f, line))
++                if (!line.empty())
++                    m_known.insert(std::stoull(line, nullptr, 16));
++        }
++
++        void worker()
++        {
++#if defined(_WIN32)
++            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++#endif
++            // modules of earlier sessions first: areas compiled before are native right away
++            {
++                std::vector<fs::path> old;
++                std::error_code ec;
++                for (const auto &e : fs::directory_iterator(m_dir, ec))
++                    if (e.path().extension() == kModuleExt)
++                        old.push_back(e.path());
++                std::sort(old.begin(), old.end());
++                for (const fs::path &p : old)
++                    if (VU1JitModuleFn f = loadModule(p))
++                    {
++                        std::lock_guard<std::mutex> lock(m_mutex);
++                        m_ready.push_back(f);
++                        readKeys(fs::path(p).replace_extension(".keys"));
++                        m_batch = std::max(m_batch, static_cast<uint32_t>(std::atoi(p.stem().string().c_str() + 4)) + 1u);
++                        m_readyCount.fetch_add(1u, std::memory_order_release);
++                    }
++                {
++                    std::lock_guard<std::mutex> lock(m_mutex);
++                    for (const auto &e : fs::directory_iterator(m_dir / "in", ec))
++                        m_images.insert(std::stoull(e.path().stem().string(), nullptr, 16));
++                }
++                if (!old.empty())
++                    std::fprintf(stderr, "[vu1n-jit] %zu modules from earlier sessions\n", old.size());
++            }
++            for (;;)
++            {
++                std::vector<std::pair<uint64_t, std::vector<uint8_t>>> batch;
++                {
++                    std::unique_lock<std::mutex> lock(m_mutex);
++                    m_wake.wait(lock, [&] { return !m_queue.empty(); });
++                    m_busy = true;
++                }
++                // more images usually follow the first miss of an area: wait a little and take them together
++                std::this_thread::sleep_for(std::chrono::milliseconds(m_delayMs));
++                std::vector<uint64_t> known;
++                {
++                    std::lock_guard<std::mutex> lock(m_mutex);
++                    while (!m_queue.empty())
++                    {
++                        batch.push_back(std::move(m_queue.front()));
++                        m_queue.pop_front();
++                    }
++                    known.assign(m_known.begin(), m_known.end());
++                }
++                build(batch, known);
++                {
++                    std::lock_guard<std::mutex> lock(m_mutex);
++                    m_busy = false;
++                }
++                m_idle.notify_all();
++            }
++        }
++
++        void build(const std::vector<std::pair<uint64_t, std::vector<uint8_t>>> &batch, const std::vector<uint64_t> &known)
++        {
++            const auto t0 = std::chrono::steady_clock::now();
++            const std::string name = "jit_" + std::to_string(m_batch++);
++            const fs::path log = m_dir / "jit.log";
++            std::vector<fs::path> images;
++            for (const auto &[h, code] : batch)
++            {
++                images.push_back(m_dir / "in" / (hex(h) + ".bin"));
++                std::ofstream(images.back(), std::ios::binary).write(reinterpret_cast<const char *>(code.data()),
++                                                                     static_cast<std::streamsize>(code.size()));
++            }
++            {
++                std::ofstream k(m_dir / (name + ".skip"));
++                for (const uint64_t key : known)
++                    k << hex(key) << '\n';
++            }
++            std::string gen = quote(m_py) + " -I " + quote(m_gen) + " " + quote(m_dir.string());
++            for (const fs::path &p : images)
++                gen += " " + quote(p.string());
++            gen += " --dll " + name + " --skip-keys " + quote((m_dir / (name + ".skip")).string());
++            if (runHidden(gen, log.string()) != 0)
++            {
++                std::fprintf(stderr, "[vu1n-jit] generator failed (%s)\n", log.string().c_str());
++                return;
++            }
++            std::error_code ec;
++            fs::remove(m_dir / (name + ".skip"), ec);
++            const fs::path keys = m_dir / (name + ".keys");
++            if (fs::file_size(keys, ec) == 0u)
++            {
++                fs::remove(m_dir / (name + ".cpp"), ec);
++                fs::remove(keys, ec);
++                return; // only blocks the game already has (or unsupported ones)
++            }
++            const fs::path mod = m_dir / (name + kModuleExt);
++            const std::string cc = quote(m_cxx) + " " + m_flags + " -shared " + kModuleFlags + " -o " + quote(mod.string()) + " " +
++                                   quote((m_dir / (name + ".cpp")).string());
++            if (runHidden(cc, log.string()) != 0)
++            {
++                std::fprintf(stderr, "[vu1n-jit] compile failed (%s)\n", log.string().c_str());
++                return;
++            }
++            VU1JitModuleFn f = loadModule(mod);
++            if (!f)
++            {
++                std::fprintf(stderr, "[vu1n-jit] could not load %s\n", mod.string().c_str());
++                return;
++            }
++            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++            std::lock_guard<std::mutex> lock(m_mutex);
++            readKeys(keys);
++            m_ready.push_back(f);
++            m_readyCount.fetch_add(1u, std::memory_order_release);
++            std::fprintf(stderr, "[vu1n-jit] %s: %zu micro memories compiled in %.1f s\n", name.c_str(), batch.size(), secs);
++        }
++
++#if defined(_WIN32)
++        static constexpr const char *kModuleExt = ".dll";
++        static constexpr const char *kModuleFlags = "-static";
++#else
++        static constexpr const char *kModuleExt = ".so";
++        static constexpr const char *kModuleFlags = "-fPIC -fvisibility=hidden";
++#endif
++        bool m_ok = false;
++        std::string m_cxx, m_py, m_gen, m_flags;
++        int m_delayMs = 400;
++        fs::path m_dir;
++        std::thread m_thread;
++        std::mutex m_mutex;
++        std::condition_variable m_wake, m_idle;
++        std::deque<std::pair<uint64_t, std::vector<uint8_t>>> m_queue;
++        std::unordered_set<uint64_t> m_images, m_known;
++        bool m_knownTaken = false, m_busy = false;
++        std::vector<VU1JitModuleFn> m_ready;
++        std::atomic<uint32_t> m_readyCount{0};
++        uint32_t m_batch = 0;
++        unsigned long long m_queuedImages = 0;
++    };
++}
++
++unsigned long long VU1NativeAccess::nativeBlocksRun(const VU1Interpreter &vu)
++{
++    return vu.m_native ? vu.m_native->nativeBlocks : 0u;
++}
++
++// tests (tests/vu1_jit_test.cpp): wait for the background compiler
++void vu1nJitWaitIdle()
++{
++    if (vu1jit::Compiler *c = vu1jit::Compiler::get())
++        c->waitIdle();
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 401d9f0..e6a0ddf 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -73,6 +73,8 @@ namespace
+     }
+ }
+ 
++#include "ps2_vu1_jit.inl" // gow-native-pc: background VU1 compiler (GOW_VU1N_JIT)
++
+ void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail)
+ {
+     nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}, nullptr};
+@@ -788,6 +790,8 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+                 if (ns.diag)
+                     ++ns.missPcs[pc];
+                 recordMissHead(pc);
++                if (vu1jit::Compiler *jc = vu1jit::Compiler::get()) // gow-native-pc: compile it in the background
++                    jc->noteMiss(code, ns.codeChanges, ns.jitQueuedAt);
+             }
+         }
+     }
+@@ -902,6 +906,11 @@ bool VU1Interpreter::runNative(StepContext &context)
+         ns.generation = generation;
+         VU1NativeAccess::codeChanged(ns, context.vuCode);
+     }
++    // gow-native-pc: blocks the background compiler finished since the last entry: set the slots up again
++    if (vu1jit::Compiler *jc = vu1jit::Compiler::get())
++        if (jc->poll(ns.jitSeen))
++            for (NativeState::Slot &sl : ns.slots)
++                sl.known = false;
+ 
+     const uint64_t savedFpMode = vu_fpmode::get();
+     bool armed = false; // pending exact-engine pipelines are committed only when a native block really runs
+diff --git a/tests/vu1_jit_test.cpp b/tests/vu1_jit_test.cpp
+new file mode 100644
+index 0000000..03bf63a
+--- /dev/null
++++ b/tests/vu1_jit_test.cpp
+@@ -0,0 +1,380 @@
++// gow-native-pc: background VU1 compiler (GOW_VU1N_JIT, ps2_vu1_jit.inl) end to end, without game data. A procedural
++// micro memory holds a vertex-transform loop (LQI, MULA/MADDA/MADD broadcast, CLIP, DIV + WAITQ, MULq, FCGET, FMAND,
++// SQI, IADDI, IBNE) and an FMAC/flag mix. Each program runs in the exact engine (native off) and with the compiler on:
++// the first run reaches blocks without native code (queued), the test waits for the module, and the next runs must be
++// native (nativeBlocksRun > 0) and match the exact engine under GOW_VU1N_VERIFY's rule (integers, MAC, clip, pc exact;
++// floats within 2e-4: the native backend's DIV / RSQRT round like the host, not like the PS2), for random inputs. The
++// test prints a digest of every native result: the same test built with the blocks compiled in (the build's AOT path,
++// "-" as work dir) must print the same digest, i.e. the background-compiled blocks are bit-identical to the build's.
++// Then the exact engine and the native blocks are timed on the loop.
++// Usage: vu1_jit_test <work dir> <vu1n_gen.py> <python> <clang++> "<compiler flags>" [trials]
++//        vu1_jit_test - [trials]                  (AOT build: blocks from tools/vu1/vu1n_gen.py compiled in)
++//        vu1_jit_test --write <micro memory.bin>  (input of that AOT build)
++#include <fstream>
++#include "runtime/ps2_memory.h"
++#include "runtime/ps2_vu1.h"
++#include "runtime/ps2_vu1_native.h"
++#include "runtime/gs/gs_frontend.h"
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <string>
++#include <vector>
++
++void vu1nJitWaitIdle();
++
++namespace
++{
++constexpr uint32_t kNop = 0x2ffu, kLowerNop = 0x8000033cu, kEbit = 0x40000000u;
++
++uint32_t upper(uint32_t op, uint32_t dest, uint32_t ft, uint32_t fs, uint32_t fd)
++{
++    return op | (dest << 21) | (ft << 16) | (fs << 11) | (fd << 6);
++}
++uint32_t upperSp(uint32_t code, uint32_t dest, uint32_t ft, uint32_t fs)
++{
++    return 0x3Cu | (code & 3u) | ((code >> 2) << 6) | (dest << 21) | (ft << 16) | (fs << 11);
++}
++uint32_t lowerSp(uint32_t sp, uint32_t dest, uint32_t ft, uint32_t fs)
++{
++    return 0x80000000u | (dest << 21) | (ft << 16) | (fs << 11) | ((sp >> 2) << 6) | 0x3Cu | (sp & 3u);
++}
++uint32_t iaddiu(uint32_t ft, uint32_t fs, uint32_t imm)
++{
++    return (0x08u << 25) | ((imm >> 11) << 21) | (ft << 16) | (fs << 11) | (imm & 0x7FFu);
++}
++uint32_t iaddi(uint32_t ft, uint32_t fs, int32_t imm5)
++{
++    return (0x40u << 25) | (ft << 16) | (fs << 11) | ((static_cast<uint32_t>(imm5) & 0x1Fu) << 6) | 0x32u;
++}
++uint32_t ibne(uint32_t ft, uint32_t fs, int32_t off)
++{
++    return (0x29u << 25) | (ft << 16) | (fs << 11) | (static_cast<uint32_t>(off) & 0x7FFu);
++}
++uint32_t divq(uint32_t fs, uint32_t fsf, uint32_t ft, uint32_t ftf)
++{
++    return 0x80000000u | (ftf << 23) | (fsf << 21) | (ft << 16) | (fs << 11) | ((0x38u >> 2) << 6) | 0x3Cu | (0x38u & 3u);
++}
++
++struct Program
++{
++    uint32_t pc;
++    const char *name;
++};
++
++// micro memory: program A (transform loop) at 0, program B (FMAC / flag mix) at 0x400
++std::vector<uint8_t> microMemory(std::vector<Program> &programs)
++{
++    std::vector<uint8_t> code(PS2_VU1_CODE_SIZE);
++    std::vector<std::pair<uint32_t, uint32_t>> a = {
++        {iaddiu(1, 0, 8), kNop},                                 // vi1 = 8 vertices
++        {iaddiu(2, 0, 0x10), kNop},                              // vi2 = input qword
++        {iaddiu(3, 0, 0x80), kNop},                              // vi3 = output qword
++        {iaddiu(7, 0, 0x00F0), kNop},                            // vi7 = MAC mask (sign bits)
++        // loop (pc 0x20)
++        {lowerSp(0x34u, 0xFu, 1, 2), kNop},                      // LQI vf1, (vi2++)
++        {kLowerNop, upperSp(0x18u, 0xFu, 1, 10)},                // MULAx  ACC, vf10, vf1x
++        {kLowerNop, upperSp(0x09u, 0xFu, 1, 11)},                // MADDAy ACC, vf11, vf1y
++        {kLowerNop, upperSp(0x0Au, 0xFu, 1, 12)},                // MADDAz ACC, vf12, vf1z
++        {kLowerNop, upper(0x0Bu, 0xFu, 1, 13, 2)},               // MADDw  vf2, vf13, vf1w
++        {kLowerNop, upperSp(0x1Fu, 0xEu, 2, 2)},                 // CLIPw  vf2xyz, vf2w
++        {divq(0, 3, 2, 3), kNop},                                // DIV Q, vf0w, vf2w
++        {lowerSp(0x3Bu, 0, 0, 0), kNop},                         // WAITQ
++        {kLowerNop, upper(0x1Cu, 0xEu, 0, 2, 3)},                // MULq vf3xyz, vf2, Q
++        {(0x1Cu << 25) | (5u << 16), kNop},                      // FCGET vi5
++        {(0x1Au << 25) | (6u << 16) | (7u << 11), kNop},         // FMAND vi6, vi7
++        {lowerSp(0x35u, 0xFu, 3, 3), kNop},                      // SQI vf3, (vi3++)
++        {iaddi(1, 1, -1), kNop},                                 // IADDI vi1, vi1, -1
++        {ibne(0, 1, -14), kNop},                                 // IBNE vi1, vi0, loop
++        {kLowerNop, kNop},                                       // delay slot
++        {kLowerNop, kNop | kEbit},
++        {kLowerNop, kNop},
++    };
++    std::memcpy(code.data(), a.data(), a.size() * 8u);
++    programs.push_back({0u, "transform loop"});
++    std::vector<std::pair<uint32_t, uint32_t>> b = {
++        {kLowerNop, upper(0x28u, 0xFu, 5, 4, 6)},                // ADD vf6, vf4, vf5
++        {kLowerNop, upper(0x2Au, 0xEu, 6, 4, 7)},                // MUL vf7xyz, vf4, vf6
++        {kLowerNop, upper(0x2Du, 0x9u, 4, 7, 8)},                // MSUB vf8xw, vf7, vf4
++        {kLowerNop, upper(0x2Bu, 0xFu, 5, 8, 9)},                // MAX vf9, vf8, vf5
++        {(0x18u << 25) | (6u << 16) | (7u << 11), kNop},         // FMEQ vi6, vi7
++        {kLowerNop, upper(0x2Fu, 0xFu, 9, 6, 14)},               // MINI vf14, vf6, vf9
++        {kLowerNop, upperSp(0x1Du, 0xFu, 15, 14)},               // ABS vf15, vf14
++        {kLowerNop, upperSp(0x14u, 0xFu, 16, 15)},               // FTOI0 vf16, vf15
++        {kLowerNop, kNop | kEbit},
++        {kLowerNop, kNop},
++    };
++    std::memcpy(code.data() + 0x400, b.data(), b.size() * 8u);
++    programs.push_back({0x400u, "FMAC / flag mix"});
++    return code;
++}
++
++float pick(std::mt19937 &rng)
++{
++    switch (rng() % 5u)
++    {
++    case 0:
++    {
++        static const uint32_t special[] = {0x00000000u, 0x80000000u, 0x3F800000u, 0x7F7FFFFFu, 0xFF7FFFFFu,
++                                           0x7F800000u, 0x00800000u, 0x7FC00000u, 0x00000001u};
++        uint32_t bits = special[rng() % (sizeof(special) / sizeof(special[0]))];
++        float f;
++        std::memcpy(&f, &bits, 4);
++        return f;
++    }
++    default:
++        return std::uniform_real_distribution<float>(-8.0f, 8.0f)(rng);
++    }
++}
++
++struct Inputs
++{
++    float vf[17][4];
++    uint8_t data[0x100 * 16];
++};
++
++Inputs randomInputs(std::mt19937 &rng)
++{
++    Inputs in{};
++    for (auto &r : in.vf)
++        for (float &c : r)
++            c = pick(rng);
++    for (uint32_t q = 0x10; q < 0x10 + 8; ++q) // input vertices
++        for (uint32_t c = 0; c < 4; ++c)
++        {
++            const float v = c == 3 ? std::uniform_real_distribution<float>(0.5f, 4.0f)(rng) : pick(rng);
++            std::memcpy(in.data + q * 16 + c * 4, &v, 4);
++        }
++    return in;
++}
++
++struct Result
++{
++    VU1State state;
++    std::vector<uint8_t> data;
++    unsigned long long native;
++};
++
++Result run(PS2Memory &mem, GS &gs, uint32_t pc, const Inputs &in)
++{
++    VU1Interpreter vu;
++    VU1State &s = vu.state();
++    for (uint32_t r = 1; r < 17; ++r)
++        std::memcpy(s.vf[r], in.vf[r], 16);
++    std::memcpy(mem.getVU1Data(), in.data, sizeof(in.data));
++    vu.execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem, pc);
++    return {vu.state(), std::vector<uint8_t>(mem.getVU1Data(), mem.getVU1Data() + sizeof(in.data)),
++            VU1NativeAccess::nativeBlocksRun(vu)};
++}
++
++// The status register's sticky bits are not modelled by native blocks (ps2_vu1_native.inl; GOW_VU1N_VERIFY leaves it out
++// too). Everything else must match bit for bit (GOW_VU1N_VERIFY allows 2e-4 on floats; this test does not).
++bool close(uint32_t a, uint32_t b) // GOW_VU1N_VERIFY's rule (ps2_vu1_core.cpp)
++{
++    if (a == b)
++        return true;
++    if (((a | b) & 0x7F800000u) == 0u)
++        return false; // integer-like words compare exactly
++    float fa, fb;
++    std::memcpy(&fa, &a, 4);
++    std::memcpy(&fb, &b, 4);
++    if (!std::isfinite(fa) || !std::isfinite(fb))
++        return false;
++    return std::fabs(fa - fb) <= 2e-4f * std::max(1.0f, std::max(std::fabs(fa), std::fabs(fb)));
++}
++bool closeWords(const void *x, const void *y, size_t bytes, unsigned &inexact)
++{
++    for (size_t i = 0; i < bytes; i += 4)
++    {
++        uint32_t a, b;
++        std::memcpy(&a, static_cast<const uint8_t *>(x) + i, 4);
++        std::memcpy(&b, static_cast<const uint8_t *>(y) + i, 4);
++        if (!close(a, b))
++            return false;
++        inexact += a != b;
++    }
++    return true;
++}
++bool same(const Result &x, const Result &y, unsigned &inexact)
++{
++    const VU1State &a = x.state, &b = y.state;
++    return closeWords(a.vf, b.vf, sizeof(a.vf), inexact) && closeWords(a.acc, b.acc, sizeof(a.acc), inexact) &&
++           closeWords(&a.q, &b.q, 4, inexact) && closeWords(x.data.data(), y.data.data(), x.data.size(), inexact) &&
++           std::memcmp(a.vi, b.vi, sizeof(a.vi)) == 0 && (a.mac & 0xF0FFu) == (b.mac & 0xF0FFu) && a.clip == b.clip &&
++           a.pc == b.pc;
++}
++uint64_t digest(uint64_t h, const Result &r)
++{
++    const auto mix = [&h](const void *p, size_t n) {
++        for (size_t i = 0; i < n; ++i)
++            h = (h ^ static_cast<const uint8_t *>(p)[i]) * 1099511628211ull;
++    };
++    mix(r.state.vf, sizeof(r.state.vf));
++    mix(r.state.acc, sizeof(r.state.acc));
++    mix(r.state.vi, sizeof(r.state.vi));
++    mix(&r.state.q, 4);
++    mix(&r.state.mac, 4);
++    mix(&r.state.clip, 4);
++    mix(&r.state.pc, 4);
++    mix(r.data.data(), r.data.size());
++    return h;
++}
++
++void setNative(bool on)
++{
++#if defined(_WIN32)
++    _putenv_s("GOW_VU1_NATIVE_OFF", on ? "" : "1");
++#else
++    if (on)
++        unsetenv("GOW_VU1_NATIVE_OFF");
++    else
++        setenv("GOW_VU1_NATIVE_OFF", "1", 1);
++#endif
++}
++}
++
++int main(int argc, char **argv)
++{
++    if (argc == 3 && std::strcmp(argv[1], "--write") == 0)
++    {
++        std::vector<Program> programs;
++        const auto code = microMemory(programs);
++        std::ofstream f(argv[2], std::ios::binary);
++        f.write(reinterpret_cast<const char *>(code.data()), static_cast<std::streamsize>(code.size()));
++        return f ? 0 : 2;
++    }
++    const bool aot = argc >= 2 && std::strcmp(argv[1], "-") == 0;
++    if (!aot && argc < 6)
++    {
++        std::fprintf(stderr, "usage: vu1_jit_test <work dir> <vu1n_gen.py> <python> <clang++> \"<flags>\" [trials]\n");
++        return 2;
++    }
++    if (aot)
++        ; // blocks compiled into this executable
++    else
++    {
++#if defined(_WIN32)
++    _putenv_s("GOW_VU1N_JIT", argv[1]);
++    _putenv_s("GOW_VU1N_JIT_GEN", argv[2]);
++    _putenv_s("GOW_VU1N_JIT_PY", argv[3]);
++    _putenv_s("GOW_VU1N_JIT_CXX", argv[4]);
++    _putenv_s("GOW_VU1N_JIT_FLAGS", argv[5]);
++    _putenv_s("GOW_VU1N_JIT_DELAY", "50");
++#else
++    setenv("GOW_VU1N_JIT", argv[1], 1);
++    setenv("GOW_VU1N_JIT_GEN", argv[2], 1);
++    setenv("GOW_VU1N_JIT_PY", argv[3], 1);
++    setenv("GOW_VU1N_JIT_CXX", argv[4], 1);
++    setenv("GOW_VU1N_JIT_FLAGS", argv[5], 1);
++    setenv("GOW_VU1N_JIT_DELAY", "50", 1);
++#endif
++    }
++    const unsigned trials = aot ? (argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 300u)
++                                : (argc > 6 ? static_cast<unsigned>(std::atoi(argv[6])) : 300u);
++    PS2Memory mem;
++    if (!mem.initialize())
++        return 2;
++    GS gs;
++    gs.init(mem.getGSVRAM(), 4u * 1024u * 1024u, &mem.gs());
++    std::vector<Program> programs;
++    const auto code = microMemory(programs);
++    std::memcpy(mem.getVU1Code(), code.data(), code.size());
++
++    std::mt19937 rng(20261026u);
++    // 1. first runs: no native code yet (misses queue the micro memory), then wait for the module
++    const auto t0 = std::chrono::steady_clock::now();
++    for (const Program &p : programs)
++    {
++        setNative(true);
++        const Result r = run(mem, gs, p.pc, randomInputs(rng));
++        std::printf("%-16s first run: %llu native blocks%s\n", p.name, r.native,
++                    aot ? " (compiled in)" : " (0 expected: not compiled yet)");
++    }
++    if (!aot)
++    {
++        vu1nJitWaitIdle();
++        std::printf("background compile finished in %.2f s\n",
++                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
++    }
++
++    // 2. exact engine vs compiled, random inputs
++    unsigned long long cases = 0, nativeBlocks = 0;
++    unsigned inexact = 0, edge = 0;
++    uint64_t dig = 1469598103934665603ull;
++    for (unsigned t = 0; t < trials; ++t)
++    {
++        const Inputs in = randomInputs(rng);
++        for (const Program &p : programs)
++        {
++            setNative(false);
++            const Result ref = run(mem, gs, p.pc, in);
++            setNative(true);
++            const Result got = run(mem, gs, p.pc, in);
++            if (got.native == 0u)
++            {
++                std::fprintf(stderr, "%s: still no native blocks after the background compile\n", p.name);
++                return 1;
++            }
++            if (!same(ref, got, inexact) && ++edge <= 2u)
++            {
++                // the native backend's known edge cases (also in the build's own native code, see the digest): the
++                // inputs include Inf / NaN / denormals, where a DIV result's zero sign or last bits can differ
++                const VU1State &x = ref.state, &y = got.state;
++                for (int r = 0; r < 32; ++r)
++                    if (std::memcmp(x.vf[r], y.vf[r], 16))
++                        std::fprintf(stderr, "  vf%d %08x %08x %08x %08x / %08x %08x %08x %08x\n", r,
++                                     *(const uint32_t *)&x.vf[r][0], *(const uint32_t *)&x.vf[r][1], *(const uint32_t *)&x.vf[r][2], *(const uint32_t *)&x.vf[r][3],
++                                     *(const uint32_t *)&y.vf[r][0], *(const uint32_t *)&y.vf[r][1], *(const uint32_t *)&y.vf[r][2], *(const uint32_t *)&y.vf[r][3]);
++                for (int r = 0; r < 16; ++r)
++                    if (x.vi[r] != y.vi[r])
++                        std::fprintf(stderr, "  vi%d %d / %d\n", r, x.vi[r], y.vi[r]);
++                if (std::memcmp(x.acc, y.acc, 16)) std::fprintf(stderr, "  acc differs\n");
++                if (x.status != y.status) std::fprintf(stderr, "  status %x / %x\n", x.status, y.status);
++                if (x.q != y.q) std::fprintf(stderr, "  q %g / %g\n", x.q, y.q);
++                for (size_t i = 0; i < ref.data.size(); i += 4)
++                    if (std::memcmp(&ref.data[i], &got.data[i], 4))
++                        std::fprintf(stderr, "  data qw %zx.%zu %08x / %08x\n", i / 16, (i % 16) / 4, *(const uint32_t *)&ref.data[i], *(const uint32_t *)&got.data[i]);
++                std::fprintf(stderr, "%s: differs from the exact engine on trial %u (above: exact / native)\n", p.name, t);
++            }
++            nativeBlocks += got.native;
++            dig = digest(dig, got);
++            ++cases;
++        }
++    }
++    std::printf("exact engine vs %s: %llu cases, %llu within GOW_VU1N_VERIFY's rule, %u outside it (edge inputs); "
++                "%llu native blocks run\n",
++                aot ? "compiled-in blocks" : "background-compiled blocks", cases, cases - edge, edge, nativeBlocks);
++    std::printf("digest of the native results: %016llx\n", static_cast<unsigned long long>(dig));
++
++    // 3. speed of the transform loop: one interpreter reused (as the game's VU1), 8 vertices per run
++    const Inputs in = randomInputs(rng);
++    double exactUs = 0, nativeUs = 0;
++    for (bool native : {false, true})
++    {
++        setNative(native);
++        VU1Interpreter vu;
++        constexpr int kRuns = 200000;
++        double best = 1e30;
++        for (int rep = 0; rep < 3; ++rep)
++        {
++            const auto s = std::chrono::steady_clock::now();
++            for (int i = 0; i < kRuns; ++i)
++            {
++                VU1State &st = vu.state();
++                for (uint32_t r = 1; r < 17; ++r)
++                    std::memcpy(st.vf[r], in.vf[r], 16);
++                std::memcpy(mem.getVU1Data(), in.data, sizeof(in.data) / 4); // the input vertices
++                vu.execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem, 0u);
++            }
++            best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - s).count() / kRuns);
++        }
++        (native ? nativeUs : exactUs) = best;
++        std::printf("transform loop, %-15s %.3f us per run (8 vertices)\n", native ? "native blocks:" : "exact engine:", best);
++    }
++    std::printf("native blocks are %.1fx faster than the exact engine here\n", exactUs / nativeUs);
++    return 0;
++}
+diff --git a/tools/ci/pruebas_vu1.cmake b/tools/ci/pruebas_vu1.cmake
+index c92b3cb..576c4fc 100644
+--- a/tools/ci/pruebas_vu1.cmake
++++ b/tools/ci/pruebas_vu1.cmake
+@@ -44,3 +44,23 @@ target_include_directories(gow_vu1_fmac_test PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRu
+ if(NOT MSVC)
+     target_compile_options(gow_vu1_fmac_test PRIVATE -ffp-contract=off)
+ endif()
++
++# gow-native-pc: background VU1 compiler (GOW_VU1N_JIT, ps2_vu1_jit.inl). gow_vu1_jit_test compiles its blocks while it
++# runs (vu1n_gen.py --dll + the compiler and flags given on its command line); gow_vu1_jit_aot_test has the same blocks
++# compiled in. Both print a digest of their native results: equal digests = the background-compiled blocks are the
++# build's own code, bit for bit. Run: gow_vu1_jit_test <work dir> <vu1n_gen.py> <python> <clang++> "<flags>" [trials]
++# and gow_vu1_jit_aot_test - [trials].
++find_package(Python3 COMPONENTS Interpreter)
++set(GOW_VU1_JIT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/../../tests/vu1_jit_test.cpp")
++add_executable(gow_vu1_jit_test "${GOW_VU1_JIT_SOURCE}")
++target_link_libraries(gow_vu1_jit_test PRIVATE ps2_runtime)
++set(GOW_VU1_JIT_AOT_DIR "${CMAKE_BINARY_DIR}/gow_vu1_jit_aot")
++set(GOW_VU1_JIT_AOT_PARTS "${GOW_VU1_JIT_AOT_DIR}/vu1n_part0.cpp" "${GOW_VU1_JIT_AOT_DIR}/vu1n_part1.cpp")
++add_custom_command(OUTPUT ${GOW_VU1_JIT_AOT_PARTS}
++    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GOW_VU1_JIT_AOT_DIR}"
++    COMMAND "$<TARGET_FILE:gow_vu1_jit_test>" --write "${GOW_VU1_JIT_AOT_DIR}/micro.bin"
++    COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_LIST_DIR}/../vu1/vu1n_gen.py" "${GOW_VU1_JIT_AOT_DIR}" "${GOW_VU1_JIT_AOT_DIR}/micro.bin" --parts 2
++    DEPENDS gow_vu1_jit_test "${CMAKE_CURRENT_LIST_DIR}/../vu1/vu1n_gen.py"
++    VERBATIM)
++add_executable(gow_vu1_jit_aot_test "${GOW_VU1_JIT_SOURCE}" ${GOW_VU1_JIT_AOT_PARTS})
++target_link_libraries(gow_vu1_jit_aot_test PRIVATE ps2_runtime)
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index adb8b92..499123b 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -1,12 +1,18 @@
+ """Native VU1 block generator.
+ 
+ usage: python -I tools/vu1/vu1n_gen.py <out dir> <micro-memory dir or .bin files...> [--heads heads.txt] [--parts N]
++       [--dll <name> [--skip-keys keys.txt]]
+ 
+ Reads the captured 16 KB VU1 micro-memories (GOW_VU1_CAPTURA), splits them into basic blocks (same rule as
+ VU1Interpreter's nativeExtent in ps2_vu1_native.inl) and writes straight-line C++ for each distinct (pc, words) block:
+ immediate semantics, no cycle model, MAC flags only where they can be observed. Output: vu1n_part<k>.cpp. The exact engine
+ (ps2_vu1_core.cpp) remains the fallback for every block that is not here and the oracle for GOW_VU1N_VERIFY.
+ heads.txt (optional): extra entry pcs (hex, one per line), e.g. misses logged by GOW_VU1N_DIAG.
++gow-native-pc: --dll <name> writes <out>/<name>.cpp for the background VU1 compiler (ps2_vu1_jit.inl) instead of the
++parts: one module the runtime builds while the game runs and loads as a DLL / shared object. It does not link against
++the game: the VU1NativeAccess functions the blocks call are defined here and forward to the table the runtime passes
++(VU1JitApi), and the blocks are registered through vu1n_jit_blocks(). --skip-keys: blocks the game already has (hex
++block keys, one per line) are left out; <out>/<name>.keys lists the ones written.
+ """
+ import os
+ import struct
+@@ -724,10 +730,22 @@ def gen_block(pc0, pairs, tail_out=None, entry=VF0_LANES, req_out=None):
+     return lines
+ 
+ 
++# gow-native-pc: the VU1NativeAccess functions generated blocks call (see emit_upper / emit_lower / gen_block) that are not
++# inline in ps2_vu1_native.h (the flag ring ones are), forwarded through VU1JitApi in a --dll module
++JIT_THUNKS = [
++    ("VU1Interpreter::NativeState::Slot *", "chain", "VU1NativeCtx &n, uint32_t next", "n, next"),
++    ("void", "callLower", "VU1NativeCtx &n, uint32_t pc, uint32_t lower, uint32_t upper", "n, pc, lower, upper"),
++    ("void", "callUpper", "VU1NativeCtx &n, uint32_t pc, uint32_t upper", "n, pc, upper"),
++    ("void", "xgkick", "VU1NativeCtx &n, uint32_t qwordAddress", "n, qwordAddress"),
++]
++
++
+ def main():
+     args = sys.argv[1:]
+     heads_file = None
+     parts = 6
++    dll = None
++    skip_file = None
+     files = []
+     out = args[0]
+     i = 1
+@@ -738,6 +756,13 @@ def main():
+         elif args[i] == '--parts':
+             parts = int(args[i + 1])
+             i += 2
++        elif args[i] == '--dll':
++            dll = args[i + 1]
++            parts = 1
++            i += 2
++        elif args[i] == '--skip-keys':
++            skip_file = args[i + 1]
++            i += 2
+         else:
+             files.append(args[i])
+             i += 1
+@@ -753,6 +778,12 @@ def main():
+             line = line.strip()
+             if line:
+                 extra.add(int(line, 16) & 0x3FF8)
++    skip = set()
++    if skip_file and os.path.exists(skip_file):
++        for line in open(skip_file):
++            line = line.strip()
++            if line:
++                skip.add(int(line, 16))
+     # Pass 1: the distinct blocks, and per micro-memory a forward fixpoint of the clean-operand state over its static
+     # control flow (meet = AND); a block's entry assumption is the AND over every image it appears in.
+     info = {}   # key -> (pc, pairs, gen, keep, successors)
+@@ -798,6 +829,8 @@ def main():
+     unsupported = 0
+     assumed = 0
+     for key, (pc, pairs, gen, keep, _) in info.items():
++        if key in skip:
++            continue
+         tail, req = [], []
+         body = gen_block(pc, pairs, tail, entry.get(key, VF0_LANES), req)
+         blocks[key] = (pc, len(pairs), body, tail[0] if tail else None, req[0] if req else 0, gen, keep)
+@@ -809,6 +842,7 @@ def main():
+     texts = [[] for _ in range(parts)]
+     regs = [[] for _ in range(parts)]
+     count = 0
++    written = []
+     for key, (pc, npairs, body, tail, req, gen, keep) in sorted(blocks.items()):
+         if body is None:
+             continue
+@@ -829,12 +863,28 @@ def main():
+         texts[part].append("\n".join(t))
+         # bit 16: the block reads flags written before it; only such blocks need exact entry timing (see runNative)
+         reads_entry = any("macAt(" in ln or "clipAt(" in ln for ln in body)
+-        regs[part].append(f"    vu1nRegisterBlock(0x{key:016x}ull, {name}, {npairs | (0x10000 if reads_entry else 0)}u, "
++        reg = "api->reg" if dll else "vu1nRegisterBlock"
++        regs[part].append(f"    {reg}(0x{key:016x}ull, {name}, {npairs | (0x10000 if reads_entry else 0)}u, "
+                           f"{'&' + name + '_tail' if tail else 'nullptr'}, &{name}_lanes);")
++        written.append(key)
+     header = ('// Generated by tools/vu1/vu1n_gen.py from the game\'s VU1 microcode. Do not publish.\n'
+               '#include "runtime/ps2_vu1_native.h"\n#include <cmath>\n\n'
+               '#if defined(_MSC_VER)\n#pragma float_control(precise, on, push)\n#pragma fp_contract(off)\n#endif\n\n')
+     footer = '\n#if defined(_MSC_VER)\n#pragma float_control(pop)\n#endif\n'
++    if dll:
++        thunks = "".join(f"{ret} VU1NativeAccess::{fn}({params}) {{ return "
++                         + (f"static_cast<{ret}>(g_api->{fn}({call}))" if fn == "chain" else f"g_api->{fn}({call})") + "; }\n"
++                         for ret, fn, params, call in JIT_THUNKS)
++        body = ('// Generated by tools/vu1/vu1n_gen.py --dll while the game ran (background VU1 compiler). Game data: local only.\n'
++                '#include "runtime/ps2_vu1_native.h"\n#include <cmath>\n\n'
++                'namespace\n{\n    const VU1JitApi *g_api = nullptr;\n}\n' + thunks + '\n' + "\n".join(texts[0]) +
++                '\nextern "C" VU1N_JIT_EXPORT uint32_t vu1n_jit_blocks(const VU1JitApi *api)\n{\n'
++                '    if (api->abi != kVu1JitAbi)\n        return 0u;\n    g_api = api;\n' + "\n".join(regs[0]) +
++                f'\n    return {count}u;\n}}\n')
++        open(os.path.join(out, f"{dll}.cpp"), 'w', encoding='utf-8').write(body)
++        open(os.path.join(out, f"{dll}.keys"), 'w', encoding='utf-8').write("".join(f"{k:016x}\n" for k in written))
++        print(f"[vu1n_gen] {len(inputs)} images, {len(blocks)} new blocks, {count} generated, {unsupported} unsupported")
++        return
+     for k in range(parts):
+         body = header + "\n".join(texts[k]) + "\nnamespace\n{\n    const bool g_registered = []\n    {\n" + "\n".join(regs[k]) + "\n        return true;\n    }();\n}\n" + footer
+         path = os.path.join(out, f"vu1n_part{k}.cpp")

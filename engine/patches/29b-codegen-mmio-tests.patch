@@ -1,0 +1,52 @@
+Refresh two pre-existing MMIO codegen test expectations before the memory fast-path work.
+The pinned recompiler already uses native DMA/timer helpers; assert their operands, address validation
+and generic-store fallback instead of requiring the older Store32 spelling. No generated code changes.
+Run the CodeGenerator suite with tools/test/guest-calls.cmake target gow_codegen_tests.
+Result: Windows clang Release, the isolated CodeGenerator suite passes all 68 tests.
+
+diff --git a/PS2Recomp/ps2xTest/src/code_generator_tests.cpp b/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
+index 5d6adfa..ce59dc2 100644
+--- a/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
+@@ -341,7 +341,7 @@ void register_code_generator_tests()
+                  "MULT1 should write low product to rd on R5900");
+     });
+ 
+-    tc.Run("constant MMIO store emits direct runtime store", [](TestCase &t) {
++    tc.Run("constant DMA MMIO store emits native DMA store", [](TestCase &t) {
+         Function func;
+         func.name = "mmio_store";
+         func.start = 0x1000;
+@@ -355,10 +355,13 @@ void register_code_generator_tests()
+ 
+         CodeGenerator gen({}, {});
+         std::string generated = gen.generateFunction(func, instructions, false);
+-        printGeneratedCode("constant MMIO store emits direct runtime store", generated);
++        printGeneratedCode("constant DMA MMIO store emits native DMA store", generated);
+ 
+-        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000E020u, GPR_U32(ctx, 2));") != std::string::npos,
+-                 "constant MMIO SW should emit a direct runtime Store32");
++        // GOW-Port: the pinned recompiler already specializes D_PCR stores through the native DMA helper.
++        t.IsTrue(generated.find("runtime->memory().eeDmaStore(0x1000E020u, GPR_U32(ctx, 2))") != std::string::npos,
++                 "constant D_PCR SW should preserve the register address and value in the native DMA store");
++        t.IsTrue(generated.find("FAST_WRITE32") == std::string::npos,
++                 "a DMA register must never become an RDRAM store");
+         t.IsTrue(generated.find("WRITE32(ADD32(GPR_U32(ctx, 1)") == std::string::npos,
+                  "constant MMIO SW should not go through WRITE32 address classification");
+     });
+@@ -372,8 +375,13 @@ void register_code_generator_tests()
+         const std::string generated = gen.translateInstruction(store);
+         printGeneratedCode("stale MMIO annotation does not replace the guest effective address", generated);
+ 
+-        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, ADD32(GPR_U32(ctx, 1), 0), GPR_U32(ctx, 2))") != std::string::npos,
+-                 "MMIO annotations should select runtime access without hard-coding a possibly stale address");
++        // GOW-Port: timer hints specialize the helper, but the actual guest address must still select the path.
++        t.IsTrue(generated.find("const uint32_t _a = ADD32(GPR_U32(ctx, 1), 0);") != std::string::npos &&
++                 generated.find("const uint32_t _v = GPR_U32(ctx, 2);") != std::string::npos,
++                 "a stale timer hint must still evaluate the guest effective address and value");
++        t.IsTrue(generated.find("if (!PS2Memory::isEeTimerRegister(_a) || !runtime->memory().eeTimerStore(_a, _v))") != std::string::npos &&
++                 generated.find("runtime->Store32(rdram, ctx, _a, _v);") != std::string::npos,
++                 "a stale timer hint must retain native-address validation and the generic store fallback");
+         t.IsTrue(generated.find("0x10000000u") == std::string::npos,
+                  "stale MMIO address should not replace the address calculated by guest registers");
+     });

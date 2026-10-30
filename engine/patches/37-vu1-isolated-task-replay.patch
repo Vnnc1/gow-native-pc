@@ -1,0 +1,240 @@
+Capture bounded MSCAL inputs and independent native/exact reference digests; replay without a game or GPU. Versioned checksummed local corpus, no resume snapshots or exported game data. Replay verifies each backend against its own baseline; cross-backend arithmetic differences are reported, not hidden.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -271,7 +271,12 @@
+     static void xgkick(VU1NativeCtx &n, uint32_t qwordAddress);
+     // GOW_VU1N_RECORD / GOW_VU1N_REPLAY (bit-exact A/B of generator changes, see ps2_vu1_native.inl)
+     static void recordReplay(VU1Interpreter &vu, void *context, uint32_t maxCycles);
+-    static uint64_t silentNativeHash(VU1Interpreter &vu, void *context);
++    static uint64_t silentNativeHash(VU1Interpreter &vu, void *context, uint64_t *executionNs = nullptr);
++    // Bounded isolated MSCAL task corpus. Resume calls require scheduler snapshots and are excluded.
++    static void recordTask(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize,
++                           const uint8_t *data, uint32_t dataSize, uint32_t maxCycles);
++    static int replayTasks(const char *path, unsigned repetitions, bool exact);
++    static uint64_t taskDigest(VU1Interpreter &vu, const void *record, bool exact, uint64_t &ns, uint64_t &blocks);
+     static constexpr size_t kSlotSize = sizeof(VU1Interpreter::NativeState::Slot); // gow-native-pc: kVu1JitAbi
+     static unsigned long long nativeBlocksRun(const VU1Interpreter &vu); // gow-native-pc: tests (blocks run natively)
+ };
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1930,6 +1930,8 @@
+     m_state.vf[0][1] = 0.0f;
+     m_state.vf[0][2] = 0.0f;
+     m_state.vf[0][3] = 1.0f;
++    if (m_unit == Unit::VU1)
++        VU1NativeAccess::recordTask(*this, vuCode, codeSize, vuData, dataSize, maxCycles);
+     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+ }
+ 
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -1220,6 +1220,8 @@
+     return handled;
+ }
+ 
++#include "ps2_vu1_tasks.inl"
++
+ // GOW_VU1N_RECORD=<file> [GOW_VU1N_RECORD_N=4000, GOW_VU1N_RECORD_STRIDE=7, GOW_VU1N_RECORD_SKIP=0 (runs skipped first, to
+ // record a later part of a zone run; ~76k runs per second in gameplay)]: every STRIDE-th VU1 program run, the input
+ // (VU1State, micro memory, data memory) and a bit-exact hash of the native result (state, data memory, GIF packets) are
+@@ -1248,7 +1250,7 @@
+     }
+ }
+ 
+-uint64_t VU1NativeAccess::silentNativeHash(VU1Interpreter &vu, void *contextPtr)
++uint64_t VU1NativeAccess::silentNativeHash(VU1Interpreter &vu, void *contextPtr, uint64_t *executionNs)
+ {
+     auto &context = *static_cast<VU1Interpreter::StepContext *>(contextPtr);
+     const bool silentBefore = vu.m_verifySilent;
+@@ -1264,7 +1266,9 @@
+         if (!vu.stepInterpreted(c))
+             break;
+     }
+-    g_vu1nReplayNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
++    const auto elapsedNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
++    g_vu1nReplayNs += elapsedNs;
++    if (executionNs) *executionNs = elapsedNs;
+     if (g_vu1nReplayTimingOnly)
+     {
+         g_vuVerifyCapture = false;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
+@@ -0,0 +1,172 @@
++// Isolated real-task replay inspired by capture/compare workflows. No external project code is used.
++// Version 1 is a little-endian local research format, never a distributed game asset or session-report attachment.
++namespace gow_vu_tasks
++{
++    constexpr uint32_t Magic = 0x31545647u, Version = 1, MaxRecords = 1024, MaxCycles = 200000;
++    struct Input {
++        uint32_t vf[128], vi[16], acc[4], q, p, i, r, pc, mac, clip, status;
++        uint64_t cycle;
++        uint32_t top, itop, dBit, tBit, direct;
++    };
++    struct Record {
++        uint32_t magic, version, bytes, cycles;
++        uint64_t checksum, nativeHash, exactHash, codeHash;
++        Input input;
++        uint8_t code[16384], data[16384];
++    };
++    uint64_t hash(const void *p, size_t n, uint64_t h = 1469598103934665603ull)
++    {
++        for (size_t i = 0; i < n; ++i) h = (h ^ static_cast<const uint8_t *>(p)[i]) * 1099511628211ull;
++        return h;
++    }
++    uint64_t checksum(Record &r)
++    {
++        const auto saved = r.checksum; r.checksum = 0;
++        const auto result = hash(&r, sizeof(r)); r.checksum = saved;
++        return result;
++    }
++    uint64_t number(const char *name, uint64_t fallback, uint64_t maximum)
++    {
++        const char *v = std::getenv(name);
++        if (!v || !*v) return fallback;
++        char *end = nullptr;
++        const auto n = std::strtoull(v, &end, 10);
++        return v[0] != '-' && end && !*end ? std::min<uint64_t>(n, maximum) : fallback;
++    }
++    struct Recorder {
++        const char *path = std::getenv("GOW_VU1_TASK_RECORD");
++        const uint64_t limit = number("GOW_VU1_TASK_LIMIT", 128, MaxRecords);
++        const uint64_t stride = std::max<uint64_t>(1, number("GOW_VU1_TASK_STRIDE", 1024, 1000000000));
++        const uint64_t skip = number("GOW_VU1_TASK_SKIP", 0, 1000000000000ull);
++        const uint64_t delay = number("GOW_VU1_TASK_DELAY", 0, 3600);
++        const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++        uint64_t seen = 0, written = 0;
++        bool failed = false;
++        FILE *file = nullptr;
++        std::mutex mutex;
++        ~Recorder() { if (file) std::fclose(file); }
++    };
++}
++
++uint64_t VU1NativeAccess::taskDigest(VU1Interpreter &vu, const void *record, bool exact, uint64_t &ns, uint64_t &blocks)
++{
++    const auto &r = *static_cast<const gow_vu_tasks::Record *>(record);
++    vu.reset();
++    auto &s = vu.m_state;
++    const auto &in = r.input;
++    std::memcpy(s.vf, in.vf, sizeof(in.vf)); std::memcpy(s.vi, in.vi, sizeof(in.vi));
++    std::memcpy(s.acc, in.acc, sizeof(in.acc));
++    std::memcpy(&s.q, &in.q, 4); std::memcpy(&s.p, &in.p, 4); std::memcpy(&s.i, &in.i, 4);
++    s.r = in.r; s.pc = in.pc; s.mac = in.mac; s.clip = in.clip; s.status = in.status;
++    s.top = in.top; s.itop = in.itop; s.dBitEnabled = in.dBit != 0; s.tBitEnabled = in.tBit != 0;
++    s.cycles = vu.m_cycle = in.cycle;
++    vu.resetScheduler();
++    if (vu.m_directRegisterWrites != (in.direct != 0)) vu.setDirectRegisterWrites(in.direct != 0);
++    vu.m_native->enabled = !exact;
++    vu.m_native->diag = false;
++    const auto before = vu.m_native->nativeBlocks;
++    std::array<uint8_t, 16384> code, data;
++    std::memcpy(code.data(), r.code, code.size()); std::memcpy(data.data(), r.data, data.size());
++    // Silent XGKICK capture supplies the output packets; no graphics thread/device is started.
++    GS gs;
++    VU1Interpreter::StepContext c{code.data(), 16384u, data.data(), 16384u, &gs, nullptr,
++                                  vu.m_cycle + r.cycles, false};
++    vu.m_activeVuData = data.data(); vu.m_activeVuDataSize = data.size();
++    vu.m_activeGs = &gs; vu.m_activeMemory = nullptr;
++    const auto fp = vu_fpmode::get();
++    vu_fpmode::set((fp & ~vu_fpmode::kRoundMask) | vu_fpmode::kRoundZero);
++    // Time only the execution loop. Reconstruction, final pipeline flush and hashing are outside the timer.
++    auto digest = silentNativeHash(vu, &c, &ns);
++    vu_fpmode::set(fp);
++    blocks = vu.m_native->nativeBlocks - before;
++    const uint64_t tail[] = {s.r, s.status, vu.m_cycle, uint64_t(s.ebit), uint64_t(s.haltAfterDelaySlot),
++        uint64_t(s.stoppedByD), uint64_t(s.stoppedByT), uint64_t(s.branchPending), s.branchTarget, s.branchDelay};
++    return gow_vu_tasks::hash(tail, sizeof(tail), digest);
++}
++
++void VU1NativeAccess::recordTask(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize,
++                                const uint8_t *data, uint32_t dataSize, uint32_t maxCycles)
++{
++    static gow_vu_tasks::Recorder out;
++    if (!out.path || !*out.path || codeSize != 16384 || dataSize != 16384 || !code || !data) return;
++    std::lock_guard<std::mutex> lock(out.mutex);
++    if (out.failed || out.written >= out.limit || maxCycles == 0 || maxCycles > gow_vu_tasks::MaxCycles) return;
++    if (out.delay && std::chrono::steady_clock::now() - out.start < std::chrono::seconds(out.delay)) return;
++    const auto index = out.seen++;
++    if (index < out.skip || (index - out.skip) % out.stride) return;
++    if (!out.file) {
++        out.file = std::fopen(out.path, "wbx"); // Never overwrite an earlier corpus.
++        if (!out.file) { out.failed = true; std::fprintf(stderr, "[gow-vu1-task] write_error=1\n"); return; }
++    }
++    auto r = std::make_unique<gow_vu_tasks::Record>();
++    std::memset(r.get(), 0, sizeof(*r));
++    r->magic = gow_vu_tasks::Magic; r->version = gow_vu_tasks::Version; r->bytes = sizeof(*r); r->cycles = maxCycles;
++    const auto &s = vu.m_state; auto &in = r->input;
++    std::memcpy(in.vf, s.vf, sizeof(in.vf)); std::memcpy(in.vi, s.vi, sizeof(in.vi));
++    std::memcpy(in.acc, s.acc, sizeof(in.acc));
++    std::memcpy(&in.q, &s.q, 4); std::memcpy(&in.p, &s.p, 4); std::memcpy(&in.i, &s.i, 4);
++    in.r = s.r; in.pc = s.pc; in.mac = s.mac; in.clip = s.clip; in.status = s.status;
++    in.cycle = vu.m_cycle; in.top = s.top; in.itop = s.itop;
++    in.dBit = s.dBitEnabled; in.tBit = s.tBitEnabled; in.direct = vu.m_directRegisterWrites;
++    std::memcpy(r->code, code, 16384); std::memcpy(r->data, data, 16384);
++    r->codeHash = gow_vu_tasks::hash(code, 16384);
++    VU1Interpreter isolated;
++    auto native = std::make_unique<VU1Interpreter::NativeState>(); isolated.m_native = native.get();
++    uint64_t ns, blocks;
++    r->nativeHash = taskDigest(isolated, r.get(), false, ns, blocks);
++    r->exactHash = taskDigest(isolated, r.get(), true, ns, blocks);
++    r->checksum = gow_vu_tasks::checksum(*r);
++    if (std::fwrite(r.get(), sizeof(*r), 1, out.file) != 1 || std::fflush(out.file) != 0) {
++        out.failed = true; std::fprintf(stderr, "[gow-vu1-task] write_error=1\n"); return;
++    }
++    ++out.written;
++    if (out.written == 1 || out.written % 32 == 0 || out.written == out.limit)
++        std::fprintf(stderr, "[gow-vu1-task] recorded=%llu bytes=%llu limit=%llu\n",
++            (unsigned long long)out.written, (unsigned long long)(out.written * sizeof(*r)), (unsigned long long)out.limit);
++    if (out.written == out.limit) { std::fclose(out.file); out.file = nullptr; }
++}
++
++int VU1NativeAccess::replayTasks(const char *path, unsigned repetitions, bool exact)
++{
++    if (repetitions < 1 || repetitions > 100) return 2;
++    FILE *f = std::fopen(path, "rb");
++    if (!f) return 2;
++    std::vector<gow_vu_tasks::Record> records;
++    auto r = std::make_unique<gow_vu_tasks::Record>();
++    bool invalid = false;
++    for (;;) {
++        const size_t n = std::fread(r.get(), 1, sizeof(*r), f);
++        if (!n) { invalid = std::ferror(f) != 0; break; }
++        if (n != sizeof(*r) || records.size() >= gow_vu_tasks::MaxRecords || r->magic != gow_vu_tasks::Magic ||
++            r->version != gow_vu_tasks::Version || r->bytes != sizeof(*r) || !r->cycles || r->cycles > gow_vu_tasks::MaxCycles ||
++            r->input.pc >= 16384 || r->input.pc % 8 || r->input.cycle > UINT64_MAX - r->cycles ||
++            r->input.dBit > 1 || r->input.tBit > 1 || r->input.direct > 1 ||
++            r->checksum != gow_vu_tasks::checksum(*r) || r->codeHash != gow_vu_tasks::hash(r->code, 16384)) {
++            invalid = true; break;
++        }
++        records.push_back(*r);
++    }
++    std::fclose(f);
++    if (invalid || records.empty()) { std::fprintf(stderr, "[gow-vu1-replay] invalid_corpus=1\n"); return 2; }
++    unsigned differences = 0, index = 0, backendDifferences = 0;
++    for (const auto &record : records) {
++        VU1Interpreter vu;
++        auto native = std::make_unique<VU1Interpreter::NativeState>(); vu.m_native = native.get();
++        const auto expected = exact ? record.exactHash : record.nativeHash;
++        uint64_t ns = 0, blocks = 0, firstNs = 0;
++        std::vector<uint64_t> warm;
++        bool match = true;
++        for (unsigned rep = 0; rep <= repetitions; ++rep) {
++            match &= taskDigest(vu, &record, exact, ns, blocks) == expected;
++            if (rep) warm.push_back(ns); else firstNs = ns;
++        }
++        differences += !match;
++        backendDifferences += record.nativeHash != record.exactHash;
++        std::sort(warm.begin(), warm.end());
++        std::printf("[gow-vu1-replay] record=%u pc=%u code_hash=%016llx match=%u native_blocks=%llu first_us=%.3f warm_median_us=%.3f\n",
++            ++index, record.input.pc, (unsigned long long)record.codeHash, unsigned(match),
++            (unsigned long long)blocks, firstNs / 1e3, warm[warm.size() / 2] / 1e3);
++    }
++    std::printf("[gow-vu1-replay] records=%u mismatches=%u baseline_backend_differences=%u\n", index, differences, backendDifferences);
++    return differences ? 1 : 0;
++}

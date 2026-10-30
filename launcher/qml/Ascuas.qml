@@ -16,9 +16,10 @@ Item {
         system: sistema
         groups: ["ceniza"]
         source: "qrc:///particleresources/fuzzydot.png"
-        color: "#c9ccd2"
-        alpha: 0.16
-        alphaVariation: 0.12
+        // warm, dim ash: cool white specks read as a starfield, not a fire
+        color: "#a0826c"
+        alpha: 0.11
+        alphaVariation: 0.08
         entryEffect: ImageParticle.Fade
         rotationVariation: 180
     }
@@ -39,7 +40,7 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         height: 20
-        emitRate: 6 * raiz.intensidad
+        emitRate: 4 * raiz.intensidad
         lifeSpan: 14000
         lifeSpanVariation: 4000
         size: 4
@@ -60,7 +61,7 @@ Item {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 10
-        emitRate: 3 * raiz.intensidad
+        emitRate: 4 * raiz.intensidad
         lifeSpan: 5000
         lifeSpanVariation: 1500
         size: 5

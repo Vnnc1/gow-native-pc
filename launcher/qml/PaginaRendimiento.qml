@@ -47,11 +47,29 @@ ScrollView {
         Fila {
             titulo: Tema.t("mostrarFps")
             descripcion: Tema.t("mostrarFpsDesc")
-            separador: false
             Interruptor {
                 checked: raiz.ajustes.mostrarFps
                 onToggled: raiz.ajustes.mostrarFps = checked
             }
+        }
+        // The native VU1 path (AOT code plus the in-process JIT for areas the build has not seen) is always on: the
+        // former "compile new areas" and "fast JIT instructions" switches only offered slower fallbacks.
+        Fila {
+            titulo: Tema.t("finAnticipado")
+            descripcion: Tema.t("finAnticipadoDesc")
+            Interruptor { checked: raiz.ajustes.finAnticipado; onToggled: raiz.ajustes.finAnticipado = checked }
+        }
+        Fila {
+            titulo: Tema.t("autoNative")
+            descripcion: Tema.t("autoNativeDesc")
+            Interruptor { checked: raiz.ajustes.autoNative; onToggled: raiz.ajustes.autoNative = checked }
+        }
+
+        Fila {
+            titulo: Tema.t("runtimeDiagnostics")
+            descripcion: Tema.t("runtimeDiagnosticsDesc")
+            separador: false
+            Interruptor { checked: raiz.ajustes.diagnostics; onToggled: raiz.ajustes.diagnostics = checked }
         }
 
         Rectangle {

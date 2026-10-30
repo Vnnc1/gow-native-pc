@@ -1,8 +1,8 @@
 # God of War Native PC launcher (Qt 6 Quick): installs (runtime, discs, build) and plays. Based on the Tobiichi
 # Launcher by YYOzcan (GPL-3.0); see CREDITS.md.
-# Build: cmake -S launcher -B launcher/build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C launcher/build
+# Build with matching Qt and Clang: build.cmd -Stages launcher
 cmake_minimum_required(VERSION 3.21)
-project(GowNativePcLauncher VERSION 2.1.0 LANGUAGES CXX)
+project(GowNativePcLauncher VERSION 3.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,8 @@ qt_add_executable(gow-launcher WIN32
     src/main.cpp
     src/lanzador.cpp
     src/lanzador.h
+    src/session_diagnostics.cpp
+    src/session_diagnostics.h
     src/installer_backend.cpp
     src/installer_backend.h
     src/mando.cpp
@@ -42,6 +44,7 @@ set(ARCHIVOS_QML
     qml/InstallPage.qml
     qml/LoadingScreen.qml
     qml/PaginaControles.qml
+    qml/PaginaPartidas.qml
     qml/PaginaTrucos.qml
     qml/PaginaOtros.qml
 )
@@ -63,4 +66,12 @@ qt_add_qml_module(gow-launcher
 target_compile_definitions(gow-launcher PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}")
 target_link_libraries(gow-launcher PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
-install(TARGETS gow-launcher RUNTIME DESTINATION bin)
+qt_add_executable(gow-session WIN32 src/session_main.cpp src/session_diagnostics.cpp src/session_diagnostics.h)
+target_link_libraries(gow-session PRIVATE Qt6::Core)
+target_compile_definitions(gow-session PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}")
+if(WIN32)
+    target_link_libraries(gow-session PRIVATE psapi)
+    target_link_libraries(gow-launcher PRIVATE psapi)
+endif()
+
+install(TARGETS gow-launcher gow-session RUNTIME DESTINATION bin)

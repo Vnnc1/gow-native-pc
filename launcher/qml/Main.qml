@@ -22,6 +22,8 @@ ApplicationWindow {
 
     // Page shown: 0 Home, 1 Install, 2 Graphics, 3 Performance, 4 Controls, 5 Cheats, 6 Other.
     property int pagina: pestanaInicial
+    // gow-native-pc: memory card copies (F1 > Saves in game, the Saves page here)
+    readonly property string carpetaPartidas: installer.repoRoot + "/data/" + installer.gameId + "/saves"
     // The Settings object for the pages: inside their Components "ajustes" names the page's own property.
     readonly property var ajustesGuardados: ajustes
 
@@ -39,10 +41,7 @@ ApplicationWindow {
         property real nitidez: 0.8
         property bool fxaa: true
         property string anisotropico: "1" // anisotropic texture filtering: 1 = off, 2..16 (GOW_ANISO)
-        property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_ESCALA)
-        property bool escalaDinamica: true // lowers the resolution when the GPU cannot keep 60 (PS2X_GS_ESCALA_DINAMICA)
-        property bool dibujoHardware: true // triangles through the GPU pipeline (PS2X_GS_HW, experimental)
-        property bool imagenNitida: true // no line doubling or anti-flicker (PS2X_GS_NITIDO)
+        property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_HW_SCALE)
         property int fpsLimite: 120
         property bool vsync: false
         property bool mostrarFps: false
@@ -61,6 +60,11 @@ ApplicationWindow {
         property string portada: ""
         property string teclas: "" // key map as JSON (empty = default layout)
         property string mando: "" // controller layout as JSON (empty = the fixed layout of controlesDmc5)
+        property bool compilarAreas: true // in-process x64 JIT; existing saved choices are preserved
+        property bool autoNative: false // optional AOT build after a successful play session
+        property bool finAnticipado: true // GOW_GS_EARLY_FINISH (runtime patch 40): the EE prepares the next frame while VU1 draws
+        property bool jitInline: true
+        property bool diagnostics: false
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
         property string textoJuego: "" // game language: a "language" of installer.languages() (e.g. "en", "pt-BR"); empty = ask
         property real portadaFoco: 0.55
@@ -81,6 +85,7 @@ ApplicationWindow {
     // are read again by refrescarInstalacion() when a build finishes and before playing.
     property var idiomasJuego: installer.languages()
     property string ejecutableJuego: installer.runnerPath()
+    property bool pgoAtivo: installer.pgoApplied() // the installed build uses the profile-guided optimisation
     readonly property bool listo: ejecutableJuego.length > 0 && idiomasJuego.length > 0
     // gow-native-pc: launcher updates (GitHub Releases, tools/pipeline/update.ps1). A newer release than this launcher is
     // offered under the version in the side bar.
@@ -103,6 +108,7 @@ ApplicationWindow {
     function refrescarInstalacion() {
         idiomasJuego = installer.languages()
         ejecutableJuego = installer.runnerPath()
+        pgoAtivo = installer.pgoApplied()
     }
     Connections {
         target: installer
@@ -135,7 +141,7 @@ ApplicationWindow {
 
     // Internal resolution. Automatic: the image height on screen divided by 448 lines, 2x to 8x.
     function escalaAuto() {
-        var alto = ajustes.modoPantalla === "completa" ? pantalla.alto : ajustes.alto
+        var alto = ajustes.modoPantalla !== "ventana" ? pantalla.alto : ajustes.alto
         return Math.max(2, Math.min(8, Math.floor(alto / 448)))
     }
     function escalaElegida() {
@@ -159,15 +165,14 @@ ApplicationWindow {
         ajustes.alto = pantalla.ancho / pantalla.alto < 1.7 ? 800 : 720
         ajustes.aspecto = aspectoPorDefecto()
         ajustes.estirar = false
-        ajustes.filtro = "bilineal"
+        // the "Balanced" profile of the Graphics page
+        ajustes.filtro = "fsr"
         ajustes.nitidez = 0.8
         ajustes.fxaa = true
-        ajustes.anisotropico = "1"
+        ajustes.anisotropico = "4"
         ajustes.resolucionInterna = "2"
-        ajustes.escalaDinamica = true
-        ajustes.dibujoHardware = true
-        ajustes.imagenNitida = true
-        ajustes.fpsLimite = 120
+        // the game makes at most 60 frames; a higher window rate only repeats them
+        ajustes.fpsLimite = 60
         ajustes.vsync = false
         ajustes.mostrarFps = false
         ajustes.saltarVideos = true
@@ -180,6 +185,16 @@ ApplicationWindow {
         ajustes.trucos = ""
     }
 
+    // Name key of the Graphics page's quick profile the current settings match (PaginaGrafico.qml perfiles).
+    function perfilTexto() {
+        var r = ajustes.resolucionInterna, f = ajustes.filtro, x = ajustes.fxaa, a = ajustes.anisotropico
+        if (f !== "fsr") return "perfilPersonalizado"
+        if (r === "1" && !x && a === "1") return "perfilDesempenho"
+        if (r === "2" && x && a === "4") return "perfilEquilibrado"
+        if (r === "auto" && x && a === "16") return "perfilQualidade"
+        return "perfilPersonalizado"
+    }
+
     function nombreGpu() {
         if (ajustes.gpu === "auto" || gpuPerdida) return Tema.t("gpuAuto")
         for (var i = 0; i < tarjetas.length; ++i)
@@ -190,11 +205,9 @@ ApplicationWindow {
     }
 
     function jugar() {
+        if (installer.running || lanzador.jugando) return
         refrescarInstalacion()
         if (!listo) { aviso(Tema.t("instNotReady")); ventana.pagina = 1; return }
-        // gow-native-pc: without the first-play preparation the vector-unit code still runs interpreted: say so instead of
-        // letting the first minutes look frozen
-        if (!installer.firstPlayPrepared()) aviso(Tema.t("firstPlayNotice"))
         var elegido = idiomaJuego(ajustes.textoJuego)
         if (!elegido) {
             if (idiomasJuego.length > 1) { preguntaIdioma.open(); return }
@@ -207,12 +220,20 @@ ApplicationWindow {
             ancho: ajustes.ancho, alto: ajustes.alto,
             aspecto: ajustes.aspecto, estirar: ajustes.estirar,
             filtro: ajustes.filtro, nitidez: ajustes.nitidez, fxaa: ajustes.fxaa, anisotropico: ajustes.anisotropico,
-            escala: escalaElegida(), escalaDinamica: ajustes.escalaDinamica, imagenNitida: ajustes.imagenNitida,
-            dibujoHardware: ajustes.dibujoHardware,
+            escala: escalaElegida(),
             fpsLimite: ajustes.fpsLimite, vsync: ajustes.vsync, mostrarFps: ajustes.mostrarFps,
             elf: elegido.elf, iso: "", ejecutable: ejecutableJuego,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
             capturaVu1: installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
+            // VU1 code met without native code is always compiled while playing (x86-64 JIT, GOW_VU1N_X64, inline tier):
+            // the native path is the fast one, so it is no longer a switch
+            datosJit: installer.repoRoot + "/data/" + installer.gameId,
+            jitInline: true,
+            finAnticipado: ajustes.finAnticipado,
+            diagnostics: ajustes.diagnostics,
+            framePc: installer.diagnosticsFramePc(),
+            // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)
+            partidas: carpetaPartidas,
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
@@ -252,6 +273,11 @@ ApplicationWindow {
 
     Connections {
         target: lanzador
+        function onDiagnosticsExported(path) {
+            dialogoError.texto = Tema.t("diagnosticsExported")
+            dialogoError.detalle = path + "\n\n" + Tema.t("diagnosticsReportDesc")
+            dialogoError.open()
+        }
         function onJuegoTerminado(codigo, fallo, segundos, resumen) {
             ajustes.segundosJugados += segundos
             ajustes.ultimaSesion = segundos
@@ -264,6 +290,8 @@ ApplicationWindow {
                 dialogoError.open()
             } else {
                 ventana.aviso(Tema.tf("terminadoOk", Tema.duracion(segundos)))
+                if (ajustes.autoNative && !installer.running && installer.hasPendingNativeCode())
+                    installer.run("native", { config: "Release" })
             }
         }
         function onError(clave, detalle) {
@@ -281,17 +309,14 @@ ApplicationWindow {
             ajustes.arranqueRapido = false
             ajustes.versionAjustes = 2
         }
-        // Version 3: 2x render resolution by default, with the dynamic resolution that protects 60 FPS.
+        // Version 3: 2x render resolution by default.
         if (ajustes.versionAjustes < 3) {
             ajustes.resolucionInterna = "2"
-            ajustes.escalaDinamica = true
             ajustes.versionAjustes = 3
         }
-        // Version 4: the hardware triangle renderer, turned on once.
-        if (ajustes.versionAjustes < 4) {
-            ajustes.dibujoHardware = true
+        // Version 4 turned on a renderer switch that no longer exists.
+        if (ajustes.versionAjustes < 4)
             ajustes.versionAjustes = 4
-        }
         // Version 5: movies skipped by default while the game was being optimised.
         if (ajustes.versionAjustes < 5) {
             ajustes.saltarVideos = true
@@ -301,6 +326,16 @@ ApplicationWindow {
         if (ajustes.versionAjustes < 6) {
             ajustes.saltarVideos = false
             ajustes.versionAjustes = 6
+        }
+        // Version 7: native JIT always on, the duplicate "pixel" filter and fast boot removed from the interface, a
+        // 120 FPS window limit (the game makes 60) brought to 60.
+        if (ajustes.versionAjustes < 7) {
+            ajustes.compilarAreas = true
+            ajustes.jitInline = true
+            ajustes.arranqueRapido = false
+            if (ajustes.filtro === "pixel") ajustes.filtro = "bilineal"
+            if (ajustes.fpsLimite === 120) ajustes.fpsLimite = 60
+            ajustes.versionAjustes = 7
         }
         if (ajustes.idioma.length === 0) {
             var loc = Qt.locale().name
@@ -438,7 +473,8 @@ ApplicationWindow {
                     { clave: "pestRendimiento", icono: "" },
                     { clave: "pestControles", icono: "" },
                     { clave: "pestTrucos", icono: "" },
-                    { clave: "pestOtros", icono: "" }
+                    { clave: "pestOtros", icono: "" },
+                    { clave: "pestPartidas", icono: "\uE74E" }
                 ]
                 delegate: NavItem {
                     required property var modelData
@@ -868,26 +904,53 @@ ApplicationWindow {
                     }
                 }
 
+                RowLayout {
+                    Layout.topMargin: 16
+                    spacing: 14
+                    Text {
+                        text: Tema.t("pistaF1")
+                        color: Tema.textoSuave
+                        font.pixelSize: 13
+                        font.letterSpacing: 0.3
+                    }
+                    // an installed game without the profile-guided build: point to the step that adds it
+                    Text {
+                        visible: ventana.listo && !ventana.pgoAtivo
+                        text: "▲  " + Tema.t("pgoRecomendado")
+                        color: zonaPgo.containsMouse ? Tema.oroClaro : Tema.oro
+                        font.pixelSize: 13
+                        font.weight: Font.DemiBold
+                        MouseArea {
+                            id: zonaPgo
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: ventana.pagina = 1
+                        }
+                    }
+                }
+
                 // Summary cards.
                 RowLayout {
-                    Layout.topMargin: 30
+                    Layout.topMargin: 14
                     Layout.fillWidth: true
                     spacing: 12
                     Repeater {
                         model: [
+                            { titulo: Tema.t("cardPerfil"),
+                              valor: Tema.t(ventana.perfilTexto()),
+                              detalle: ventana.escalaElegida() + "× · " + (512 * ventana.escalaElegida()) + "×" + (448 * ventana.escalaElegida()),
+                              pagina: 2 },
                             { titulo: Tema.t("cardImagen"),
-                              valor: ajustes.modoPantalla === "completa" ? Tema.t("completa") : Tema.t("ventana"),
-                              detalle: (ajustes.modoPantalla === "completa" ? ventana.pantalla.ancho + "×" + ventana.pantalla.alto
+                              valor: Tema.t(ajustes.modoPantalla === "sin_bordes" ? "sinBordes"
+                                            : ajustes.modoPantalla === "completa" ? "completa" : "ventana"),
+                              detalle: (ajustes.modoPantalla !== "ventana" ? ventana.pantalla.ancho + "×" + ventana.pantalla.alto
                                                                           : ajustes.ancho + "×" + ajustes.alto) + " · " + ajustes.aspecto,
                               pagina: 2 },
-                            { titulo: Tema.t("cardEscala"),
-                              valor: ventana.escalaElegida() + "×",
-                              detalle: (512 * ventana.escalaElegida()) + "×" + (448 * ventana.escalaElegida()) + (ajustes.escalaDinamica ? " · " + Tema.t("dinamicaCorta") : ""),
-                              pagina: 2 },
-                            { titulo: Tema.t("cardFps"),
-                              valor: ajustes.fpsLimite > 0 ? ajustes.fpsLimite + " FPS" : Tema.t("sinLimite"),
-                              detalle: ajustes.vsync ? "VSync" : Tema.t("cardJuego60"),
-                              pagina: 3 },
+                            { titulo: Tema.t("cardControles"),
+                              valor: mando.conectado ? Tema.t("cardMando") : Tema.t("cardTeclado"),
+                              detalle: mando.conectado ? mando.nombre : Tema.t("cardTecladoDet"),
+                              pagina: 4 },
                             { titulo: Tema.t("cardTiempo"),
                               valor: ajustes.segundosJugados > 0 ? Tema.duracion(ajustes.segundosJugados) : "—",
                               detalle: ajustes.ultimaSesion > 0 ? Tema.tf("ultimaSesion", Tema.duracion(ajustes.ultimaSesion)) : Tema.t("sinJugar"),
@@ -947,7 +1010,8 @@ ApplicationWindow {
 
         // Settings pages: a large title over a panel.
         Repeater {
-            model: ["pestInstalar", "pestGrafico", "pestRendimiento", "pestControles", "pestTrucos", "pestOtros"]
+            model: ["pestInstalar", "pestGrafico", "pestRendimiento", "pestControles", "pestTrucos", "pestOtros",
+                    "pestPartidas"]
             delegate: Item {
                 id: hojaAjustes
                 required property string modelData
@@ -982,7 +1046,7 @@ ApplicationWindow {
                             anchors.margins: 24
                             anchors.rightMargin: 14
                             sourceComponent: [paginaInstalar, paginaGrafico, paginaRendimiento, paginaControles,
-                                              paginaTrucos, paginaOtros][hojaAjustes.index]
+                                              paginaTrucos, paginaOtros, paginaPartidas][hojaAjustes.index]
                         }
                     }
                 }
@@ -1032,6 +1096,15 @@ ApplicationWindow {
             onAviso: (t) => ventana.aviso(t)
             onPonerPortada: (r) => ventana.ponerPortada(r)
             onQuitarPortada: ventana.quitarPortada()
+        }
+    }
+
+    Component {
+        id: paginaPartidas
+        PaginaPartidas {
+            carpeta: ventana.carpetaPartidas
+            elf: { var e = ventana.idiomaJuego(ventana.ajustesGuardados.textoJuego) || ventana.idiomasJuego[0]; return e ? e.elf : "" }
+            onAviso: (t) => ventana.aviso(t)
         }
     }
 
@@ -1186,6 +1259,10 @@ ApplicationWindow {
                 BotonSecundario {
                     text: Tema.t("verRegistro")
                     onClicked: lanzador.abrirRegistro()
+                }
+                BotonSecundario {
+                    text: Tema.t("diagnosticsExport")
+                    onClicked: lanzador.exportDiagnostics()
                 }
                 BotonSecundario {
                     text: Tema.t("entendido")

@@ -1,0 +1,20 @@
+Assign AOT VU1 blocks to stable hash shards.
+Adding a block no longer reshuffles every later block between translation units.
+Block semantics are unchanged; DLL mode still uses one shard.
+Validation: see docs/research/jit-delivery-2026-10-26.md.
+
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index 499123b..b64300d 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -847,7 +847,9 @@ def main():
+         if body is None:
+             continue
+         name = f"b{pc:04x}_{key & 0xFFFFFFFF:08x}"
+-        part = count % parts
++        # Stable shards: adding one block must not move every later block to another translation unit.
++        # This changes packaging only; the generated block semantics are identical in AOT and DLL modes.
++        part = key % parts
+         count += 1
+         t = []
+         if tail:

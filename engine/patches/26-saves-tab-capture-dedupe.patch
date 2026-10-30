@@ -1,0 +1,299 @@
+Saves tab in the F1 panel, one VU1 miss capture per micro-memory image, quieter logs.
+F1 > Saves copies the memory card (GOW_MC0) to GOW_SAVES_DIR/<date>-<time>/Mcd001.ps2 + save.json; the launcher restores it.
+GOW_VU1_CAPTURE_MISSES writes miss_<image hash>.bin once per image instead of block_<key>.bin per missing block.
+[gow-pad2] read lines only with GOW_PAD_LOG; the DMA SPR-flag warning skips cnt/ret/end tags, which never read ADDR.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+index c9aa2c6..f7b2853 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+@@ -17,6 +17,12 @@
+ #endif
+ 
+ #include <algorithm>
++#include <cctype>
++#include <chrono>
++#include <cstdlib>
++#include <ctime>
++#include <iterator>
++#include <thread>
+ #include <array>
+ #include <cstdint>
+ #include <cstdio>
+@@ -2174,6 +2180,173 @@ namespace
+         }
+     }
+ 
++
++    // gow-native-pc: "Saves" tab. A savestate is not possible here (guest threads run on host stacks), so a save is a
++    // copy of the memory card image as the game last wrote it (save altars): GOW_SAVES_DIR/<date>-<time>/Mcd001.ps2 plus
++    // save.json. The launcher (Saves page) lists them and puts one back as the card with the game closed. GOW_MC0 and
++    // GOW_SAVES_DIR are set by the launcher.
++    struct SaveEntry
++    {
++        std::string folder;
++        std::string label;
++    };
++
++    struct SavesState
++    {
++        char label[48] = {};
++        std::string status;
++        std::vector<SaveEntry> saves;
++        bool listed = false;
++    };
++
++    SavesState &savesState()
++    {
++        static SavesState state;
++        return state;
++    }
++
++    std::string envPath(const char *name)
++    {
++        const char *value = std::getenv(name);
++        return value && *value && !(value[0] == '0' && value[1] == '\0') ? std::string(value) : std::string();
++    }
++
++    std::string cleanLabel(const char *text)
++    {
++        std::string out;
++        for (const char *c = text; *c && out.size() < 40u; ++c)
++        {
++            const unsigned char ch = static_cast<unsigned char>(*c);
++            if (std::isalnum(ch) || ch == ' ' || ch == '-' || ch == '_' || ch == '.' || ch == ',' || ch >= 0x80u)
++                out += static_cast<char>(ch); // no quotes or backslashes: the label goes into save.json as is
++        }
++        while (!out.empty() && out.back() == ' ')
++            out.pop_back();
++        return out;
++    }
++
++    void listSaves(SavesState &state)
++    {
++        state.saves.clear();
++        state.listed = true;
++        const std::string root = envPath("GOW_SAVES_DIR");
++        std::error_code error;
++        if (root.empty() || !std::filesystem::is_directory(root, error))
++            return;
++        for (const auto &entry : std::filesystem::directory_iterator(root, error))
++        {
++            if (!entry.is_directory(error) || !std::filesystem::exists(entry.path() / "Mcd001.ps2", error))
++                continue;
++            SaveEntry save{entry.path().filename().string(), {}};
++            std::ifstream info(entry.path() / "save.json");
++            const std::string text((std::istreambuf_iterator<char>(info)), std::istreambuf_iterator<char>());
++            const size_t key = text.find("\"label\": \"");
++            if (key != std::string::npos)
++            {
++                const size_t from = key + 10u, to = text.find('"', from);
++                if (to != std::string::npos)
++                    save.label = text.substr(from, to - from);
++            }
++            state.saves.push_back(std::move(save));
++        }
++        std::sort(state.saves.begin(), state.saves.end(),
++                  [](const SaveEntry &a, const SaveEntry &b) { return a.folder > b.folder; });
++    }
++
++    // Reads the card file; a read that overlaps a game save (size or write time changed) is retried.
++    bool readCard(const std::filesystem::path &card, std::vector<char> &bytes)
++    {
++        for (int attempt = 0; attempt < 5; ++attempt)
++        {
++            std::error_code error;
++            const auto before = std::filesystem::last_write_time(card, error);
++            if (error)
++                return false;
++            std::ifstream in(card, std::ios::binary);
++            bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
++            const auto after = std::filesystem::last_write_time(card, error);
++            if (!error && before == after && !bytes.empty())
++                return true;
++            std::this_thread::sleep_for(std::chrono::milliseconds(200));
++        }
++        return false;
++    }
++
++    std::string snapshotCard(const std::string &label)
++    {
++        const std::string card = envPath("GOW_MC0");
++        const std::string root = envPath("GOW_SAVES_DIR");
++        if (card.empty() || root.empty())
++            return "Start the game from the launcher to use saves (GOW_MC0 / GOW_SAVES_DIR not set).";
++        std::vector<char> bytes;
++        if (!readCard(card, bytes))
++            return "No memory card yet: save at an altar in the game first.";
++        const std::time_t now = std::time(nullptr);
++        char stamp[32];
++        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
++        char shown[32];
++        std::strftime(shown, sizeof(shown), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
++        std::filesystem::path folder = std::filesystem::path(root) / stamp;
++        std::error_code error;
++        for (int n = 2; std::filesystem::exists(folder, error); ++n)
++            folder = std::filesystem::path(root) / (std::string(stamp) + "-" + std::to_string(n));
++        std::filesystem::create_directories(folder, error);
++        if (error)
++            return "Could not create " + folder.string();
++        {
++            std::ofstream out(folder / "Mcd001.ps2.tmp", std::ios::binary);
++            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
++            if (!out)
++                return "Could not write " + (folder / "Mcd001.ps2").string();
++        }
++        std::filesystem::rename(folder / "Mcd001.ps2.tmp", folder / "Mcd001.ps2", error);
++        std::ofstream info(folder / "save.json");
++        info << "{\n  \"label\": \"" << label << "\",\n  \"time\": \"" << shown << "\",\n  \"source\": \"F1\",\n"
++             << "  \"card\": \"Mcd001.ps2\",\n  \"bytes\": " << bytes.size() << "\n}\n";
++        std::fprintf(stderr, "[gow-saves] saved %s (%zu bytes)\n", folder.string().c_str(), bytes.size());
++        return "Saved: " + folder.filename().string() + (label.empty() ? std::string() : " (" + label + ")");
++    }
++
++    void drawSavesTab()
++    {
++        SavesState &state = savesState();
++        if (!state.listed)
++            listSaves(state);
++        const std::string card = envPath("GOW_MC0");
++        ImGui::TextWrapped("Keeps a copy of the memory card so a test can start again from here. Save at an altar "
++                           "in the game first: the copy holds the game's own last save, not the exact moment.");
++        ImGui::TextWrapped("To go back to a copy: close the game, open the launcher's Saves page, choose it, start "
++                           "the game and load from the game's menu.");
++        std::error_code error;
++        if (!card.empty() && std::filesystem::exists(card, error))
++        {
++            const auto age = std::filesystem::file_time_type::clock::now() - std::filesystem::last_write_time(card, error);
++            const long long minutes = std::chrono::duration_cast<std::chrono::minutes>(age).count();
++            ImGui::Text("Memory card last written by the game %lld min ago", minutes < 0 ? 0ll : minutes);
++        }
++        ImGui::Separator();
++        ImGui::SetNextItemWidth(260.0f);
++        ImGui::InputTextWithHint("##label", "label (optional, e.g. after the ship)", state.label, sizeof(state.label));
++        ImGui::SameLine();
++        if (ImGui::Button("Save a copy of the card"))
++        {
++            state.status = snapshotCard(cleanLabel(state.label));
++            state.label[0] = '\0';
++            listSaves(state);
++        }
++        ImGui::SameLine();
++        if (ImGui::Button("Refresh"))
++            listSaves(state);
++        if (!state.status.empty())
++            ImGui::TextWrapped("%s", state.status.c_str());
++        ImGui::Separator();
++        ImGui::Text("Copies in %s:", envPath("GOW_SAVES_DIR").c_str());
++        for (const SaveEntry &save : state.saves)
++            ImGui::BulletText("%s  %s", save.folder.c_str(), save.label.c_str());
++        if (state.saves.empty())
++            ImGui::TextDisabled("none yet");
++    }
++
+ #endif
+ }
+ void PS2DebugPanel::initialize()
+@@ -2229,6 +2402,11 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
+ 
+         if (ImGui::BeginTabBar("debug-tabs"))
+         {
++            if (ImGui::BeginTabItem("Saves")) // gow-native-pc
++            {
++                drawSavesTab();
++                ImGui::EndTabItem();
++            }
+             if (ImGui::BeginTabItem("CPU"))
+             {
+                 drawCpuTab(runtime, m_showRegisters);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+index ccc063d..7c9594b 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1877,7 +1877,9 @@ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+         const uint32_t id = static_cast<uint32_t>((tag >> 28u) & 0x7u);
+         const bool irq = ((tag >> 31u) & 1u) != 0u;
+         const uint32_t addr = static_cast<uint32_t>((tag >> 32u) & 0x7FFFFFFFu);
+-        if ((tag >> 63u) != 0u)
++        // gow-native-pc: the SPR bit only selects scratchpad for ADDR; cnt (1), ret (6) and end (7) never read ADDR, so
++        // their stray SPR bits (cnt tags in God of War's VIF1 chains) are not worth a warning.
++        if ((tag >> 63u) != 0u && id != 1u && id != 6u && id != 7u)
+         {
+             static unsigned sprTags = 0;
+             if (++sprTags <= 20u || sprTags % 100000u == 0u)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 2e643f8..b519f2c 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -777,31 +777,42 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+             auto it = nativeRegistry().find(key);
+             // Save a full context image only when an actually dispatched block is missing. Unrelated MPG changes
+             // no longer create thousands of redundant snapshots. Keep the original image format and explicit heads.
++            // gow-native-pc: one file per micro-memory image (miss_<image hash>.bin), not one per missing block: the
++            // blocks of one program load used to write the same 16 KB many times. Every head is still recorded.
+             if (it == nativeRegistry().end() && captureNativeMissesOnly())
+             {
+                 static const char *dir = std::getenv("GOW_VU1_CAPTURA");
+-                static std::unordered_set<uint64_t> recorded;
++                static std::unordered_set<uint64_t> recorded; // block keys already covered by a saved image
++                static std::unordered_set<uint64_t> images;   // image hashes already saved
+                 if (dir && *dir && !recorded.contains(key))
+                 {
+                     recordMissHead(pc);
+-                    char name[64];
+-                    std::snprintf(name, sizeof(name), "/block_%016llx.bin", static_cast<unsigned long long>(key));
+-                    const std::string path = std::string(dir) + name;
+-                    std::error_code error;
+-                    if (std::filesystem::file_size(path, error) == codeSize && !error)
++                    uint64_t image = 1469598103934665603ull; // FNV-1a 64 of the whole micro memory
++                    for (uint32_t b = 0; b < codeSize; ++b)
++                        image = (image ^ code[b]) * 1099511628211ull;
++                    if (images.contains(image))
+                         recorded.insert(key);
+-                    else if (FILE *f = std::fopen((path + ".tmp").c_str(), "wb"))
++                    else
+                     {
+-                        const bool complete = std::fwrite(code, 1, codeSize, f) == codeSize;
+-                        const bool closed = std::fclose(f) == 0;
+-                        if (complete && closed)
++                        char name[64];
++                        std::snprintf(name, sizeof(name), "/miss_%016llx.bin", static_cast<unsigned long long>(image));
++                        const std::string path = std::string(dir) + name;
++                        std::error_code error;
++                        if (std::filesystem::file_size(path, error) == codeSize && !error)
++                            images.insert(image), recorded.insert(key);
++                        else if (FILE *f = std::fopen((path + ".tmp").c_str(), "wb"))
+                         {
+-                            // Publish only complete images; never let an interrupted write enter a native build.
+-                            std::filesystem::remove(path, error);
+-                            error.clear();
+-                            std::filesystem::rename(path + ".tmp", path, error);
+-                            if (!error)
+-                                recorded.insert(key);
++                            const bool complete = std::fwrite(code, 1, codeSize, f) == codeSize;
++                            const bool closed = std::fclose(f) == 0;
++                            if (complete && closed)
++                            {
++                                // Publish only complete images; never let an interrupted write enter a native build.
++                                std::filesystem::remove(path, error);
++                                error.clear();
++                                std::filesystem::rename(path + ".tmp", path, error);
++                                if (!error)
++                                    images.insert(image), recorded.insert(key);
++                            }
+                         }
+                     }
+                 }
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+index 6be75da..fd3cccf 100644
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -618,7 +618,7 @@ namespace
+         const uint16_t buttons = static_cast<uint16_t>(state[2] | (state[3] << 8));
+         static unsigned reads = 0;
+         static uint16_t lastButtons = 0xffff;
+-        if (++reads <= 3 || buttons != lastButtons)
++        if (padLog && (++reads <= 3 || buttons != lastButtons)) // gow-native-pc: only with GOW_PAD_LOG (was on every press)
+             std::fprintf(stderr, "[gow-pad2] read buttons=%04x sticks=%u,%u,%u,%u\n", buttons, buffer[2], buffer[3], buffer[4], buffer[5]);
+         lastButtons = buttons;
+         static const bool anmDiag = std::getenv("GOW_ANM_DIAG") != nullptr;

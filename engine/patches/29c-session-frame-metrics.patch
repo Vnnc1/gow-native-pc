@@ -1,0 +1,125 @@
+Runtime session diagnostics: bounded guest-frame interval distributions.
+
+GOW_FRAME_DIAG=1 uses the profile frame PC, one steady-clock read per guest frame
+and fixed storage; reports five-second windows without per-call timing scopes.
+Keeps the FPS overlay independent. Guest intervals are not presentation latency.
+Validation: Windows frame-window regressions, call/codegen suites and a 100-second
+PT-BR gameplay smoke pass (2,000 VU1 comparisons, zero mismatches). No FPS gain claimed.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -16,6 +16,8 @@
+ #include "ps2_runtime.h"
+ #include "ps2_runtime_macros.h"
+ #include "raylib.h"
++#include "runtime/gow_frame_metrics.h"
++#include <chrono>
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -123,11 +125,38 @@
+     constexpr uint32_t kFuncionCuadro = 0x001837B8u;
+     PS2Runtime::RecompiledFunction g_funcionCuadro = nullptr;
+     std::atomic<uint64_t> g_cuadrosJuego{0};
++    bool g_frameDiagnostics = false;
++    bool g_showFrameOverlay = false;
++    uint32_t g_framePc = kFuncionCuadro;
++
++    void recordGuestFrame()
++    {
++        using Clock = std::chrono::steady_clock;
++        const auto now = Clock::now();
++        static auto first = now, last = now, start = now;
++        static gow_diagnostics::FrameWindow window;
++        if (now == last) return;
++        window.add(std::chrono::duration<double, std::milli>(now - last).count());
++        last = now;
++        const double seconds = std::chrono::duration<double>(now - start).count();
++        if (seconds < 5.0) return;
++        window.sort();
++        std::fprintf(stderr, "[gow-frame] t=%.3f window=%.3f intervals=%llu samples=%zu mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f over_16_67=%llu over_33_33=%llu over_50=%llu over_100=%llu\n",
++            std::chrono::duration<double>(now - first).count(), seconds,
++            static_cast<unsigned long long>(window.count), window.samples(), window.total / window.count,
++            window.percentile(50), window.percentile(95), window.percentile(99), window.maximum,
++            static_cast<unsigned long long>(window.overBudget), static_cast<unsigned long long>(window.over33),
++            static_cast<unsigned long long>(window.over50), static_cast<unsigned long long>(window.over100));
++        window = {}; start = now;
++    }
+ 
+     void funcionCuadro(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        if (ctx->pc == kFuncionCuadro)
++        if (ctx->pc == g_framePc)
++        {
+             g_cuadrosJuego.fetch_add(1, std::memory_order_relaxed);
++            if (g_frameDiagnostics) recordGuestFrame();
++        }
+         g_funcionCuadro(rdram, ctx, runtime);
+     }
+ 
+@@ -389,11 +418,20 @@
+                 std::cerr << "[teclado] mapa configurable activo (TOBIICHI_TECLAS); sticks del teclado desde el mapa" << std::endl;
+         }
+     }
+-    if (envFlag("TOBIICHI_FPS_GOSTER", false) && runtime.hasFunction(kFuncionCuadro))
+-        if (PS2Runtime::RecompiledFunction actual = runtime.lookupFunction(kFuncionCuadro))
++    g_showFrameOverlay = envFlag("TOBIICHI_FPS_GOSTER", false);
++    g_frameDiagnostics = envFlag("GOW_FRAME_DIAG", false);
++    if (g_frameDiagnostics)
++    {
++        const char *pc = std::getenv("GOW_PERF_FRAME_PC");
++        const uint32_t configured = pc ? static_cast<uint32_t>(std::strtoul(pc, nullptr, 0)) : 0u;
++        if (configured && runtime.hasFunction(configured)) g_framePc = configured;
++        else { g_frameDiagnostics = false; std::fprintf(stderr, "[gow-frame] unavailable: valid profile frame PC required\n"); }
++    }
++    if ((g_showFrameOverlay || g_frameDiagnostics) && runtime.hasFunction(g_framePc))
++        if (PS2Runtime::RecompiledFunction actual = runtime.lookupFunction(g_framePc))
+         {
+             g_funcionCuadro = actual;
+-            runtime.replaceFunction(kFuncionCuadro, &funcionCuadro);
++            runtime.replaceFunction(g_framePc, &funcionCuadro);
+         }
+     gowTrucosInstalar(runtime, elfPath);
+     gowVideoInstalar(runtime, elfPath);    // escaneo progresivo siempre activado
+@@ -418,6 +456,6 @@
+ {
+     gowFijarDibujar(x, y, w, h);
+     gowTrucosMenuDibujar();
+-    if (g_funcionCuadro)
++    if (g_funcionCuadro && g_showFrameOverlay)
+         dibujarFps(x, y, h);
+ }
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
+@@ -0,0 +1,31 @@
++#pragma once
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++
++// Owned by the guest thread. Fixed storage, one clock read per frame, no hot-path allocation.
++// Intervals describe entry to the configured guest frame function, not GPU/display presentation.
++namespace gow_diagnostics {
++struct FrameWindow {
++    std::array<double, 4096> intervals{};
++    uint64_t count = 0, overBudget = 0, over33 = 0, over50 = 0, over100 = 0;
++    double total = 0, maximum = 0;
++    void add(double ms) {
++        if (!std::isfinite(ms) || ms < 0) return;
++        intervals[count % intervals.size()] = ms;
++        ++count; total += ms; maximum = std::max(maximum, ms);
++        overBudget += ms > 1000.0 / 60.0; over33 += ms > 1000.0 / 30.0;
++        over50 += ms > 50.0; over100 += ms > 100.0;
++    }
++    size_t samples() const { return static_cast<size_t>(std::min<uint64_t>(count, intervals.size())); }
++    void sort() { std::sort(intervals.begin(), intervals.begin() + samples()); }
++    double percentile(unsigned percent) const {
++        const size_t n = samples();
++        if (!n) return 0;
++        const size_t rank = std::max<size_t>(1, (n * std::min(100u, percent) + 99) / 100);
++        return intervals[rank - 1];
++    }
++};
++}

@@ -1,0 +1,25 @@
+Reserve JIT statement and emitter buffers before translation.
+Avoids repeated vector growth without changing generated instructions or VU semantics.
+Validation: see docs/research/jit-delivery-2026-10-26.md.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+index 41466ea..0d4ba0c 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -1194,6 +1194,8 @@ namespace vu1x
+     std::vector<uint8_t> emit(const Block &blk)
+     {
+         Asm a;
++        // Avoid repeated byte-vector reallocations while emitting a new block.
++        a.c.reserve(256u + blk.stmts.size() * 128u);
+         // prologue: 5 pushes keep rsp 16-byte aligned (entry rsp = 8 mod 16)
+         a.push(RBX); a.push(R12); a.push(R13); a.push(R14); a.push(R15);
+         a.subRsp(kStackBytes);
+@@ -1284,6 +1286,7 @@ namespace vu1x
+         const auto t0 = std::chrono::steady_clock::now();
+         auto blk = std::make_unique<Block>();
+         blk->imms.reserve(8u * count + 16u);
++        blk->stmts.reserve(8u * count + 16u);
+         if (!translate(pc, words, count, *blk))
+         {
+             g.failed.insert(key);

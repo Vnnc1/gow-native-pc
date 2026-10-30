@@ -1,0 +1,100 @@
+Capture context only for missing dispatched blocks; add JIT-only validation.
+Reduces redundant captures while keeping original micro-memory images and indirect-entry heads.
+Validation: see docs/research/jit-delivery-2026-10-26.md.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 299e2e1..f92af33 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -23,6 +23,11 @@
+ #include "runtime/ps2_perf.h"
+ 
+ void captureMicrocode(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory); // gow-native-pc, below
++bool captureNativeMissesOnly()
++{
++    static const bool on = [] { const char *v = std::getenv("GOW_VU1_CAPTURE_MISSES"); return v && v[0] == '1'; }();
++    return on;
++}
+ 
+ // GOW-Port: la aritmética de VU no depende de /fp:fast. El runtime se compila con /fp:fast, que deja al
+ // compilador fusionar a*b+c en FMA según dónde esté el código: el intérprete y el microcódigo compilado
+@@ -2228,7 +2233,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     {
+         // GOW_VU1_CAPTURA records also while the native VU1 runs (the launcher keeps it on while playing).
+         static const bool captureWithNative = std::getenv("GOW_VU1_CAPTURA") != nullptr;
+-        if (captureWithNative)
++        if (captureWithNative && !captureNativeMissesOnly())
+             captureMicrocode(vuCode, codeSize, memory);
+         if (!runNativeLoop(context))
+             runExact(context);
+@@ -2443,7 +2448,7 @@ VU1Interpreter::CompiledProgramFn VU1Interpreter::compiledProgramFor(uint8_t *vu
+         // GOW_VU1_CAPTURA=<carpeta>: guarda cada micromemoria distinta (entrada de generar_vu1). Son datos del
+         // juego: no se publican.
+         static const char *captureDir = std::getenv("GOW_VU1_CAPTURA");
+-        if (captureDir != nullptr)
++        if (captureDir != nullptr && !captureNativeMissesOnly())
+         {
+             char name[64];
+             std::snprintf(name, sizeof(name), "/vu1_%016llx.bin", static_cast<unsigned long long>(hashMicrocode(vuCode, codeSize)));
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 9852603..2e643f8 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -748,6 +748,19 @@ void VU1NativeAccess::codeChanged(VU1Interpreter::NativeState &ns, const uint8_t
+ // The dispatch slot of pc, set up on first use (native block lookup, timing tables).
+ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint32_t pc)
+ {
++#if VU1X_SUPPORTED
++    // Test-only: discard AOT registrations once, before any slots are created, to exercise the real game's JIT.
++    static const bool jitOnly = [] {
++        const char *v = std::getenv("GOW_VU1X_ONLY");
++        if (v && v[0] == '1' && vu1x::enabled())
++        {
++            nativeRegistry().clear();
++            std::fprintf(stderr, "[vu1x] JIT-only validation: AOT registry cleared\n");
++        }
++        return true;
++    }();
++    (void)jitOnly;
++#endif
+     VU1Interpreter::NativeState &ns = *vu.m_native;
+     VU1Interpreter::NativeState::Slot &sl = ns.slots[pc >> 3];
+     if (!sl.known)
+@@ -762,6 +775,37 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+         {
+             const uint64_t key = vu1n::blockKey(pc, words, count * 2u);
+             auto it = nativeRegistry().find(key);
++            // Save a full context image only when an actually dispatched block is missing. Unrelated MPG changes
++            // no longer create thousands of redundant snapshots. Keep the original image format and explicit heads.
++            if (it == nativeRegistry().end() && captureNativeMissesOnly())
++            {
++                static const char *dir = std::getenv("GOW_VU1_CAPTURA");
++                static std::unordered_set<uint64_t> recorded;
++                if (dir && *dir && !recorded.contains(key))
++                {
++                    recordMissHead(pc);
++                    char name[64];
++                    std::snprintf(name, sizeof(name), "/block_%016llx.bin", static_cast<unsigned long long>(key));
++                    const std::string path = std::string(dir) + name;
++                    std::error_code error;
++                    if (std::filesystem::file_size(path, error) == codeSize && !error)
++                        recorded.insert(key);
++                    else if (FILE *f = std::fopen((path + ".tmp").c_str(), "wb"))
++                    {
++                        const bool complete = std::fwrite(code, 1, codeSize, f) == codeSize;
++                        const bool closed = std::fclose(f) == 0;
++                        if (complete && closed)
++                        {
++                            // Publish only complete images; never let an interrupted write enter a native build.
++                            std::filesystem::remove(path, error);
++                            error.clear();
++                            std::filesystem::rename(path + ".tmp", path, error);
++                            if (!error)
++                                recorded.insert(key);
++                        }
++                    }
++                }
++            }
+ #if VU1X_SUPPORTED
+             // gow-native-pc: no native code yet: the x64 JIT translates the block now (GOW_VU1N_X64)
+             if (it == nativeRegistry().end() && vu1x::enabled() && vu1x::compile(pc, words, count, key))

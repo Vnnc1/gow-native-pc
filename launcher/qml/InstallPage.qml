@@ -25,11 +25,14 @@ ScrollView {
     property bool showLog: false
     property bool showMore: false
     property bool prepareFirstPlay: true   // the install ends with the first-play preparation (optimize stage)
+    property bool scanDisc: false
+    property var scanReport: installer.discScanReport()
     property bool lastOk: true
 
     function refresh() {
         env = installer.environment()
         languages = installer.languages()
+        scanReport = installer.discScanReport()
     }
     function compatibleIsos() {
         var out = []
@@ -47,8 +50,11 @@ ScrollView {
         begin()
         var stages = "tools,fetch"
         if (compatibleIsos().length > 0) stages += ",discs"
-        stages += ",configure,recomp,sync,build"
-        if (prepareFirstPlay) stages += ",optimize"
+        if (scanDisc) stages += ",vu1disc"
+        stages += ",configure,recomp,sync"
+        // with the first-play preparation one "tune" pass replaces build + optimize and adds the profile-guided build
+        // (build.ps1 stage tune); without it the plain build
+        stages += prepareFirstPlay ? ",tune" : ",build"
         installer.run(stages, { isos: compatibleIsos(), config: "Release" })
     }
     function maintenance(stages) { begin(); installer.run(stages, { config: "Release" }) }
@@ -60,10 +66,10 @@ ScrollView {
     }
     // friendly name of a pipeline step ("=== <step> ===" lines of build.ps1)
     function stepLabel(s) {
-        var map = [["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
+        var map = [["verify runtime", "instStepVerify"], ["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
                    ["configure", "instStepConfigure"], ["recompile", "instStepRecomp"], ["generated code", "instStepSync"],
                    ["build the game", "instStepBuild"], ["record", "instStepRecord"], ["native VU1", "instStepNative"],
-                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"]]
+                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"], ["VU1 microcode from the disc", "instStepVu1Disc"]]
         for (var i = 0; i < map.length; ++i)
             if (s.indexOf(map[i][0]) === 0 || s.indexOf(map[i][0]) > 0) return Tema.t(map[i][1])
         return s
@@ -260,12 +266,22 @@ ScrollView {
         }
 
         // ---------------------------------------------------------------- 3. install
+        BotonSecundario {
+            text: Tema.t("openGameExecutable")
+            visible: root.env.game
+            onClicked: installer.openRunnerFolder()
+        }
         Paso {
             numero: 3
             titulo: root.env.game ? Tema.t("instGameReady") : Tema.t("instInstallTitle")
             descripcion: root.env.game ? Tema.t("instGameReadyDesc") : Tema.t("instInstallDesc")
             hecho: root.env.game && !installer.running
             activo: root.canInstall || installer.running || root.env.game
+            Fila {
+                titulo: Tema.t("instDiscScanOption")
+                descripcion: Tema.t("instVu1DiscDesc")
+                Interruptor { checked: root.scanDisc; enabled: !installer.running; onToggled: root.scanDisc = checked }
+            }
             Fila {
                 titulo: Tema.t("instFirstPlay")
                 descripcion: Tema.t("instFirstPlayDesc")
@@ -396,7 +412,22 @@ ScrollView {
                 BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("sync,build") }
             }
             Fila {
-                titulo: Tema.t("instPgo")
+                titulo: Tema.t("instVu1Disc")
+                descripcion: Tema.t("instVu1DiscDesc")
+                BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("vu1disc,native") }
+            }
+            Text {
+                visible: root.scanReport.complete === true
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: Tema.tf("instDiscReport", root.scanReport.files || 0, root.scanReport.blocks || 0)
+                color: Tema.textoSuave
+                font.pixelSize: 13
+            }
+            Fila {
+                // the installed game's build tells whether the profile is in use (InstallerBackend::pgoApplied)
+                readonly property bool aplicado: root.env.game && !installer.running && installer.pgoApplied()
+                titulo: Tema.t("instPgo") + (aplicado ? "  ·  " + Tema.t("instPgoOn") : (root.env.game ? "  ·  " + Tema.t("instPgoRec") : ""))
                 descripcion: Tema.t("instPgoDesc")
                 BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("pgo") }
             }

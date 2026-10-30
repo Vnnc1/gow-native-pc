@@ -1,0 +1,411 @@
+Early FINISH (GOW_GS_EARLY_FINISH=1, opt-in; the launcher turns it on by default with a switch to disable it).
+The game's FINISH arrives in a 32-byte PATH2 (VIF1 DIRECT) packet at the end of each frame's VIF1 chain; the EE then
+waited for the whole VU1 job before preparing the next frame, leaving the worker idle ~4-8 ms per frame (measured with
+PS2X_GS_WORKER_TRACE: 26.9 ms job + 4.85 ms median serial gap in combat). Now the EE scans each VIF1 packet at
+submission for PATH2 A+D writes to FINISH (0x61) and raises FINISH at once when no other job waits ahead (else when the
+worker starts the job), so the EE runs at most one job ahead. Stage markers make the GS skip that job's own FINISH
+writes, cleared at job end so a miscount cannot leak into later jobs. CSR reads/acknowledges no longer wait for the
+worker; display-register writes (gsDisplayStore) go through the worker queue and are applied by the GS stage in drawing
+order, with a shadow copy for read-modify-write. Verified in the game code: 0x17A0E0 sets the busy flag before the kick
+and the GS handler 0x182DD8 only clears it, so an early interrupt cannot be lost.
+Tests: tools/test/dma_worker_tests.cpp (scan incl. decoy UNPACK data and a cut DIRECT, raise at submission, CSR and
+display not blocked by a held stage, marker order). Measured (Xeon E5-2666 v3 / RX 580, scale 2, 3 alternating pairs,
+same executable): mean 57.80 vs 54.63 FPS (+5.8%), combat 52.22 vs 43.45 FPS (+20%); four in-game window captures in
+heavy combat correct. Test-only VRAM dumps (GOW_PAD_CAPTURAS) now catch the next frame mid-draw, as the EE runs ahead.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -352,6 +352,14 @@
+     static bool isGsStatusRegister(uint32_t address) noexcept;
+     void gsDisplayStore(uint32_t address, uint64_t value);
+     uint64_t gsStatusLoad();
++    // gow-native-pc (patch 40): GOW_GS_EARLY_FINISH=1. A VIF1 packet whose PATH2 data writes FINISH raises it when the
++    // packet is queued (or when the worker starts it, if another job is waiting) instead of when the GS reaches it, so
++    // the EE prepares the next frame while VU1 draws this one. The GS status is then read without waiting for the
++    // worker, and display-register writes are queued behind the drawing (see runtime/gs/gs_display.h).
++    bool gsEarlyFinish() const { return m_gsEarlyFinish; }
++    void gsQueueDisplay(const uint64_t (&regs)[7]);
++    bool gsDisplayShadow(uint64_t (&regs)[7]) const;
++    static uint32_t countPath2Finish(const uint8_t *data, uint32_t sizeBytes, uint32_t &cycle, uint32_t &directLeft);
+     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+     void resetEeTimers() noexcept;
+ 
+@@ -480,12 +488,15 @@
+     struct GsWorkerItem
+     {
+         bool vif1 = false; // false: GIF PATH3
++        bool display = false; // patch 40: data holds the 7 display registers, applied in GS stage order
+         std::vector<uint8_t> data;
+     };
+     struct GsWorkerJob
+     {
+         std::vector<GsWorkerItem> items;
+         uint32_t fbrst = 0;
++        uint32_t earlyFinish = 0;   // patch 40: PATH2 FINISH writes found in the packet (already raised or to raise)
++        bool raiseAtStart = false;  // patch 40: raise the early FINISH when the worker starts this job
+     };
+     bool needsGsWorkerSync(uint32_t address) const;
+     void syncGsWorkerFor(uint32_t address);
+@@ -497,6 +508,13 @@
+     void gsWorkerLoop();
+     bool m_gsWorkerEnabled = false;
+     bool m_vu1EarlyFinish = false; // bound large VIF1 submissions while asynchronous FINISH is used
++    bool m_gsEarlyFinish = false;  // patch 40, GOW_GS_EARLY_FINISH
++    uint32_t m_finishScanCycle = 0x0101u;     // STCYCL as the EE-side FINISH scan last saw it
++    uint32_t m_finishScanDirectLeft = 0u;     // DIRECT payload bytes the scan still has to skip
++    mutable std::mutex m_displayShadowMutex;
++    uint64_t m_displayShadow[7]{};
++    bool m_displayShadowValid = false;
++    void raiseEarlyFinish(uint32_t count);
+     GowSyncMetrics m_syncMetrics;
+     std::thread m_gsWorker;
+     std::thread::id m_gsWorkerId;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -265,10 +265,15 @@
+     // serialization point that would remove EE/VU1 overlap whenever the worker is still busy.
+     const char *early = std::getenv("GOW_VU1_EARLY_FINISH");
+     m_vu1EarlyFinish = early && early[0] == '1';
++    const char *gsEarly = std::getenv("GOW_GS_EARLY_FINISH");
+     const char *worker = std::getenv("PS2X_GS_WORKER");
+     m_gsWorkerEnabled = worker != nullptr && worker[0] == '1';
+-    std::fprintf(stderr, "[gow-sync-config] early_finish=%u worker=%u timing=%u\n",
+-                 unsigned(m_vu1EarlyFinish), unsigned(m_gsWorkerEnabled), unsigned(m_syncMetrics.enabled));
++    // the early FINISH needs the worker and the GS stage thread (PS2X_GS_PIPELINE not 0) to keep the drawing order
++    const char *pipeline = std::getenv("PS2X_GS_PIPELINE");
++    m_gsEarlyFinish = m_gsWorkerEnabled && gsEarly && gsEarly[0] == '1' && !(pipeline && pipeline[0] == '0');
++    std::fprintf(stderr, "[gow-sync-config] early_finish=%u worker=%u timing=%u gs_early_finish=%u\n",
++                 unsigned(m_vu1EarlyFinish), unsigned(m_gsWorkerEnabled), unsigned(m_syncMetrics.enabled),
++                 unsigned(m_gsEarlyFinish));
+     if (m_gsWorkerEnabled)
+     {
+         m_gsWorker = std::thread([this] { gsWorkerLoop(); });
+@@ -1985,13 +1990,25 @@
+             syncGsWorker("large VIF1 submit");
+         GsWorkerJob job;
+         job.fbrst = m_fbrstProvider ? m_fbrstProvider() : 0u;
+-        job.items.push_back(GsWorkerItem{path == DmaPath::Vif1, std::move(bytes)});
++        if (m_gsEarlyFinish && path == DmaPath::Vif1)
++            job.earlyFinish = countPath2Finish(bytes.data(), size, m_finishScanCycle, m_finishScanDirectLeft);
++        job.items.push_back(GsWorkerItem{path == DmaPath::Vif1, false, std::move(bytes)});
+         gsWorkerTrace("kick", size);
++        bool raiseNow = false;
+         {
+             std::lock_guard<std::mutex> lock(m_gsWorkerMutex);
++            // Raise now when nothing waits ahead of this job (at most the running one): the EE then runs at most one
++            // job ahead of the drawing. Otherwise the worker raises it when it starts the job.
++            if (job.earlyFinish != 0u)
++            {
++                raiseNow = m_gsWorkerJobs.empty();
++                job.raiseAtStart = !raiseNow;
++            }
+             m_gsWorkerJobs.push_back(std::move(job));
+         }
+         m_gsWorkerCv.notify_one();
++        if (raiseNow)
++            raiseEarlyFinish(1u);
+         return;
+     }
+     if (path == DmaPath::Vif1)
+@@ -2023,6 +2040,130 @@
+                      std::chrono::duration<double, std::micro>(now.time_since_epoch()).count(), what, bytes);
+ }
+ 
++// gow-native-pc (patch 40): GS stage markers (GifPathId 0, handled by GS::processGIFPacket in drawing order).
++namespace
++{
++    enum : uint32_t { kMarkerDisplay = 1u, kMarkerSuppressFinish = 2u };
++    void pushStageMarker(uint32_t type, const void *payload, uint32_t bytes)
++    {
++        uint8_t packet[8 + 7 * sizeof(uint64_t)] = {};
++        std::memcpy(packet, &type, sizeof(type));
++        if (bytes)
++            std::memcpy(packet + 8, payload, std::min<uint32_t>(bytes, sizeof(packet) - 8u));
++        ps2_gs_stage::push(static_cast<GifPathId>(0), packet, sizeof(packet));
++    }
++}
++
++void PS2Memory::raiseEarlyFinish(uint32_t count)
++{
++    (void)count;
++    gs_regs.csr.fetch_or(0x2ull, std::memory_order_acq_rel);
++    gsWorkerTrace("early-finish", 0u);
++    if (m_gsWorkerWake)
++        m_gsWorkerWake();
++}
++
++void PS2Memory::gsQueueDisplay(const uint64_t (&regs)[7])
++{
++    {
++        std::lock_guard<std::mutex> lock(m_displayShadowMutex);
++        std::memcpy(m_displayShadow, regs, sizeof(m_displayShadow));
++        m_displayShadowValid = true;
++    }
++    GsWorkerJob job;
++    GsWorkerItem item;
++    item.display = true;
++    item.data.resize(sizeof(regs));
++    std::memcpy(item.data.data(), regs, sizeof(regs));
++    job.items.push_back(std::move(item));
++    {
++        std::lock_guard<std::mutex> lock(m_gsWorkerMutex);
++        m_gsWorkerJobs.push_back(std::move(job));
++    }
++    m_gsWorkerCv.notify_one();
++}
++
++bool PS2Memory::gsDisplayShadow(uint64_t (&regs)[7]) const
++{
++    std::lock_guard<std::mutex> lock(m_displayShadowMutex);
++    if (!m_displayShadowValid)
++        return false;
++    std::memcpy(regs, m_displayShadow, sizeof(regs));
++    return true;
++}
++
++// PATH2 FINISH writes in a VIF1 packet: walks the VIF codes as processVIF1Data sizes them (STCYCL state carried in
++// `cycle`, a DIRECT cut by the packet end in `directLeft`) and the GIF tags inside DIRECT/DIRECTHL payloads, counting
++// A+D writes to FINISH (0x61). A miscount only changes when the game sees FINISH within this job, never its order.
++uint32_t PS2Memory::countPath2Finish(const uint8_t *data, uint32_t sizeBytes, uint32_t &cycle, uint32_t &directLeft)
++{
++    uint32_t pos = std::min(directLeft, sizeBytes);
++    directLeft -= pos;
++    uint32_t found = 0u;
++    while (pos + 4u <= sizeBytes)
++    {
++        uint32_t cmd;
++        std::memcpy(&cmd, data + pos, 4);
++        pos += 4u;
++        const uint32_t opcode = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
++        if (opcode == 0x01u) // STCYCL
++            cycle = imm;
++        else if (opcode == 0x20u) // STMASK
++            pos += 4u;
++        else if (opcode == 0x30u || opcode == 0x31u) // STROW, STCOL
++            pos += 16u;
++        else if (opcode == 0x4Au) // MPG
++            pos += (num == 0u ? 256u : num) * 8u;
++        else if (opcode == 0x50u || opcode == 0x51u) // DIRECT, DIRECTHL
++        {
++            const uint32_t bytes = (imm == 0u ? 65536u : imm) * 16u;
++            if (bytes > sizeBytes - pos)
++            {
++                directLeft = bytes - (sizeBytes - pos);
++                break;
++            }
++            for (uint32_t q = pos; q + 16u <= pos + bytes;)
++            {
++                uint64_t tag, regs;
++                std::memcpy(&tag, data + q, 8);
++                std::memcpy(&regs, data + q + 8, 8);
++                q += 16u;
++                const uint32_t nloop = static_cast<uint32_t>(tag & 0x7FFFu);
++                const uint32_t flg = static_cast<uint32_t>((tag >> 58) & 3u);
++                const uint32_t nreg = static_cast<uint32_t>(tag >> 60) == 0u ? 16u : static_cast<uint32_t>(tag >> 60);
++                if (flg == 0u) // PACKED: one qword per register; A+D (0xE) carries the register address
++                {
++                    for (uint32_t l = 0; l < nloop && q + 16u <= pos + bytes; ++l)
++                        for (uint32_t r = 0; r < nreg && q + 16u <= pos + bytes; ++r, q += 16u)
++                            if (((regs >> (4u * r)) & 0xFu) == 0xEu && data[q + 8] == 0x61u)
++                                ++found;
++                }
++                else if (flg == 1u) // REGLIST: 64-bit words, padded to a qword
++                    q += ((nloop * nreg + 1u) / 2u) * 16u;
++                else // IMAGE
++                    q += nloop * 16u;
++            }
++            pos += bytes;
++        }
++        else if ((opcode & 0x60u) == 0x60u) // UNPACK, sized as processVIF1Data does
++        {
++            const uint32_t vn = (opcode >> 2) & 3u, vl = opcode & 3u;
++            const uint32_t bits = vl == 0u ? 32u : vl == 1u ? 16u : vl == 2u ? 8u : (vn == 3u ? 4u : 16u);
++            const uint32_t bitsPerVector = (vl == 3u && vn == 3u) ? 16u : (vn + 1u) * bits;
++            const uint32_t bytesPerVector = (bitsPerVector + 7u) / 8u;
++            const uint32_t writes = num == 0u ? 256u : num;
++            uint32_t cl = cycle & 0xFFu, wl = (cycle >> 8) & 0xFFu;
++            cl = cl ? cl : 1u;
++            wl = wl ? wl : 1u;
++            uint32_t sources = writes;
++            if (cl < wl)
++                sources = (writes / wl) * cl + std::min(writes % wl, cl);
++            pos += ((sources * bytesPerVector) + 3u) & ~3u;
++        }
++    }
++    return found;
++}
++
+ void PS2Memory::runGsWorkerJob(GsWorkerJob &job)
+ {
+     size_t traceBytes = 0;
+@@ -2031,9 +2172,21 @@
+     gsWorkerTrace("job-start", traceBytes);
+     struct TraceDone { size_t bytes; ~TraceDone() { gsWorkerTrace("job-done", bytes); } } traceDone{traceBytes};
+     m_gsWorkerJobFbrst = job.fbrst;
++    if (job.earlyFinish != 0u)
++    {
++        // the GS skips this job's own FINISH writes: the game already received them
++        pushStageMarker(kMarkerSuppressFinish, &job.earlyFinish, sizeof(job.earlyFinish));
++        if (job.raiseAtStart)
++            raiseEarlyFinish(job.earlyFinish);
++    }
+     for (GsWorkerItem &item : job.items)
+     {
+         const uint32_t size = static_cast<uint32_t>(item.data.size());
++        if (item.display)
++        {
++            pushStageMarker(kMarkerDisplay, item.data.data(), size);
++            continue;
++        }
+         if (item.vif1)
+         {
+             processVIF1Data(item.data.data(), size);
+@@ -2047,6 +2200,11 @@
+     }
+     if (m_gifArbiter)
+         m_gifArbiter->drain();
++    if (job.earlyFinish != 0u)
++    {
++        const uint32_t none = 0u; // whatever the GS did not meet in this job does not carry over to the next one
++        pushStageMarker(kMarkerSuppressFinish, &none, sizeof(none));
++    }
+ }
+ 
+ void PS2Memory::gsWorkerLoop()
+@@ -2093,6 +2251,19 @@
+ {
+     if (ps2_gs_stage::onStageThread())
+         return; // GOW-Port: the stage runs queued worker output; it must not wait for itself
++    // gow-native-pc (patch 40): with the early FINISH the EE owns CSR's FINISH handshake; reading or acknowledging it
++    // must not wait for the drawing the early FINISH lets run on
++    if (m_gsEarlyFinish && isGsStatusRegister(address))
++        return;
++    // a direct display-register access (outside gsDisplayStore) waits for the queued display writes and then makes
++    // the registers, not the queued copy, the current values again
++    if (m_gsEarlyFinish && isGsDisplayRegister(address) && !onGsWorkerThread())
++    {
++        waitGsWorkerIdle(nullptr, address);
++        std::lock_guard<std::mutex> lock(m_displayShadowMutex);
++        m_displayShadowValid = false;
++        return;
++    }
+     if (m_gsWorkerEnabled && needsGsWorkerSync(address) && !onGsWorkerThread())
+         waitGsWorkerIdle(nullptr, address);
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_display.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_display.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_display.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_display.cpp
+@@ -14,6 +14,14 @@
+ 
+     void setDisplay(PS2Memory &memory, const GSDisplayState &state)
+     {
++        if (memory.gsEarlyFinish())
++        {
++            // gow-native-pc (patch 40): applied by the GS stage after everything queued before it was drawn
++            const uint64_t regs[7] = {state.pmode, state.smode2, state.dispfb1, state.display1,
++                                      state.dispfb2, state.display2, state.bgcolor};
++            memory.gsQueueDisplay(regs);
++            return;
++        }
+         memory.syncGsWorkerFor(kDisplaySite);
+         GSRegisters &gs = memory.gs();
+         gs.pmode = state.pmode;
+@@ -27,8 +35,21 @@
+ 
+     GSDisplayState display(const PS2Memory &memory)
+     {
++        GSDisplayState state;
++        uint64_t queued[7];
++        if (memory.gsEarlyFinish() && memory.gsDisplayShadow(queued))
++        {
++            // the values the game last wrote, which the drawing may not have reached yet
++            state.pmode = queued[0];
++            state.smode2 = queued[1];
++            state.dispfb1 = queued[2];
++            state.display1 = queued[3];
++            state.dispfb2 = queued[4];
++            state.display2 = queued[5];
++            state.bgcolor = queued[6];
++            return state;
++        }
+         const GSRegisters &gs = memory.gs();
+-        GSDisplayState state;
+         state.pmode = gs.pmode;
+         state.smode2 = gs.smode2;
+         state.dispfb1 = gs.dispfb1;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -218,6 +218,10 @@
+     uint8_t m_fogR = 0, m_fogG = 0, m_fogB = 0;
+ 
+     bool m_prmodecont = true;
++    // gow-native-pc (patch 40): FINISH writes of the current worker job already raised early (stage thread only)
++    uint32_t m_finishSuppress = 0;
++    GifPathId m_currentGifPath = GifPathId::Path1;
++    void runtimeMarker(const uint8_t *data, uint32_t sizeBytes);
+     bool m_pabe = false;
+     uint64_t m_scanmsk = 0;
+     uint64_t m_dimx = 0;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -912,10 +912,41 @@
+     return index == 0u || index >= m_gifInput.size() || m_gifInput[index].pending();
+ }
+ 
++// gow-native-pc (patch 40): markers the GS worker queues between GIF packets (ps2_memory.cpp, pushStageMarker):
++// 1 = the display registers the game wrote, applied now that everything before them is drawn; 2 = how many of the
++// current job's PATH2 FINISH writes were already raised.
++void GS::runtimeMarker(const uint8_t *data, uint32_t sizeBytes)
++{
++    if (!data || sizeBytes < 8u)
++        return;
++    uint32_t type = 0u;
++    std::memcpy(&type, data, sizeof(type));
++    if (type == 2u)
++        std::memcpy(&m_finishSuppress, data + 8, sizeof(m_finishSuppress));
++    else if (type == 1u && m_privRegs && sizeBytes >= 8u + 7u * sizeof(uint64_t))
++    {
++        uint64_t r[7];
++        std::memcpy(r, data + 8, sizeof(r));
++        m_privRegs->pmode = r[0];
++        m_privRegs->smode2 = r[1];
++        m_privRegs->dispfb1 = r[2];
++        m_privRegs->display1 = r[3];
++        m_privRegs->dispfb2 = r[4];
++        m_privRegs->display2 = r[5];
++        m_privRegs->bgcolor = r[6];
++    }
++}
++
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
+ {
+     ps2_perf::Scope perf(ps2_perf::Bucket::Gs); // GOW-Port: incluye rasterizado y transferencias GIF.
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    if (path == static_cast<GifPathId>(0))
++    {
++        runtimeMarker(data, sizeBytes); // gow-native-pc (patch 40): queued by the GS worker, not GIF data
++        return;
++    }
++    m_currentGifPath = path;
+     const size_t pathIndex = static_cast<size_t>(path);
+     if (!data || !sizeBytes || !m_backend || pathIndex == 0u || pathIndex >= m_gifInput.size())
+         return;
+@@ -1794,6 +1825,14 @@
+     }
+     case GS_REG_FINISH:
+     {
++        // gow-native-pc (patch 40): the game already got this FINISH when the packet was queued
++        if (m_finishSuppress != 0u && m_currentGifPath == GifPathId::Path2)
++        {
++            --m_finishSuppress;
++            if (m_backend)
++                m_backend->Sync(GSSyncReason::Finish);
++            break;
++        }
+         if (m_backend)
+         {
+             static const bool finishAsync = [] { const char *v = std::getenv("GOW_GS_FINISH_ASINCRONO"); return v && v[0] == '1'; }();

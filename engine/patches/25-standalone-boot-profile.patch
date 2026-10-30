@@ -1,0 +1,58 @@
+Read a per-build boot profile for direct game executable launches.
+Explicit guest ELF arguments retain precedence; only runtime environment prefixes are restored.
+The launcher persists its selected disc/settings and the pipeline supplies first-run defaults.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/main.cpp b/PS2Recomp/ps2xRuntime/src/main.cpp
+index 0f2b2a7..bcdb909 100644
+--- a/PS2Recomp/ps2xRuntime/src/main.cpp
++++ b/PS2Recomp/ps2xRuntime/src/main.cpp
+@@ -18,6 +18,8 @@ void ps2InstallEePageWatch(PS2Runtime &runtime);
+ #include <exception>
+ #include <algorithm>
+ #include <cstdlib>
++#include <fstream>
++#include <cstdio>
+ 
+ #if defined(__ANDROID__)
+ #include <android/log.h>
+@@ -151,6 +153,40 @@ namespace
+             std::cout << "Using argv boot path" << std::endl;
+             return std::filesystem::path(argv[1]);
+         }
++        // The pipeline/launcher writes this per-build profile, so double-clicking the actual rendering executable
++        // uses the same disc and settings. Explicit argv still wins for tests and other games.
++        if (argc > 0 && argv[0])
++        {
++            const auto folder = std::filesystem::absolute(argv[0]).parent_path();
++            std::ifstream boot(folder / "gow-native.boot");
++            std::string header, elf, line;
++            if (std::getline(boot, header) && header == "GOW_NATIVE_BOOT_V1" && std::getline(boot, elf))
++            {
++                std::filesystem::current_path(folder);
++                std::ofstream("standalone.log", std::ios::trunc).close();
++                std::freopen("standalone.log", "a", stdout);
++                std::freopen("standalone.log", "a", stderr);
++                if (!elf.empty() && elf.back() == '\r') elf.pop_back();
++                const auto path = std::filesystem::u8path(elf);
++                if (!path.is_absolute() || !std::filesystem::is_regular_file(path))
++                    throw std::runtime_error("The disc recorded in gow-native.boot is missing. Open the launcher and select it again.");
++                while (std::getline(boot, line))
++                {
++                    if (!line.empty() && line.back() == '\r') line.pop_back();
++                    const auto split = line.find('=');
++                    if (split == std::string::npos) continue;
++                    const auto key = line.substr(0, split), value = line.substr(split + 1);
++                    if (!(key.starts_with("TOBIICHI_") || key.starts_with("PS2X_") || key.starts_with("GOW_"))) continue;
++#if defined(_WIN32)
++                    _wputenv_s(std::filesystem::u8path(key).wstring().c_str(), std::filesystem::u8path(value).wstring().c_str());
++#else
++                    setenv(key.c_str(), value.c_str(), 1);
++#endif
++                }
++                std::cout << "Using per-build gow-native.boot" << std::endl;
++                return path;
++            }
++        }
+ #if defined(PS2X_DEFAULT_BOOT_ELF)
+         std::cout << "Using default boot file" << std::endl;
+         const std::filesystem::path configuredPath = std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);

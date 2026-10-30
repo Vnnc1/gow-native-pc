@@ -31,11 +31,20 @@ iop_modules_dir = "IOP_MOD"    # the game loads its IRX modules as IOP_MOD/<name
 text_files = ["R_PERM.WAD", "R_SHELL.WAD"]   # where a translation's text lives
 widescreen_movie_ext = ".PSW"  # the 16:9 movies; the port plays them, so a disc without them maps them to .PSS
 movie_ext = ".PSS"
+# The standalone PT-BR disc has a reduced SEMO01.PSW that never completes playback.
+# Match exact bytes, not a general size threshold: short valid movies must survive.
+widescreen_placeholders = [{size = 16388, sha256 = "98117b3548648b5aec8843bd95fd0187f7b59411b8e0f70d403ce25d0e6c190c"}]
+
+[build]
+unity_batch = 16
 
 [optimize]
 # scripted run that records the VU1 microcode and IOP modules the game uses (Tobiichi's recording script)
 seconds = 240
 pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadrado,44:triangulo,48:lup*3,52:x,55:cuadrado,56:triangulo,60:circulo,64:r1,70:lleft*2,74:cuadrado,76:cuadrado,80:triangulo,90:lup*4,96:x,100:cuadrado,104:l1,110:lright*2,120:cuadrado,125:triangulo,140:lup*5,150:cuadrado,160:triangulo,180:lup*5,200:cuadrado"
+
+[diagnostics]
+frame_pc = "0x1837B8"          # vid::Flip: guest frames, distinct from host presentation rate
 
 # Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
 # accepted as a translation, and its language is guessed from the words below.

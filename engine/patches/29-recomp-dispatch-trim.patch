@@ -1,0 +1,383 @@
+Dispatch trim after patch 28. JALR calls PS2Runtime::callGuestFunction too (kind IndirectCall, "JALR"; a target outside
+the table, misaligned or missing still takes dispatchGuestBranch, PS2X_STATIC_CALLS=dispatch emits the old call).
+dispatchGuestBranch reaches the PS2X_GS_WORKER_TRACE statics only when g_ps2FullCallDispatch is set. The empty
+ps2TraceGuestWrite hook (upstream TODO: delete) is gone from the write macros, Store8..128 and the recompiler's
+constant-address writes. Tests: callGuestFunction parity now covers IndirectCall; JALR codegen expectations.
+
+diff --git a/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp b/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index d21041e..17812db 100644
+--- a/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -13,6 +13,21 @@
+ 
+ namespace ps2recomp
+ {
++    namespace
++    {
++        // gow-native-pc (patch 28/29): JAL and JALR call PS2Runtime::callGuestFunction, the lean path of the same
++        // dispatch. PS2X_STATIC_CALLS=dispatch in the recompiler's environment: the full dispatchGuestBranch, as before.
++        bool callsUseFullDispatch()
++        {
++            static const bool full = []
++            {
++                const char *mode = std::getenv("PS2X_STATIC_CALLS");
++                return mode != nullptr && std::string_view(mode) == "dispatch";
++            }();
++            return full;
++        }
++    }
++
+     ControlFlowEmitter::ControlFlowEmitter(CodeGenerator &generator,
+                                            const Instruction &branchInst,
+                                            const Instruction &delaySlot,
+@@ -228,14 +243,7 @@ namespace ps2recomp
+     void ControlFlowEmitter::emitExternalJumpDispatch(uint32_t target, StaticBranchKind kind, std::string_view indent)
+     {
+         const bool isCall = kind == StaticBranchKind::Call;
+-        // gow-native-pc (patch 28): a JAL calls PS2Runtime::callGuestFunction, the inline fast path of the same dispatch
+-        // (no trace ring, history or perf hook per call). PS2X_STATIC_CALLS=dispatch: the full dispatch, as before.
+-        static const bool fullDispatch = []
+-        {
+-            const char *mode = std::getenv("PS2X_STATIC_CALLS");
+-            return mode != nullptr && std::string_view(mode) == "dispatch";
+-        }();
+-        if (isCall && !fullDispatch)
++        if (isCall && !callsUseFullDispatch())
+         {
+             m_ss << fmt::format("{}if (!runtime->callGuestFunction(rdram, ctx, 0x{:X}u, 0x{:X}u, 0x{:X}u)) {{\n",
+                                 indent, target, branchPc(), fallthroughPc());
+@@ -254,6 +262,15 @@ namespace ps2recomp
+ 
+     void ControlFlowEmitter::emitExternalRegisterCallDispatch(std::string_view jumpTargetExpression, std::string_view indent)
+     {
++        if (!callsUseFullDispatch())
++        {
++            m_ss << fmt::format("{}if (!runtime->callGuestFunction(rdram, ctx, {}, 0x{:X}u, 0x{:X}u, "
++                                "PS2Runtime::GuestBranchKind::IndirectCall, \"JALR\")) {{\n",
++                                indent, jumpTargetExpression, branchPc(), fallthroughPc());
++            m_ss << fmt::format("{}    return;\n", indent);
++            m_ss << fmt::format("{}}}\n", indent);
++            return;
++        }
+         emitRuntimeBranchDispatch(jumpTargetExpression,
+                                   branchPc(),
+                                   fallthroughPc(),
+diff --git a/PS2Recomp/ps2xRecomp/src/lib/instruction_translator.cpp b/PS2Recomp/ps2xRecomp/src/lib/instruction_translator.cpp
+index 40f59b6..7455360 100644
+--- a/PS2Recomp/ps2xRecomp/src/lib/instruction_translator.cpp
++++ b/PS2Recomp/ps2xRecomp/src/lib/instruction_translator.cpp
+@@ -17,11 +17,6 @@ namespace ps2recomp
+             return fmt::format("0x{:X}u", address);
+         }
+ 
+-        uint32_t memoryAccessSize(int width)
+-        {
+-            return static_cast<uint32_t>(width / 8);
+-        }
+-
+         std::string memoryValueType(int width)
+         {
+             switch (width)
+@@ -96,21 +91,13 @@ namespace ps2recomp
+             const std::string addr = addressLiteral(address);
+             if (width == 128)
+             {
+-                return fmt::format(
+-                    "do {{ __m128i _value = ({}); "
+-                    "const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); "
+-                    "const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); "
+-                    "ps2TraceGuestWrite(rdram, {}, 16u, _lo, _hi, \"WRITE128\", ctx); "
+-                    "FAST_WRITE128({}, _value); }} while (0)",
+-                    val, addr, addr);
++                // gow-native-pc (patch 29): no ps2TraceGuestWrite call (it was an empty hook)
++                return fmt::format("do {{ __m128i _value = ({}); FAST_WRITE128({}, _value); }} while (0)", val, addr);
+             }
+ 
+             const std::string valueType = memoryValueType(width);
+-            return fmt::format(
+-                "do {{ {} _value = static_cast<{}>({}); "
+-                "ps2TraceGuestWrite(rdram, {}, {}u, _value, 0u, \"WRITE{}\", ctx); "
+-                "FAST_WRITE{}({}, _value); }} while (0)",
+-                valueType, valueType, val, addr, memoryAccessSize(width), width, width, addr);
++            return fmt::format("do {{ {} _value = static_cast<{}>({}); FAST_WRITE{}({}, _value); }} while (0)",
++                               valueType, valueType, val, width, addr);
+         }
+     }
+ 
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+index a26628a..43ea91e 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+@@ -240,24 +240,6 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
+     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
+ }
+ 
+-inline void ps2TraceGuestWrite(uint8_t *rdram,
+-                               uint32_t guestAddr,
+-                               uint32_t size,
+-                               uint64_t valueLo,
+-                               uint64_t valueHi,
+-                               const char *op,
+-                               const R5900Context *ctx)
+-{
+-    (void)rdram;
+-    (void)guestAddr;
+-    (void)size;
+-    (void)valueLo;
+-    (void)valueHi;
+-    (void)op;
+-    (void)ctx;
+-    // TODO we dont need this anymore so on next release it will be deleted
+-}
+-
+ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
+                                     uint32_t guestAddr,
+                                     uint32_t size,
+@@ -353,8 +335,10 @@ public:
+     // per-call diagnostics: the branch trace ring, the dispatch history, GOW_PERF's frame counter and
+     // PS2X_GS_WORKER_TRACE. The full dispatch still runs for a missing function, for every call when
+     // GOW_DISPATCH_FULL=1 or PS2X_GS_WORKER_TRACE is set, and for calls to GOW_PERF_FRAME_PC. Defined inline below.
++    // Patch 29: JALR uses it too (kind IndirectCall, "JALR": the names the full dispatch reports a missing target with).
+     static constexpr uint32_t kStaticCallCycles = 8u; // EeScheduler::kGuestDispatchCycles
+-    bool callGuestFunction(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc, uint32_t fallthroughPc);
++    bool callGuestFunction(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc, uint32_t fallthroughPc,
++                           GuestBranchKind kind = GuestBranchKind::DirectCall, const char *debugName = "JAL");
+     void reportMissingFunction(uint8_t *rdram,
+                                R5900Context *ctx,
+                                uint32_t targetPc,
+@@ -601,7 +585,7 @@ extern uint32_t g_ps2CallWatchPc;    // calls to this address through dispatchGu
+ inline thread_local uint64_t g_ps2GuestJumpSerial = 0u;
+ 
+ inline bool PS2Runtime::callGuestFunction(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc,
+-                                          uint32_t fallthroughPc)
++                                          uint32_t fallthroughPc, GuestBranchKind kind, const char *debugName)
+ {
+     const uint32_t offset = targetPc - g_ps2RecompiledFunctionTableBase;
+     const uint32_t slot = offset >> 2;
+@@ -610,7 +594,7 @@ inline bool PS2Runtime::callGuestFunction(uint8_t *rdram, R5900Context *ctx, uin
+         fn = g_ps2RecompiledFunctionTable[slot];
+     // a missing function, a diagnostic: the full dispatch (it reports and applies the missing-function policy)
+     if (fn == nullptr || g_ps2FullCallDispatch || targetPc == g_ps2CallWatchPc) [[unlikely]]
+-        return dispatchGuestBranch(rdram, ctx, targetPc, sourcePc, fallthroughPc, GuestBranchKind::DirectCall, "JAL");
++        return dispatchGuestBranch(rdram, ctx, targetPc, sourcePc, fallthroughPc, kind, debugName);
+ 
+     ctx->pc = targetPc;
+     if (m_eeScheduler && eeCheckpointDue(kStaticCallCycles))
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+index 7b63598..ab78a1e 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -560,7 +560,6 @@ static inline bool Ps2WriteScratchpad(uint32_t addr, const T &value)
+             PS2_STORE_SPECIAL(uint8_t, 8, _addr, (val));                               \
+         else                                                                         \
+         {                                                                            \
+-            ps2TraceGuestWrite(rdram, _addr, 1u, (uint8_t)(val), 0u, "WRITE8", ctx); \
+             FAST_WRITE8(_addr, (val));                                               \
+         }                                                                            \
+     } while (0)
+@@ -573,7 +572,6 @@ static inline bool Ps2WriteScratchpad(uint32_t addr, const T &value)
+             PS2_STORE_SPECIAL(uint16_t, 16, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+-            ps2TraceGuestWrite(rdram, _addr, 2u, (uint16_t)(val), 0u, "WRITE16", ctx); \
+             FAST_WRITE16(_addr, (val));                                                \
+         }                                                                              \
+     } while (0)
+@@ -586,7 +584,6 @@ static inline bool Ps2WriteScratchpad(uint32_t addr, const T &value)
+             PS2_STORE_SPECIAL(uint32_t, 32, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+-            ps2TraceGuestWrite(rdram, _addr, 4u, (uint32_t)(val), 0u, "WRITE32", ctx); \
+             FAST_WRITE32(_addr, (val));                                                \
+         }                                                                              \
+     } while (0)
+@@ -599,7 +596,6 @@ static inline bool Ps2WriteScratchpad(uint32_t addr, const T &value)
+             PS2_STORE_SPECIAL(uint64_t, 64, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+-            ps2TraceGuestWrite(rdram, _addr, 8u, (uint64_t)(val), 0u, "WRITE64", ctx); \
+             FAST_WRITE64(_addr, (val));                                                \
+         }                                                                              \
+     } while (0)
+@@ -613,9 +609,6 @@ static inline bool Ps2WriteScratchpad(uint32_t addr, const T &value)
+             PS2_STORE_SPECIAL(__m128i, 128, _addr, _value);                            \
+         else                                                                         \
+         {                                                                            \
+-            const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); \
+-            const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); \
+-            ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);        \
+             FAST_WRITE128(_addr, _value);                                            \
+         }                                                                            \
+     } while (0)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 2a7056d..49776fd 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1522,6 +1522,30 @@ uint32_t g_ps2CallWatchPc = [] {
+     return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
+ }();
+ 
++// GOW-Port: PS2X_GS_WORKER_TRACE (dispatchGuestBranch)
++namespace
++{
++    double gsWorkerTraceFrom()
++    {
++        static const double from = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
++        return from;
++    }
++    bool gsWorkerTraced(uint32_t targetPc)
++    {
++        return gsWorkerTraceFrom() >= 0.0 && (targetPc == 0x1837B8u || targetPc == 0x183878u || targetPc == 0x13F730u);
++    }
++    void gsWorkerTraceEvent(const char *what, uint32_t targetPc)
++    {
++        static const auto traceStart = std::chrono::steady_clock::now();
++        const double from = gsWorkerTraceFrom();
++        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count();
++        if (s >= from && s < from + 2.0)
++            std::fprintf(stderr, "[gsw-trace] %.0f %s 0x%X\n",
++                         std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count(),
++                         what, targetPc);
++    }
++}
++
+ // GOW-Port branch trace ring
+ struct GowBranchRec { uint32_t src, dst, ra, kind; };
+ GowBranchRec g_gowRing[256]; std::atomic<uint32_t> g_gowRingPos{0};
+@@ -1603,22 +1627,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     ps2_perf::guestEntry(targetPc, rdram); // GOW-Port: también cuenta llamadas que no vuelven al dispatcher.
+     // GOW-Port: PS2X_GS_WORKER_TRACE=<s>: for 2 s after <s> s of uptime, host µs of vid::Flip (0x1837B8),
+     // vid::WaitForDMAComplete (0x183878) and 0x13F730 entry/return, to see the per-frame dependency chain.
+-    static const double traceFrom = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
+-    const bool traced = traceFrom >= 0.0 && (targetPc == 0x1837B8u || targetPc == 0x183878u || targetPc == 0x13F730u);
+-    static const auto traceStart = std::chrono::steady_clock::now();
+-    auto traceEvent = [&](const char *what)
+-    {
+-        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count();
+-        if (s >= traceFrom && s < traceFrom + 2.0)
+-            std::fprintf(stderr, "[gsw-trace] %.0f %s 0x%X\n",
+-                         std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+-                         what, targetPc);
+-    };
+-    if (traced)
+-        traceEvent("enter");
++    // gow-native-pc (patch 29): only looked at when g_ps2FullCallDispatch is set (PS2X_GS_WORKER_TRACE sets it).
++    const bool traced = g_ps2FullCallDispatch && gsWorkerTraced(targetPc);
++    if (traced) [[unlikely]]
++        gsWorkerTraceEvent("enter", targetPc);
+     targetFn(rdram, ctx, this);
+-    if (traced)
+-        traceEvent("leave");
++    if (traced) [[unlikely]]
++        gsWorkerTraceEvent("leave", targetPc);
+ 
+     if (isStopRequested() || ctx->pc == 0u)
+     {
+@@ -2374,7 +2389,6 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
+ {
+     ioHist("W8", vaddr, ctx);
+-    ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
+     try
+     {
+         m_memory.write8(vaddr, value);
+@@ -2388,7 +2402,6 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
+ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
+ {
+     ioHist("W16", vaddr, ctx);
+-    ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
+     try
+     {
+         m_memory.write16(vaddr, value);
+@@ -2402,7 +2415,6 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
+ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
+ {
+     ioHist("W32", vaddr, ctx);
+-    ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
+     try
+     {
+         m_memory.write32(vaddr, value);
+@@ -2417,7 +2429,6 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
+ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
+ {
+     ioHist("W64", vaddr, ctx);
+-    ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
+     try
+     {
+         m_memory.write64(vaddr, value);
+@@ -2431,9 +2442,6 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
+ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
+ {
+     ioHist("W128", vaddr, ctx);
+-    alignas(16) uint64_t _parts[2];
+-    _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
+-    ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);
+     try
+     {
+         m_memory.write128(vaddr, value);
+diff --git a/PS2Recomp/ps2xTest/src/code_generator_tests.cpp b/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
+index e22b2c0..5d6adfa 100644
+--- a/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
+@@ -1794,7 +1794,7 @@ void register_code_generator_tests()
+ 
+             t.IsTrue(generated.find("const uint32_t jumpTarget = GPR_U32(ctx, 4);") != std::string::npos, "JALR should read target from RS");
+             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xD008u);") != std::string::npos, "JALR should set link register");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, jumpTarget") != std::string::npos, "JALR should dispatch through runtime branch helper");
++            t.IsTrue(generated.find("runtime->callGuestFunction(rdram, ctx, jumpTarget") != std::string::npos, "JALR should call through the runtime's call helper (patch 29)");
+             t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectCall") != std::string::npos,
+                      "JALR should identify itself as an indirect call");
+             t.IsTrue(generated.find("0xD000u, 0xD008u") != std::string::npos,
+@@ -2145,8 +2145,8 @@ void register_code_generator_tests()
+ 
+             t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
+                       "unresolved JALR should not emit a broad local switch over every internal label");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, jumpTarget") != std::string::npos,
+-                     "unresolved JALR should dispatch through the runtime branch helper");
++            t.IsTrue(generated.find("runtime->callGuestFunction(rdram, ctx, jumpTarget") != std::string::npos,
++                     "unresolved JALR should call through the runtime's call helper (patch 29)");
+             t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectCall") != std::string::npos,
+                      "JALR should retain indirect-call dispatch kind");
+             t.IsTrue(generated.find("0x1514u, 0x151Cu") != std::string::npos,
+diff --git a/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp b/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+index 6ac5b66..967ece4 100644
+--- a/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+@@ -510,7 +510,7 @@ void register_ps2_runtime_expansion_tests()
+         });
+ 
+         // gow-native-pc (patch 28): the static call fast path gives the full dispatch's result in every case.
+-        tc.Run("callGuestFunction matches dispatchGuestBranch DirectCall", [](TestCase &t)
++        tc.Run("callGuestFunction matches dispatchGuestBranch DirectCall and IndirectCall", [](TestCase &t)
+         {
+             struct Case
+             {
+@@ -525,8 +525,11 @@ void register_ps2_runtime_expansion_tests()
+                 {"tail jump to entry", 0x3600u, &testGuestBranchSelfTailJumpHandler},
+                 {"missing target", 0x3210u, nullptr},
+             };
++            for (int indirect = 0; indirect < 2; ++indirect) // patch 29: JALR takes the same path
+             for (const Case &c : cases)
+             {
++                const auto kind = indirect ? PS2Runtime::GuestBranchKind::IndirectCall : PS2Runtime::GuestBranchKind::DirectCall;
++                const char *op = indirect ? "JALR" : "JAL";
+                 bool results[2] = {};
+                 R5900Context out[2] = {};
+                 bool stopped[2] = {};
+@@ -539,13 +542,12 @@ void register_ps2_runtime_expansion_tests()
+                     R5900Context ctx{};
+                     ctx.pc = c.target; // the generated code stores the target before the call
+                     setRegU32(ctx, 29, 0x00002000u);
+-                    results[fast] = fast ? runtime.callGuestFunction(nullptr, &ctx, c.target, 0x2000u, 0x2008u)
+-                                         : runtime.dispatchGuestBranch(nullptr, &ctx, c.target, 0x2000u, 0x2008u,
+-                                                                       PS2Runtime::GuestBranchKind::DirectCall, "JAL");
++                    results[fast] = fast ? runtime.callGuestFunction(nullptr, &ctx, c.target, 0x2000u, 0x2008u, kind, op)
++                                         : runtime.dispatchGuestBranch(nullptr, &ctx, c.target, 0x2000u, 0x2008u, kind, op);
+                     out[fast] = ctx;
+                     stopped[fast] = runtime.isStopRequested();
+                 }
+-                const std::string name = c.name;
++                const std::string name = std::string(op) + " " + c.name;
+                 t.Equals(results[1], results[0], name + ": same continue/unwind result");
+                 t.Equals(out[1].pc, out[0].pc, name + ": same pc");
+                 t.Equals(::getRegU32(&out[1], 2), ::getRegU32(&out[0], 2), name + ": same v0");

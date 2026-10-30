@@ -1,0 +1,112 @@
+Initialize lean-call diagnostics after the standalone boot profile restores its environment.
+Keep the full-dispatch flag and watched frame PC per runtime; no getenv or static guard on each lean call.
+Preserve the pre-29 worker-trace time origin (first dispatched call, not first watched function).
+Regression: tools/test/guest-calls.py reproduces late-setting and trace-window failures on patches 01-29.
+Result: Windows clang Release, all ten isolated call scenarios pass (162 C++ checks plus trace assertions).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+index 43ea91e..61b6da8 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+@@ -566,6 +566,9 @@ private:
+     uint8_t *m_boundGSVram = nullptr;
+     // Incremented on the EE executor when generated code yields at a checkpoint.
+     uint64_t m_eeCheckpointSerial = 0u;
++    // GOW-Port: capture diagnostics per runtime, after standalone boot restores its environment (patch 29a).
++    bool m_fullCallDispatch = false;
++    uint32_t m_callWatchPc = 0u;
+     uint64_t m_eeCountBase = 0u; // eeCycle at which COP0 Count was 0 (setEeCountRegister)
+     EeCheckpointClock m_eeClock; // driven by m_eeScheduler (EeScheduler::m_clock)
+     bool eeCheckpointDueFull(uint32_t cycles) noexcept;
+@@ -577,9 +580,6 @@ extern const uint32_t g_ps2RecompiledFunctionTableEnd;
+ extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
+ extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+ 
+-// gow-native-pc (patch 28): state of PS2Runtime::callGuestFunction, set once at start-up (ps2_runtime.cpp).
+-extern bool g_ps2FullCallDispatch;   // every static call through dispatchGuestBranch
+-extern uint32_t g_ps2CallWatchPc;    // calls to this address through dispatchGuestBranch (0 = none)
+ // Jumps dispatched on this thread (dispatchGuestBranch): a callee that ends with a jump back to its own entry has not
+ // returned, although ctx->pc equals its entry again. Constant-initialised and visible, so no TLS wrapper call.
+ inline thread_local uint64_t g_ps2GuestJumpSerial = 0u;
+@@ -593,7 +593,7 @@ inline bool PS2Runtime::callGuestFunction(uint8_t *rdram, R5900Context *ctx, uin
+     if ((targetPc & 3u) == 0u && slot < g_ps2RecompiledFunctionTableSlotCount)
+         fn = g_ps2RecompiledFunctionTable[slot];
+     // a missing function, a diagnostic: the full dispatch (it reports and applies the missing-function policy)
+-    if (fn == nullptr || g_ps2FullCallDispatch || targetPc == g_ps2CallWatchPc) [[unlikely]]
++    if (fn == nullptr || m_fullCallDispatch || targetPc == m_callWatchPc) [[unlikely]]
+         return dispatchGuestBranch(rdram, ctx, targetPc, sourcePc, fallthroughPc, kind, debugName);
+ 
+     ctx->pc = targetPc;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 49776fd..015129e 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -488,6 +488,13 @@ namespace
+ PS2Runtime::PS2Runtime()
+     : m_hostPresentation(std::make_unique<GSHostPresentation>())
+ {
++    // GOW-Port: main restores gow-native.boot before constructing the runtime. Static initialization is too early.
++    // Keep these flags per instance so constructing another runtime cannot change a running instance's call path.
++    const char *full = std::getenv("GOW_DISPATCH_FULL");
++    m_fullCallDispatch = (full && full[0] != '\0' && full[0] != '0') || std::getenv("PS2X_GS_WORKER_TRACE") != nullptr;
++    const char *watch = std::getenv("GOW_PERF_FRAME_PC");
++    m_callWatchPc = watch ? static_cast<uint32_t>(std::strtoul(watch, nullptr, 0)) : 0u;
++
+     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
+     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
+ 
+@@ -1509,18 +1516,8 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+     }
+ }
+ 
+-// gow-native-pc (patch 28): which static calls (callGuestFunction) take the full dispatch. GOW_DISPATCH_FULL=1 or
+-// PS2X_GS_WORKER_TRACE: all of them (the branch ring and the dispatch history then see every call again); otherwise the
+-// calls to GOW_PERF_FRAME_PC, the function ps2_perf::guestEntry counts as guest frames (about 60 calls a second).
++// GOW-Port: the lean path and full dispatcher must charge the same scheduler budget.
+ static_assert(PS2Runtime::kStaticCallCycles == EeScheduler::kGuestDispatchCycles);
+-bool g_ps2FullCallDispatch = [] {
+-    const char *full = std::getenv("GOW_DISPATCH_FULL");
+-    return (full && full[0] != '\0' && full[0] != '0') || std::getenv("PS2X_GS_WORKER_TRACE") != nullptr;
+-}();
+-uint32_t g_ps2CallWatchPc = [] {
+-    const char *value = std::getenv("GOW_PERF_FRAME_PC");
+-    return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
+-}();
+ 
+ // GOW-Port: PS2X_GS_WORKER_TRACE (dispatchGuestBranch)
+ namespace
+@@ -1530,15 +1527,21 @@ namespace
+         static const double from = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
+         return from;
+     }
++    const std::chrono::steady_clock::time_point &gsWorkerTraceStart()
++    {
++        static const auto start = std::chrono::steady_clock::now();
++        return start;
++    }
+     bool gsWorkerTraced(uint32_t targetPc)
+     {
++        // GOW-Port: start at the first dispatched call, including an unwatched one, as before patch 29.
++        (void)gsWorkerTraceStart();
+         return gsWorkerTraceFrom() >= 0.0 && (targetPc == 0x1837B8u || targetPc == 0x183878u || targetPc == 0x13F730u);
+     }
+     void gsWorkerTraceEvent(const char *what, uint32_t targetPc)
+     {
+-        static const auto traceStart = std::chrono::steady_clock::now();
+         const double from = gsWorkerTraceFrom();
+-        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count();
++        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - gsWorkerTraceStart()).count();
+         if (s >= from && s < from + 2.0)
+             std::fprintf(stderr, "[gsw-trace] %.0f %s 0x%X\n",
+                          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+@@ -1627,8 +1630,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     ps2_perf::guestEntry(targetPc, rdram); // GOW-Port: también cuenta llamadas que no vuelven al dispatcher.
+     // GOW-Port: PS2X_GS_WORKER_TRACE=<s>: for 2 s after <s> s of uptime, host µs of vid::Flip (0x1837B8),
+     // vid::WaitForDMAComplete (0x183878) and 0x13F730 entry/return, to see the per-frame dependency chain.
+-    // gow-native-pc (patch 29): only looked at when g_ps2FullCallDispatch is set (PS2X_GS_WORKER_TRACE sets it).
+-    const bool traced = g_ps2FullCallDispatch && gsWorkerTraced(targetPc);
++    // GOW-Port: keep trace statics off the normal path; the constructor reads PS2X_GS_WORKER_TRACE after boot restore.
++    const bool traced = m_fullCallDispatch && gsWorkerTraced(targetPc);
+     if (traced) [[unlikely]]
+         gsWorkerTraceEvent("enter", targetPc);
+     targetFn(rdram, ctx, this);

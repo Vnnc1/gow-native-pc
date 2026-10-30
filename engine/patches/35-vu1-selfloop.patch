@@ -1,0 +1,120 @@
+Loop static self-branches in generated VU1 C++ (AOT and DLL); mirror direct self-body jumps in the x64 JIT.
+Complete exit/entry bookkeeping exactly once, including budget, stop and depth-limit exits.
+Keep generic chaining and interpreter fallbacks; no guest instruction or floating-point semantics change.
+No gameplay performance measurement is claimed by this patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 164163a..d87ec03 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -258,6 +258,12 @@ struct VU1NativeAccess
+     // indirect jump per block exit instead of one shared one in the dispatch loop). nullptr: the block returns
+     // next | kVu1nDone and runNative continues from there.
+     static VU1Interpreter::NativeState::Slot *chain(VU1NativeCtx &n, uint32_t next);
++    // Finishes the current block even on false: callers must not invoke chain again for the same exit.
++    static bool chainSelf(VU1NativeCtx &n, uint32_t selfPc)
++    {
++        const void *current = n.slot;
++        return chain(n, selfPc) == current;
++    }
+     // gow-native-pc: chain() for the x64 JIT (ps2_vu1_x64.inl): the next block's function, nullptr = return to runNative
+     static VU1NativeFn chainFn(VU1NativeCtx &n, uint32_t next);
+     static void callLower(VU1NativeCtx &n, uint32_t pc, uint32_t lower, uint32_t upper);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+index 07c550a..af19528 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -2263,6 +2263,7 @@ namespace vu1x
+         Ctx cx{a, E{a, avxEnabled()}, {}, workingClipOff};
+         const bool inl = inlineEnabled();
+         emitPrologue(a);
++        const size_t bodyStart = a.c.size();
+         std::vector<size_t> toRet;
+         bool branchInline = false;
+         const size_t count = blk.stmts.size();
+@@ -2346,6 +2347,14 @@ namespace vu1x
+             a.call(reinterpret_cast<const void *>(&VU1NativeAccess::chainFn));
+             a.testRaxRax();
+             const size_t noChain = a.jcc(CC_Z);
++            // Same block: chainFn has completed exit/entry bookkeeping once. Reuse the frame and jump to its body.
++            // lea rdx, [rip + block start] works before the code arena address is assigned.
++            a.b(0x48); a.b(0x8D); a.b(0x15);
++            a.d32(static_cast<uint32_t>(-static_cast<int32_t>(a.c.size() + 4u)));
++            a.b(0x48); a.b(0x39); a.b(0xD0); // cmp rax, rdx
++            const size_t otherBlock = a.jcc(CC_NZ);
++            a.patch(a.jmp(), bodyStart);
++            a.patch(otherBlock, a.c.size());
+             if (arenaSpan)
+             {
+                 // JIT code (in the reserved range): the same frame, ctx, VU state, data and constants; skip its prologue
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index 81809b0..80f686f 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -729,15 +729,29 @@ def gen_block(pc0, pairs, tail_out=None, entry=VF0_LANES, req_out=None):
+     if ebit:
+         lines.append(f"return kVu1nEnded | {end_pc}u;")
+         return lines
+-    # gow-native-pc: the block does runNative's exit / entry bookkeeping itself and jumps to its successor (VU1NativeAccess::
+-    # chain); a jump back to itself is the self-loop case
++    # gow-native-pc (patch 13/35): a self-loop block loops in place inside for (;;) so the compiler keeps VF/VI pointers
++    # and SSE constants in registers across iterations instead of making an indirect tail call on every vertex.
++    is_self_loop = False
+     if last_is_branch_block:
++        bl = pairs[n - 2][0]
++        bop = bl >> 25
++        btgt = ((pc0 + 8 * (n - 2)) + 8 + sx(bl, 11) * 8) & 0x3FFF
++        if bop not in (0x24, 0x25) and btgt == pc0:
++            is_self_loop = True
+         lines.append(f"const uint32_t next = taken ? target : {end_pc}u;")
+     else:
+         lines.append(f"const uint32_t next = {end_pc}u;")
++    if is_self_loop:
++        lines.append(f"if (next == 0x{pc0:x}u)")
++        lines.append("{")
++        lines.append(f"    if (VU1NativeAccess::chainSelf(n, 0x{pc0:x}u)) continue;")
++        lines.append("    return next | kVu1nDone;")
++        lines.append("}")
+     lines.append("if (auto *sl = VU1NativeAccess::chain(n, next))")
+     lines.append("    VU1N_MUSTTAIL return sl->fn(n);")
+     lines.append("return next | kVu1nDone;")
++    if is_self_loop:
++        lines = ["for (;;)", "{"] + ["    " + ln for ln in lines] + ["}"]
+     return lines
+ 
+ 
+diff --git a/tests/vu1_x64_fuzz_test.cpp b/tests/vu1_x64_fuzz_test.cpp
+index 3878d55..a9bc68b 100644
+--- a/tests/vu1_x64_fuzz_test.cpp
++++ b/tests/vu1_x64_fuzz_test.cpp
+@@ -132,6 +132,20 @@ struct Gen
+     std::vector<uint8_t> image(std::vector<uint32_t> &starts)
+     {
+         std::vector<uint8_t> code(PS2_VU1_CODE_SIZE);
++        // Deterministic self-loop for budget/depth exits and exact block-accounting comparisons.
++        if (std::getenv("GOW_FUZZ_SELFLOOP"))
++        {
++            const uint32_t loop[] = {
++                (0x40u << 25) | (1u << 16) | (1u << 11) | (1u << 6) | 0x32u, kNop, // IADDI vi1, vi1, 1
++                (0x20u << 25) | 0x7FEu, kNop, // B -2: back to entry
++                kLowerNop, kNop,
++                kLowerNop, kNop | kE,
++                kLowerNop, kNop,
++            };
++            std::memcpy(code.data(), loop, sizeof(loop));
++            starts.push_back(0u);
++            return code;
++        }
+         uint32_t p = 0;
+         while (p + 40u * 8u < PS2_VU1_CODE_SIZE && starts.size() < 24u)
+         {
+@@ -259,7 +273,8 @@ int main(int argc, char **argv)
+                 VU1Interpreter vu;
+                 vu.state() = init;
+                 vu.execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem, pc, init.top,
+-                           init.itop, 4096);
++                           init.itop, std::getenv("GOW_FUZZ_CYCLES") ?
++                               static_cast<uint32_t>(std::strtoul(std::getenv("GOW_FUZZ_CYCLES"), nullptr, 10)) : 4096u);
+                 if (t == 0)
+                     continue; // first pass: the background compiler sees the code here
+                 const VU1State &s = vu.state();

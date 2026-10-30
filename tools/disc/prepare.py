@@ -5,7 +5,8 @@ usage: python -I tools/disc/prepare.py --game <id> --data <data dir> <iso or ext
 Output (under <data>/<game>/):
   discs/<edition>/        each compatible disc extracted (iso_extract.py --layout) and normalised so the port runs it
                           on its own: IOP_MOD/ copies of the IRX modules; with no PART2.PAK the TOC's part-1 entries
-                          point at their part-0 copies; empty widescreen movies (.PSW) point at the 4:3 ones (.PSS)
+                          point at their part-0 copies; empty or profile-fingerprinted placeholder widescreen movies
+                          (.PSW) point at the 4:3 ones (.PSS)
   discs/<edition>-full/   a translation on top of an original disc of the same game when both were given: hard links to
                           the original (all its movies, widescreen included), the translation's text files placed past
                           the end of the disc, and the original executable with the translation's data changes (the
@@ -17,6 +18,7 @@ Discs whose executable is not the profile's game code are reported and skipped. 
 extracted disc (same image size and time) is kept.
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -86,7 +88,8 @@ def normalise(folder, prof):
     orig = os.path.join(folder, toc_name + '.orig')
     if not os.path.isfile(orig):
         shutil.copy2(os.path.join(folder, toc_name), orig)
-    raw = bytearray(open(orig, 'rb').read())
+    with open(orig, 'rb') as stream:
+        raw = bytearray(stream.read())
     toc = discfs.parse_toc(bytes(raw))
     notes = []
     part0 = {}
@@ -102,17 +105,32 @@ def normalise(folder, prof):
                 moved += 1
         notes.append(f'no {paks[1]}: {moved} TOC entries moved to their {paks[0]} copies')
     wide, movie = d.get('widescreen_movie_ext'), d.get('movie_ext')
+    placeholders = d.get('widescreen_placeholders', [])
+
+    def is_placeholder(part, size, sector):
+        candidates = {item['sha256'] for item in placeholders if item['size'] == size}
+        if not candidates or not 0 <= part < len(paks):
+            return False
+        path = os.path.join(folder, paks[part])
+        if not os.path.isfile(path):
+            return False
+        with open(path, 'rb') as stream:
+            stream.seek(sector * SECTOR)
+            payload = stream.read(size)
+        return len(payload) == size and hashlib.sha256(payload).hexdigest() in candidates
+
     if wide and movie:
         mapped = 0
         for i, name, part, size, sector in toc:
-            if name.endswith(wide) and size <= SECTOR:
+            if name.endswith(wide) and (size <= SECTOR or is_placeholder(part, size, sector)):
                 base = name[:-len(wide)] + movie
-                if base in part0:
+                if base in part0 and part0[base][0] > size:
                     struct.pack_into('<III', raw, i + 12, 0, *part0[base])
                     mapped += 1
         if mapped:
-            notes.append(f'{mapped} empty widescreen movies ({wide}) mapped to {movie}')
-    open(os.path.join(folder, toc_name), 'wb').write(raw)
+            notes.append(f'{mapped} empty/known-placeholder widescreen movies ({wide}) mapped to {movie}')
+    with open(os.path.join(folder, toc_name), 'wb') as stream:
+        stream.write(raw)
     return notes
 
 

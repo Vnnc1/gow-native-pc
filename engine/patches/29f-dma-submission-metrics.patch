@@ -1,0 +1,91 @@
+Count native DMA submissions exactly once.
+
+Count VIF/GIF submissions at sendDma/sendDmaChain, including empty submissions,
+and scratchpad submissions at their MMIO handler. Previously nonempty MMIO
+VIF/GIF transfers incremented both eeDmaStore and deliverDma, while empty HLE
+submissions were omitted. Test direct, empty, chain, MMIO and scratchpad paths
+and reinitialization. Counter accuracy fix; no measured FPS improvement claimed.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1488,7 +1488,6 @@
+             return true;
+         const uint32_t channelBase = address & 0xFFFFFF00u;
+         m_ioRegisters[address] = value & ~0x100u;
+-        m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+ 
+         // GOW-Port: PS2X_EE_WATCH_WORD also reports scratchpad DMAs that change the watched RAM word.
+         static const uint32_t watchWord = [] {
+@@ -1500,6 +1499,7 @@
+             std::memcpy(&watchBefore, m_rdram + watchWord, 4);
+         if (tryProcessScratchpadDma(channelBase, value))
+         {
++            m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+             if (watchWord)
+             {
+                 uint32_t watchAfter;
+@@ -1839,6 +1839,8 @@
+ 
+ void PS2Memory::sendDma(DmaPath path, uint32_t address, uint32_t qwc)
+ {
++    // Count submissions once, including empty transfers and direct HLE calls.
++    m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     std::vector<uint8_t> bytes = takeDmaBuffer();
+     appendGuestBytes(address, qwc * 16u, bytes);
+     deliverDma(path, std::move(bytes));
+@@ -1849,6 +1851,7 @@
+ // tag's upper half, which go to the VIF before the tag's data. An IRQ tag ends the list (sceDmaSend sets TIE).
+ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+ {
++    m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     static constexpr int kMaxTags = 1 << 20;
+     const uint32_t chcr = path == DmaPath::Vif0 ? 0x10008000u : path == DmaPath::Vif1 ? 0x10009000u : 0x1000A000u;
+     const auto config = m_ioRegisters.find(chcr);
+@@ -1959,7 +1962,6 @@
+         returnDmaBuffer(std::move(bytes));
+         return;
+     }
+-    m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     const uint32_t size = static_cast<uint32_t>(bytes.size());
+     if (path == DmaPath::Vif0)
+     {
+--- a/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2226,6 +2226,37 @@
+             t.IsTrue(mem.consumeCompletedDmacCauses().empty(), "completion cannot be consumed twice");
+         });
+ 
++        tc.Run("native DMA counters count each submitted operation once", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "initialize memory");
++            using Path = PS2Memory::DmaPath;
++            // Zeroed VIF words are NOPs; GIF delivery is captured without a renderer.
++            uint32_t delivered = 0;
++            mem.setGifPacketCallback([&](const uint8_t *, uint32_t) { ++delivered; });
++            for (const auto path : {Path::Vif0, Path::Vif1, Path::Gif})
++            {
++                const uint64_t before = mem.dmaStartCount();
++                mem.sendDma(path, 0x28000u, 1u);
++                mem.sendDma(path, 0x28000u, 0u);
++                writeDmaTag(mem.getRDRAM(), 0x28000u, makeDmaTag(0u, 7u, 0u, false));
++                mem.sendDmaChain(path, 0x28000u);
++                t.Equals(mem.dmaStartCount(), before + 3u, "flat, empty flat and empty chain each count once");
++                std::memset(mem.getRDRAM() + 0x28000u, 0, 16u);
++            }
++            t.Equals(delivered, 1u, "empty submissions do not deliver payloads");
++            for (const uint32_t channel : {0x10008000u, 0x10009000u, 0x1000A000u, 0x1000D000u, 0x1000D400u})
++            {
++                const uint64_t before = mem.dmaStartCount();
++                mem.writeIORegister(channel + 0x10u, 0x28000u);
++                mem.writeIORegister(channel + 0x20u, 1u);
++                mem.writeIORegister(channel, 0x100u);
++                t.Equals(mem.dmaStartCount(), before + 1u, "MMIO submission counts once including scratchpad");
++            }
++            t.IsTrue(mem.initialize(), "memory can be reinitialized");
++            t.Equals(mem.dmaStartCount(), 0ull, "reinitialization clears the diagnostic counter");
++        });
++
+         tc.Run("sceDmaReset clears the native DMA environment", [](TestCase &t)
+         {
+             PS2Runtime runtime; t.IsTrue(runtime.memory().initialize(), "initialize memory");

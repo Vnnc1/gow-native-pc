@@ -1,0 +1,621 @@
+Restore the memory suite against the pinned native DMA and GPU contracts.
+
+Use immediate DMA submission/completion queues instead of the removed DMAC pump,
+D_STAT emulation and CPU rasterizer. Exercise real GSTextureStore uploads/CLUTs
+without a GL context; compare decoded primitive state and vertices at submission.
+Keep scratchpad completion and submission-count assertions: they expose real bugs
+fixed by the following patches. No performance improvement claimed.
+
+--- a/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
+@@ -7,6 +7,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "Stubs/DMA.h"
+ #include "Stubs/GS.h"
++#include "gs/gpu/gs_texture_store.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -16,6 +17,41 @@
+ 
+ namespace
+ {
++    // Test the real upload/CLUT store without a GL context or the removed CPU rasterizer.
++    // Primitive submission is observed at the backend boundary, not fabricated as CPU pixels.
++    class MemoryTestBackend final : public GSRasterBackend
++    {
++    public:
++        GSTextureStore store;
++        std::vector<GSPrimitiveBatch> batches;
++        void Initialize(uint8_t *vram, uint32_t size) override { store.Initialize(vram, size); }
++        void Reset() override { store.Reset(); batches.clear(); }
++        void Submit(const GSPrimitiveBatch &batch) override { batches.push_back(batch); }
++        void LoadClut(const GSTex0Reg &tex, const GSTexClutReg &clut) override { store.LoadClut(tex, clut); }
++        void BeginTransfer(const GSTransferCommand &command) override { store.BeginTransfer(command); }
++        void UploadImage(const uint8_t *data, uint32_t size) override { store.Upload(data, size); }
++        void Flush() override {}
++        void TextureFlush() override {}
++        void Sync(GSSyncReason) override {}
++        PresentationFrame Present(const GSPresentationRequest &) override { return {}; }
++        bool ClearFramebuffer(const GSContext &, uint32_t) override { return false; }
++        uint32_t ConsumeLocalToHostBytes(uint8_t *, uint32_t) override { return 0; }
++        uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const override { return store.Read(psm, base, bw, x, y); }
++        void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value) override { store.Write(psm, base, bw, x, y, value); }
++        void SnapshotVram(std::vector<uint8_t> &out) const override { store.Snapshot(out); }
++        GSTransferSnapshot GetTransferSnapshot() const override { return store.TransferState(); }
++    };
++    class MemoryTestGS : public GS
++    {
++    public:
++        MemoryTestBackend *sink;
++        MemoryTestGS() {
++            auto backend = std::make_unique<MemoryTestBackend>();
++            sink = backend.get();
++            setRasterBackend(std::move(backend));
++        }
++    };
++
+     uint32_t makeVifCmd(uint8_t opcode, uint8_t num, uint16_t imm)
+     {
+         return (static_cast<uint32_t>(opcode) << 24) |
+@@ -996,7 +1032,7 @@
+                      "GIF_STAT should mirror GIF_MODE and GIF_CTRL status bits");
+         });
+ 
+-        tc.Run("GIF_STAT exposes synchronously drained DMA occupancy for one EE quantum", [](TestCase &t)
++        tc.Run("GIF_STAT reports no occupancy after synchronous native DMA", [](TestCase &t)
+         {
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+@@ -1013,13 +1049,13 @@
+                      "start GIF normal DMA should succeed");
+ 
+             const uint32_t visibleFqc = (mem.readIORegister(0x10003020u) >> 24u) & 0x1Fu;
+-            t.Equals(visibleFqc, 1u,
+-                     "a synchronously consumed qword should remain observable through GIF_STAT.FQC");
++            t.Equals(visibleFqc, 0u,
++                     "synchronously delivered bytes do not leave an emulated FIFO entry");
+ 
+             mem.advanceEeTimers(1u);
+             const uint32_t drainedFqc = (mem.readIORegister(0x10003020u) >> 24u) & 0x1Fu;
+             t.Equals(drainedFqc, 0u,
+-                     "the synthetic FIFO observation should expire at the next EE scheduling boundary");
++                     "the drained native path remains empty after scheduler advancement");
+         });
+ 
+         tc.Run("PATH3 mask queues packets until unmask", [](TestCase &t)
+@@ -1148,7 +1184,7 @@
+ 
+             t.Equals(mem.dmaStartCount(), 1ull, "starting GIF DMA should increment dmaStartCount");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "GIF DMA should emit one packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(kQwc * 16u), "GIF packet size should match QWC");
+@@ -1166,7 +1202,7 @@
+             t.IsTrue(mem.hasSeenGifCopy(), "GIF DMA should mark seen GIF copy");
+             t.Equals(mem.gifCopyCount(), 1ull, "GIF DMA should increment gifCopyCount");
+             t.IsTrue((mem.readIORegister(kGifCh + 0x00u) & 0x100u) == 0u, "GIF CHCR STR bit should be cleared after drain");
+-            t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "GIF QWC should be cleared after drain");
++            t.Equals(mem.readIORegister(kGifCh + 0x20u), kQwc, "native GIF submission preserves the latched QWC");
+         });
+ 
+         tc.Run("GIF DMA can source from scratchpad", [](TestCase &t)
+@@ -1194,7 +1230,7 @@
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, kQwc), "write QWC should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "scratchpad GIF DMA should emit one packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(16u), "scratchpad GIF DMA packet should be 16 bytes");
+@@ -1237,7 +1273,7 @@
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTagAlias), "write TADR scratchpad alias should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "scratchpad alias chain should emit one packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(16u), "scratchpad alias chain should emit one qword");
+@@ -1283,7 +1319,7 @@
+ 
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write TADR should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>((kCntTags + 1u) * 16u), "every tag's payload should be transferred");
+             uint32_t lastMarker = 0u;
+@@ -1294,12 +1330,12 @@
+             t.Equals(lastMarker, 0xE0D0E0D0u, "the END tag's payload should arrive last");
+         });
+ 
+-        tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
+-        {
+-            PS2Memory mem;
+-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+-
+-            GS gs;
++        tc.Run("native GIF DMA delivers canonical image uploads to the texture store", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++
++            MemoryTestGS gs;
+             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+ 
+             constexpr uint32_t kGifCh = 0x1000A000u;
+@@ -1320,18 +1356,18 @@
+             writeDmaTag(rdram, chain, makeDmaTag(0u, 7u, 0u, false)); // END.
+ 
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+-            t.IsTrue(mem.tryProcessNativeGifImageUploadChain(gs, kChain, 0x105u),
+-                     "canonical load-image chain should use the native upload path");
++            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t size) { gs.processGIFPacket(data, size); });
++            t.IsTrue(mem.writeIORegister(kGifCh, 0x105u), "CHCR starts the image chain");
+ 
+             t.Equals(gs.nativeImageUploadCount(), 1ull, "native GIF DMA chain should upload through GS fast path");
+             t.Equals(mem.gifCopyCount(), 1ull, "native GIF DMA chain should still count as a GIF DMA copy");
+-            t.IsTrue((mem.readIORegister(kDStat) & (1u << 2u)) != 0u,
+-                     "native GIF DMA chain should raise D_STAT GIF completion");
++            t.IsTrue(mem.consumeCompletedDmacCauses() == std::vector<uint32_t>{2u},
++                     "native GIF DMA completion queues cause 2 exactly once");
+             t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "native GIF DMA chain should clear GIF QWC");
+             t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x100u, 0u,
+                      "native GIF DMA chain should clear GIF STR");
+-            t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x70000000u, 0x70000000u,
+-                     "native GIF DMA chain should latch the terminal END tag id");
++            t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x70000000u, 0u,
++                     "native GIF delivery does not emulate terminal tag latching");
+ 
+             bool pixelsOk = true;
+             for (uint32_t x = 0; x < 4u && pixelsOk; ++x)
+@@ -1350,17 +1386,17 @@
+             t.IsTrue(pixelsOk, "native GIF DMA chain should upload image payload into GS VRAM");
+         });
+ 
+-        tc.Run("native GIF packed chain matches generic packed primitive packet", [](TestCase &t)
+-        {
+-            PS2Memory mem;
+-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+-
+-            GS nativeGs;
++        tc.Run("native GIF DMA primitive submission matches direct GIF decoding", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++
++            MemoryTestGS nativeGs;
+             nativeGs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+ 
+             GSRegisters genericRegs{};
+             std::vector<uint8_t> genericVram(PS2_GS_VRAM_SIZE, 0u);
+-            GS genericGs;
++            MemoryTestGS genericGs;
+             genericGs.init(genericVram.data(), static_cast<uint32_t>(genericVram.size()), &genericRegs);
+ 
+             std::vector<uint8_t> packet;
+@@ -1397,21 +1433,30 @@
+             std::memcpy(scratch + 16u, packet.data(), packet.size());
+ 
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kScratchTag), "write GIF TADR scratchpad alias should succeed");
+-            t.IsTrue(mem.tryProcessNativeGifPackedChain(nativeGs, kScratchTag, 0x105u),
+-                     "packed primitive chain should use the native packed GIF path");
+-
+-            t.Equals(nativeGs.nativePackedGIFPacketCount(), 1ull, "native packed GIF packet counter should increment");
++            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t size) { nativeGs.processGIFPacket(data, size); });
++            t.IsTrue(mem.writeIORegister(kGifCh, 0x105u), "CHCR starts the packed chain");
++
++            t.Equals(nativeGs.sink->batches.size(), size_t{1}, "the DMA packet should submit one primitive batch");
+             t.Equals(mem.gifCopyCount(), 1ull, "native packed GIF chain should still count as a GIF DMA copy");
+-            t.IsTrue((mem.readIORegister(kDStat) & (1u << 2u)) != 0u,
+-                     "native packed GIF chain should raise D_STAT GIF completion");
++            t.IsTrue(mem.consumeCompletedDmacCauses() == std::vector<uint32_t>{2u},
++                     "native packed GIF completion queues cause 2 exactly once");
+             t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "native packed GIF chain should clear GIF QWC");
+             t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x100u, 0u,
+                      "native packed GIF chain should clear GIF STR");
+ 
+-            const uint32_t nativePixel = nativeGs.ReadVram(GS_PSM_CT32, 0u, 1u, 1u, 1u);
+-            const uint32_t genericPixel = genericGs.ReadVram(GS_PSM_CT32, 0u, 1u, 1u, 1u);
+-            t.IsTrue(genericPixel != 0u, "generic packed primitive packet should draw a test pixel");
+-            t.Equals(nativePixel, genericPixel, "native packed GIF chain should match generic GS packet output");
++            const auto &a = nativeGs.sink->batches;
++            const auto &b = genericGs.sink->batches;
++            t.Equals(b.size(), size_t{1}, "direct decoding must submit a sprite");
++            if (a.size() == 1 && b.size() == 1) {
++                t.IsTrue(a[0].state == b[0].state, "DMA and direct draw state must match");
++                t.Equals(a[0].vertexCount, b[0].vertexCount, "vertex count must match");
++                for (size_t i = 0; i < a[0].vertexCount; ++i) {
++                    const auto &x = a[0].vertices[i], &y = b[0].vertices[i];
++                    t.IsTrue(x.x == y.x && x.y == y.y && x.z == y.z && x.r == y.r && x.g == y.g &&
++                             x.b == y.b && x.a == y.a && x.q == y.q && x.s == y.s && x.t == y.t &&
++                             x.u == y.u && x.v == y.v && x.fog == y.fog, "every submitted vertex attribute must match");
++                }
++            }
+         });
+ 
+         tc.Run("GIF DMA chain REF keeps CT32 image data after paletted upload", [](TestCase &t)
+@@ -1419,7 +1464,7 @@
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+ 
+-            GS gs;
++            MemoryTestGS gs;
+             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+             std::vector<uint8_t> capturedGifPacket;
+             mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+@@ -1477,7 +1522,7 @@
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write GIF CHCR STR|CHAIN should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             constexpr uint32_t kCt32PayloadOffset = 5u * 16u + 16u + kT4Bytes + 5u * 16u + 16u;
+             t.IsTrue(capturedGifPacket.size() >= kCt32PayloadOffset + kCt32Bytes,
+@@ -1550,7 +1595,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, kQwc), "write VIF1 QWC should succeed");
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR STR should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "VIF1 DIRECT should emit one GIF packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(16u), "VIF1 DIRECT packet should be 1 QW");
+@@ -1565,7 +1610,7 @@
+             }
+             t.IsTrue(contentOk, "VIF1 DIRECT packet bytes should match payload");
+             t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u, "VIF1 CHCR STR bit should be cleared after drain");
+-            t.Equals(mem.readIORegister(kVif1Ch + 0x20u), 0u, "VIF1 QWC should be cleared after drain");
++            t.Equals(mem.readIORegister(kVif1Ch + 0x20u), kQwc, "native VIF submission preserves the latched QWC");
+         });
+ 
+         tc.Run("VIF1 DMA chain preserves compact tag high bytes for DIRECT packets", [](TestCase &t)
+@@ -1600,7 +1645,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                      "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "compact VIF1 chain should emit one GIF packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(16u), "compact VIF1 DIRECT packet should be 1 QW");
+@@ -1640,7 +1685,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                      "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(mem.vif1_regs.itops, 0x44u,
+                      "qwc-zero compact VIF1 chain should still process high-half VIFcodes");
+@@ -1681,7 +1726,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                      "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u),
+                      "REF tag high-half DIRECT should emit one GIF packet");
+@@ -1720,7 +1765,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u),
+                      "write VIF1 CHCR STR|CHAIN without TTE should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(mem.vif1_regs.itops, 0u,
+                      "tag high-half VIFcodes must stay hidden when CHCR.TTE is clear");
+@@ -1781,7 +1826,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                      "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "live VIF1 packet should emit one GIF packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(16u), "live VIF1 packet should emit one qword");
+@@ -1798,7 +1843,7 @@
+             t.IsTrue(payloadOk, "live VIF1 packet payload should reach the GIF callback");
+         });
+ 
+-        tc.Run("VIF1 DMA chain latches terminal tag bits in CHCR", [](TestCase &t)
++        tc.Run("VIF1 native DMA chain preserves configuration and queues completion", [](TestCase &t)
+         {
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+@@ -1815,12 +1860,14 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x185u), "write VIF1 CHCR chain start should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             const uint32_t chcr = mem.readIORegister(kVif1Ch + 0x00u);
+             t.Equals(chcr & 0x100u, 0u, "VIF1 STR should clear after DMA chain drain");
+-            t.Equals(chcr & 0x70000000u, 0x70000000u, "VIF1 CHCR should expose the terminal END tag id");
+-            t.IsTrue((mem.readIORegister(0x1000E010u) & 0x2u) != 0u, "VIF1 DMA completion should raise D_STAT channel bit");
++            t.Equals(chcr, 0x85u, "native completion preserves configuration without latching a terminal tag");
++            t.IsTrue(mem.consumeCompletedDmacCauses() == std::vector<uint32_t>{1u},
++                     "VIF1 completion is delivered once through the native queue");
++            t.IsTrue(mem.consumeCompletedDmacCauses().empty(), "completion is consumed once");
+         });
+ 
+         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)
+@@ -1855,7 +1902,7 @@
+             // STR + CHAIN mode (MOD=1)
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "chain CALL should emit one packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(32u), "CALL+END should emit two qwords");
+@@ -1908,7 +1955,7 @@
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTagCall), "write TADR should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             t.Equals(captured.size(), static_cast<size_t>(1u), "CALL/RET chain should emit one packet");
+             t.Equals(captured[0].size(), static_cast<size_t>(48u), "CALL+RET+END should emit three qwords");
+@@ -1930,7 +1977,7 @@
+             t.IsTrue(q2, "RET must resume after CALL payload and continue chain");
+         });
+ 
+-        tc.Run("GIF DMA chain IRQ stops only when TIE is set", [](TestCase &t)
++        tc.Run("native GIF DMA chain treats IRQ as a submission terminator", [](TestCase &t)
+         {
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+@@ -1961,7 +2008,7 @@
+                     return false;
+                 if (!mem.writeIORegister(kGifCh + 0x00u, chcrValue))
+                     return false;
+-                mem.processPendingTransfers();
++                // Native DMA completes at the CHCR store; no deferred transfer pump.
+                 if (captured.empty())
+                     return false;
+                 packetOut = captured[0];
+@@ -1970,7 +2017,7 @@
+ 
+             std::vector<uint8_t> packetNoTie;
+             t.IsTrue(runChain(0x104u, packetNoTie), "chain run without TIE should succeed");
+-            t.Equals(packetNoTie.size(), static_cast<size_t>(32u), "IRQ tag should not stop chain when TIE is clear");
++            t.Equals(packetNoTie.size(), static_cast<size_t>(16u), "native source chains stop at IRQ without a hardware TIE gate");
+ 
+             std::vector<uint8_t> packetTie;
+             // STR + CHAIN + TIE(bit7)
+@@ -1978,50 +2025,21 @@
+             t.Equals(packetTie.size(), static_cast<size_t>(16u), "IRQ tag should stop chain when TIE is set");
+         });
+ 
+-        tc.Run("DMAC D_STAT toggles masks and clears channel status on write-one", [](TestCase &t)
+-        {
+-            PS2Memory mem;
+-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+-
+-            constexpr uint32_t kDStat = 0x1000E010u;
+-            constexpr uint32_t kGifMaskBit = (1u << 18); // channel 2 mask
+-            constexpr uint32_t kGifStatusBit = (1u << 2); // channel 2 status
+-            constexpr uint32_t kSummaryBit = (1u << 31);
+-
+-            t.IsTrue(mem.writeIORegister(kDStat, kGifMaskBit), "D_STAT mask toggle write should succeed");
+-            t.IsTrue((mem.readIORegister(kDStat) & kGifMaskBit) != 0u, "first mask write should enable GIF mask bit");
+-            t.IsTrue(mem.writeIORegister(kDStat, kGifMaskBit), "D_STAT mask toggle write should succeed");
+-            t.IsTrue((mem.readIORegister(kDStat) & kGifMaskBit) == 0u, "second mask write should disable GIF mask bit");
+-
+-            t.IsTrue(mem.writeIORegister(kDStat, kGifMaskBit), "re-enable GIF mask for summary test");
+-
+-            constexpr uint32_t kGifCh = 0x1000A000u;
+-            constexpr uint32_t kSrc = 0x00027000u;
+-            uint8_t *rdram = mem.getRDRAM();
+-            for (uint32_t i = 0; i < 16u; ++i)
+-            {
+-                rdram[kSrc + i] = static_cast<uint8_t>(0x90u + i);
+-            }
+-
+-            t.IsTrue(mem.writeIORegister(kGifCh + 0x10u, kSrc), "write MADR should succeed");
+-            t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, 1u), "write QWC should succeed");
+-            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR should succeed");
+-
+-            t.IsTrue((mem.readIORegister(kDStat) & kGifStatusBit) == 0u, "D_STAT status should not set before transfer drain");
+-
+-            mem.processPendingTransfers();
+-
+-            const uint32_t dstatAfter = mem.readIORegister(kDStat);
+-            t.IsTrue((dstatAfter & kGifStatusBit) != 0u, "GIF transfer completion should set D_STAT channel status bit");
+-            t.IsTrue((dstatAfter & kSummaryBit) != 0u, "status&mask should raise D_STAT summary bit");
+-
+-            t.IsTrue(mem.writeIORegister(kDStat, kGifStatusBit), "D_STAT status clear write should succeed");
+-            const uint32_t dstatCleared = mem.readIORegister(kDStat);
+-            t.IsTrue((dstatCleared & kGifStatusBit) == 0u, "write-one should clear GIF channel status bit");
+-            t.IsTrue((dstatCleared & kSummaryBit) == 0u, "summary bit should clear after status clear");
+-        });
+-
+-        tc.Run("DMAC D_CTRL DMAE gates GIF DMA start", [](TestCase &t)
++        tc.Run("native DMA completion queue replaces D_STAT emulation", [](TestCase &t)
++        {
++            PS2Memory mem; t.IsTrue(mem.initialize(), "initialize memory");
++            mem.writeIORegister(0x1000E010u, 0xffffffffu);
++            t.Equals(mem.readIORegister(0x1000E010u), 0u, "D_STAT writes do not emulate masks or status");
++            mem.setGifPacketCallback([](const uint8_t *, uint32_t) {});
++            mem.writeIORegister(0x1000A010u, 0x27000u);
++            mem.writeIORegister(0x1000A020u, 1u);
++            mem.writeIORegister(0x1000A000u, 0x100u);
++            t.IsTrue(mem.consumeCompletedDmacCauses() == std::vector<uint32_t>{2u}, "GIF completion queues cause 2");
++            t.IsTrue(mem.consumeCompletedDmacCauses().empty(), "consuming completions removes them");
++            t.Equals(mem.readIORegister(0x1000E010u), 0u, "completion does not recreate the removed D_STAT model");
++        });
++
++        tc.Run("native DMA submissions do not depend on emulated D_CTRL DMAE", [](TestCase &t)
+         {
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+@@ -2046,16 +2064,16 @@
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x10u, kSrc), "write MADR should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, 1u), "write QWC should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR should succeed");
+-            mem.processPendingTransfers();
+-
+-            t.Equals(captured.size(), static_cast<size_t>(0u), "DMAE=0 should prevent GIF DMA transfer");
+-            t.Equals(mem.dmaStartCount(), 0ull, "DMAE=0 should not increment dmaStartCount");
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
++
++            t.Equals(captured.size(), static_cast<size_t>(1u), "native submission runs with DMAE=0");
++            t.Equals(mem.dmaStartCount(), 1ull, "one native submission is counted");
+ 
+             t.IsTrue(mem.writeIORegister(kDctrl, 1u), "setting D_CTRL.DMAE should succeed");
+             t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "restarting GIF DMA should succeed");
+-            mem.processPendingTransfers();
+-
+-            t.Equals(captured.size(), static_cast<size_t>(1u), "DMAE=1 should allow GIF DMA transfer");
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
++
++            t.Equals(captured.size(), static_cast<size_t>(2u), "changing DMAE does not change native submission");
+             if (!captured.empty())
+             {
+                 t.Equals(captured[0].size(), static_cast<size_t>(16u), "GIF DMA transfer should emit one qword");
+@@ -2089,7 +2107,7 @@
+             t.Equals(mem.readIORegister(kChannel + 0x20u), 0u, "SPR_FROM completion should consume QWC");
+             t.Equals(mem.readIORegister(kChannel + 0x10u), kMadr + kBytes, "SPR_FROM should advance MADR");
+             t.Equals(mem.readIORegister(kChannel + 0x80u), (kSadr + kBytes) & 0x3FFFu, "SPR_FROM should advance SADR");
+-            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 8u)) != 0u, "SPR_FROM should raise D_STAT channel 8");
++            t.IsTrue(mem.readIORegister(0x1000E010u) == 0u, "SPR_FROM completion uses the native queue, not D_STAT");
+ 
+             const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+             t.Equals(causes.size(), static_cast<size_t>(1u), "SPR_FROM should queue one DMAC completion");
+@@ -2122,7 +2140,7 @@
+             t.IsTrue(copied, "SPR_TO should copy every qword from RDRAM to scratchpad");
+             t.IsTrue((mem.readIORegister(kChannel + 0x00u) & 0x100u) == 0u, "SPR_TO completion should clear CHCR.STR");
+             t.Equals(mem.readIORegister(kChannel + 0x20u), 0u, "SPR_TO completion should consume QWC");
+-            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 9u)) != 0u, "SPR_TO should raise D_STAT channel 9");
++            t.IsTrue(mem.readIORegister(0x1000E010u) == 0u, "SPR_TO completion uses the native queue, not D_STAT");
+ 
+             const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+             t.Equals(causes.size(), static_cast<size_t>(1u), "SPR_TO should queue one DMAC completion");
+@@ -2202,36 +2220,25 @@
+             t.Equals(causes.size(), static_cast<size_t>(1u), "SPR_TO chain should queue one completion");
+         });
+ 
+-        tc.Run("sceDmaReset re-enables DMAC DMAE", [](TestCase &t)
+-        {
+-            PS2Runtime runtime;
+-            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+-
+-            constexpr uint32_t kDctrl = 0x1000E000u;
+-            constexpr uint32_t kDpcr = 0x1000E020u;
+-            constexpr uint32_t kDsqwc = 0x1000E030u;
+-            constexpr uint32_t kDrbor = 0x1000E050u;
+-            constexpr uint32_t kDrbsr = 0x1000E040u;
+-            constexpr uint32_t kDstadr = 0x1000E060u;
+-
+-            PS2Memory &mem = runtime.memory();
+-            t.IsTrue(mem.writeIORegister(kDctrl, 0u), "clearing D_CTRL should succeed");
+-            t.IsTrue(mem.writeIORegister(kDpcr, 0x12345678u), "writing D_PCR should succeed");
+-            t.IsTrue(mem.writeIORegister(kDsqwc, 0x11220044u), "writing D_SQWC should succeed");
+-            t.IsTrue(mem.writeIORegister(kDrbor, 0x2000u), "writing D_RBOR should succeed");
+-            t.IsTrue(mem.writeIORegister(kDrbsr, 0x3FFFu), "writing D_RBSR should succeed");
+-            t.IsTrue(mem.writeIORegister(kDstadr, 0x4567u), "writing D_STADR should succeed");
+-
+-            R5900Context ctx{};
+-            ps2_stubs::sceDmaReset(mem.getRDRAM(), &ctx, &runtime);
+-
+-            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0, "sceDmaReset should return 0");
+-            t.Equals(mem.readIORegister(kDctrl), 1u, "sceDmaReset should leave D_CTRL DMAE enabled");
+-            t.Equals(mem.readIORegister(kDpcr), 0u, "sceDmaReset should clear D_PCR");
+-            t.Equals(mem.readIORegister(kDsqwc), 0u, "sceDmaReset should clear D_SQWC");
+-            t.Equals(mem.readIORegister(kDrbor), 0u, "sceDmaReset should clear D_RBOR");
+-            t.Equals(mem.readIORegister(kDrbsr), 0u, "sceDmaReset should clear D_RBSR");
+-            t.Equals(mem.readIORegister(kDstadr), 0u, "sceDmaReset should clear D_STADR");
++        tc.Run("sceDmaReset clears the native DMA environment", [](TestCase &t)
++        {
++            PS2Runtime runtime; t.IsTrue(runtime.memory().initialize(), "initialize memory");
++            auto *ram = runtime.memory().getRDRAM();
++            constexpr uint32_t env = 0x28000u;
++            std::memset(ram + env, 0, 20);
++            const uint32_t pcr = 0x12345678u;
++            std::memcpy(ram + env + 4, &pcr, sizeof(pcr));
++            R5900Context ctx{}; setRegU32(ctx, 4, env);
++            ps2_stubs::sceDmaPutEnv(ram, &ctx, &runtime);
++            std::memset(ram + env, 0, 20);
++            ps2_stubs::sceDmaGetEnv(ram, &ctx, &runtime);
++            uint32_t returned = 0; std::memcpy(&returned, ram + env + 4, sizeof(returned));
++            t.Equals(returned, pcr, "native environment round-trips before reset");
++            ps2_stubs::sceDmaReset(ram, &ctx, &runtime);
++            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0, "reset succeeds");
++            std::memset(ram + env, 0xff, 20); setRegU32(ctx, 4, env);
++            ps2_stubs::sceDmaGetEnv(ram, &ctx, &runtime);
++            t.IsTrue(std::all_of(ram + env, ram + env + 20, [](uint8_t b) { return b == 0; }), "reset clears every environment byte");
+         });
+ 
+         tc.Run("sceDmaSend preserves guest-configured VIF1 TTE", [](TestCase &t)
+@@ -2271,7 +2278,7 @@
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+ 
+-            GS gs;
++            MemoryTestGS gs;
+             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+             GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
+             {
+@@ -2315,7 +2322,7 @@
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, kQwc), "write VIF1 QWC should succeed");
+             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR STR should succeed");
+ 
+-            mem.processPendingTransfers();
++            // Native DMA completes at the CHCR store; no deferred transfer pump.
+ 
+             const uint8_t *vramOut = mem.getGSVRAM();
+             bool imageOk = true;
+@@ -2341,7 +2348,7 @@
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+ 
+-            GS gs;
++            MemoryTestGS gs;
+             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+             GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
+             {
+@@ -2398,7 +2405,7 @@
+         tc.Run("VIF1 DIRECT preserves a PACKED tag across separate commands and MARK", [](TestCase &t)
+         {
+             PS2Memory mem; t.IsTrue(mem.initialize(),"Inicializar memoria");
+-            GS gs; gs.init(mem.getGSVRAM(),static_cast<uint32_t>(PS2_GS_VRAM_SIZE),&mem.gs());
++            MemoryTestGS gs; gs.init(mem.getGSVRAM(),static_cast<uint32_t>(PS2_GS_VRAM_SIZE),&mem.gs());
+             GifArbiter arbiter;
+             std::vector<GifPathId> paths;
+             arbiter.setProcessPathPacketFn([&](GifPathId path,const uint8_t *data,uint32_t size) {
+@@ -2426,7 +2433,7 @@
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+ 
+-            GS gs;
++            MemoryTestGS gs;
+             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+             GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
+             {
+@@ -2484,7 +2491,7 @@
+             {
+                 PS2Memory mem;
+                 t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+-                GS gs;
++                MemoryTestGS gs;
+                 gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+                 std::vector<std::vector<uint8_t>> delivered;
+                 GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
+@@ -2644,7 +2651,7 @@
+         {
+             PS2Memory mem;
+             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+-            GS gs;
++            MemoryTestGS gs;
+             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+             mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes) { gs.processGIFPacket(data, sizeBytes); });
+             gs.writeRegister(GS_REG_BITBLTBUF, makeBitbltbuf(0u, 1u, 0u));

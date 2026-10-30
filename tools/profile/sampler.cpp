@@ -2,10 +2,11 @@
 // reads its instruction pointer and resumes it; at the end it resolves the addresses with the executable's PDB
 // (build with build.cmd -Pdb) and prints, per thread, the functions where the samples landed (self time).
 //
-// build (Developer prompt): cl /O2 /EHsc /std:c++20 sampler.cpp dbghelp.lib
+// build (pinned llvm-mingw bin on PATH): clang++ -O2 -std=c++20 -static tools/profile/sampler.cpp -ldbghelp -lwinmm -o sampler.exe
 // usage: sampler.exe <pid | exe name> <seconds> [delay seconds] [top N]
 //        SAMPLER_LINES=<text>: also the source lines of the functions whose name contains <text>
 //        SAMPLER_STACKS=<frames>: also walk that many caller frames per sample and print the callers (inclusive)
+#define NOMINMAX
 #include <windows.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>

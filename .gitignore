@@ -2,6 +2,7 @@
 engine/runtime/
 data/
 launcher/build/
+launcher/build-clang/
 # never commit game files
 *.iso
 *.ISO

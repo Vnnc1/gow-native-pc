@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -56,8 +57,8 @@ namespace
     }
 }
 
-// build.ps1's compiler for this copy (data/toolchain.txt; clang when nothing was built yet)
-static QString toolchainOf(const QString &root)
+// Read legacy installations for playing until the next successful clang build.
+static QString installedToolchain(const QString &root)
 {
     QFile file(root + QStringLiteral("/data/toolchain.txt"));
     if (file.open(QIODevice::ReadOnly | QIODevice::Text) && QString::fromUtf8(file.readAll()).trimmed() == QStringLiteral("msvc"))
@@ -77,15 +78,23 @@ QString InstallerBackend::python() const
     return found.isEmpty() ? QStringLiteral("python") : found;
 }
 
-// every build tool build.ps1 downloads into data/_tools (see its "tools" stage): Git, Python, CMake, Ninja, and the clang
-// compiler unless this copy builds with MSVC
+// Read the same portable-tool manifest as the PowerShell pipeline.
 bool InstallerBackend::toolsReady() const
 {
-    const QString t = m_root + QStringLiteral("/data/_tools/");
-    for (const char *exe : {"mingit/cmd/git.exe", "python/python.exe", "cmake/cmake-3.31.12-windows-x86_64/bin/cmake.exe", "ninja/ninja.exe"})
-        if (!QFileInfo::exists(t + QLatin1String(exe)))
+    QFile manifest(m_root + QStringLiteral("/tools/pipeline/toolchains.json"));
+    if (!manifest.open(QIODevice::ReadOnly))
+        return false;
+    const auto tools = QJsonDocument::fromJson(manifest.readAll()).object().value(QStringLiteral("tools")).toObject();
+    if (tools.isEmpty())
+        return false;
+    for (auto it = tools.begin(); it != tools.end(); ++it) {
+        const auto tool = it.value().toObject();
+        const auto path = m_root + QStringLiteral("/data/_tools/") + tool.value(QStringLiteral("dir")).toString()
+            + QLatin1Char('/') + tool.value(QStringLiteral("exe")).toString();
+        if (!QFileInfo::exists(path))
             return false;
-    return toolchainOf(m_root) == QStringLiteral("msvc") || QFileInfo::exists(t + QStringLiteral("llvm-mingw-20261020-ucrt-x86_64/bin/clang++.exe"));
+    }
+    return true;
 }
 
 // the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders), chosen
@@ -107,20 +116,32 @@ QString InstallerBackend::runnerPath() const
 {
     // clang builds go to <build root>-clang (build.ps1)
     QString folder = buildRoot();
-    if (toolchainOf(m_root) == QStringLiteral("clang"))
+    if (installedToolchain(m_root) == QStringLiteral("clang"))
         folder += QStringLiteral("-clang");
+    // A fresh installation must not reuse the default build folder of another repository copy.
+    QFile cache(folder + QStringLiteral("/CMakeCache.txt"));
+    if (!cache.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
+    QString source;
+    const QByteArray prefix("CMAKE_HOME_DIRECTORY:INTERNAL=");
+    while (!cache.atEnd())
+    {
+        const QByteArray line = cache.readLine().trimmed();
+        if (line.startsWith(prefix))
+            source = QDir::cleanPath(QDir::fromNativeSeparators(QString::fromUtf8(line.mid(prefix.size()))));
+    }
+    const QString expected = QDir::cleanPath(m_root + QStringLiteral("/engine/runtime/PS2Recomp"));
+    if (source.compare(expected, Qt::CaseInsensitive) != 0)
+        return {};
     const QString exe = folder + QStringLiteral("/ps2xRuntime/ps2EntryRunner.exe");
     return QFileInfo::exists(exe) ? exe : QString();
 }
 
 QVariantMap InstallerBackend::environment() const
 {
-    const QString vswhere = qEnvironmentVariable("ProgramFiles(x86)") + QStringLiteral("/Microsoft Visual Studio/Installer/vswhere.exe");
     const QString runtimeDir = m_root + QStringLiteral("/engine/runtime");
     return {
-        // the build tools are downloaded by the pipeline (stage "tools"); only a copy switched to MSVC needs the Build Tools
         {QStringLiteral("tools"), toolsReady()},
-        {QStringLiteral("buildTools"), toolchainOf(m_root) == QStringLiteral("clang") || QFileInfo::exists(vswhere)},
         {QStringLiteral("runtime"), QFileInfo::exists(runtimeDir + QStringLiteral("/PS2Recomp/CMakeLists.txt"))},
         {QStringLiteral("game"), !runnerPath().isEmpty()},
         {QStringLiteral("discs"), !languages().isEmpty()},
@@ -128,6 +149,37 @@ QVariantMap InstallerBackend::environment() const
         {QStringLiteral("runner"), runnerPath()},
         {QStringLiteral("dataDir"), m_root + QStringLiteral("/data")},
     };
+}
+
+QString InstallerBackend::diagnosticsFramePc() const
+{
+    // A line scan is enough for this one key: game.toml is written by hand, `frame_pc = "0x..."` under [diagnostics].
+    QFile file(m_root + QStringLiteral("/games/") + m_game + QStringLiteral("/game.toml"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
+    bool inSection = false;
+    for (const QByteArray &raw : file.readAll().split('\n'))
+    {
+        const QString line = QString::fromUtf8(raw).section(QLatin1Char('#'), 0, 0).trimmed();
+        if (line.startsWith(QLatin1Char('[')))
+            inSection = line == QStringLiteral("[diagnostics]");
+        else if (inSection && line.section(QLatin1Char('='), 0, 0).trimmed() == QStringLiteral("frame_pc"))
+        {
+            QString value = line.section(QLatin1Char('='), 1).trimmed();
+            value.remove(QLatin1Char('"'));
+            bool ok = false;
+            value.toUInt(&ok, 0);
+            return ok ? value : QString();
+        }
+    }
+    return {};
+}
+
+void InstallerBackend::openRunnerFolder() const
+{
+    const QString runner = runnerPath();
+    if (!runner.isEmpty())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(runner).absolutePath()));
 }
 
 QVariantList InstallerBackend::languages() const
@@ -146,6 +198,25 @@ QVariantList InstallerBackend::languages() const
 bool InstallerBackend::firstPlayPrepared() const
 {
     return QFileInfo::exists(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/native.stamp"));
+}
+
+bool InstallerBackend::hasPendingNativeCode() const
+{
+    const QString base = m_root + QStringLiteral("/data/") + m_game;
+    const QDateTime built = QFileInfo(base + QStringLiteral("/native.stamp")).lastModified();
+    const QDir captures(base + QStringLiteral("/vu1_capture"));
+    for (const QFileInfo &file : captures.entryInfoList({QStringLiteral("*.bin"), QStringLiteral("vu1n_heads_seen.txt")}, QDir::Files))
+        if (!built.isValid() || file.lastModified() > built)
+            return true;
+    return false;
+}
+
+QVariantMap InstallerBackend::discScanReport() const
+{
+    QFile file(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/vu1_capture/disc-report.json"));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return QJsonDocument::fromJson(file.readAll()).object().toVariantMap();
 }
 
 QStringList InstallerBackend::loadingArt() const
@@ -193,23 +264,33 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
         args << QStringLiteral("-Discs") << isos.join(QLatin1Char('|'));
     const QString config = options.value(QStringLiteral("config"), QStringLiteral("Release")).toString();
     args << QStringLiteral("-Config") << config;
+    args << QStringLiteral("-Toolchain") << QStringLiteral("clang");
     if (options.value(QStringLiteral("ltcg")).toBool())
         args << QStringLiteral("-Ltcg");
     m_stages = stages;
     m_process = new QProcess(this);
     m_process->setProgram(QStringLiteral("powershell.exe"));
     m_process->setArguments(args);
-    // the first-play preparation (optimize stage) fills the same shader cache the game uses when started from here
-    // (Lanzador: CacheLocation/sombreadores)
+    // The runtime keeps no shader cache: PS2X_GS_SHADER_CACHE_DIR is not read, so none is passed.
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"),
-                       QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/sombreadores"));
     m_process->setProcessEnvironment(environment);
     m_process->setWorkingDirectory(m_root);
     m_process->setProcessChannelMode(QProcess::MergedChannels);
+    connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error)
+    {
+        if (error != QProcess::FailedToStart || !m_process)
+            return;
+        emit logLine(m_process->errorString());
+        m_process->deleteLater();
+        m_process = nullptr;
+        emit runningChanged();
+        emit finished(false, -1);
+    });
     connect(m_process, &QProcess::readyReadStandardOutput, this, &InstallerBackend::readOutput);
     connect(m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status)
     {
+        if (!m_process)
+            return;
         readOutput();
         if (!m_pending.isEmpty())
             emit logLine(QString::fromLocal8Bit(m_pending));
@@ -291,6 +372,20 @@ bool InstallerBackend::applyUpdate(const QString &url, const QString &sha256, co
     return started;
 }
 
+bool InstallerBackend::pgoApplied() const
+{
+    const QString runner = runnerPath();
+    if (runner.isEmpty())
+        return false;
+    QFile cache(QFileInfo(runner).dir().absoluteFilePath(QStringLiteral("../CMakeCache.txt")));
+    if (!cache.open(QIODevice::ReadOnly))
+        return false;
+    for (const QByteArray &line : cache.readAll().split('\n'))
+        if (line.startsWith("CMAKE_CXX_FLAGS:") && line.contains("-fprofile-instr-use="))
+            return true;
+    return false;
+}
+
 bool InstallerBackend::needsRebuild() const
 {
     return QFileInfo::exists(m_root + QStringLiteral("/data/needs-rebuild.txt"));
@@ -299,7 +394,6 @@ bool InstallerBackend::needsRebuild() const
 void InstallerBackend::openRequirementPage(const QString &which) const
 {
     static const QVariantMap pages{
-        {QStringLiteral("buildTools"), QStringLiteral("https://visualstudio.microsoft.com/visual-cpp-build-tools/")},
         {QStringLiteral("git"), QStringLiteral("https://git-scm.com/download/win")},
         {QStringLiteral("python"), QStringLiteral("https://www.python.org/downloads/windows/")},
     };

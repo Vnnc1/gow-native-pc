@@ -1,0 +1,99 @@
+Cache pure VU1 analysis by image content, generator implementation and entry heads.
+Checksummed compressed JSON, atomic replacement, --no-cache reference mode; no machine-code persistence.
+Validation: see docs/research/jit-delivery-2026-10-26.md.
+
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+index b64300d..b99ed06 100644
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -15,6 +15,9 @@ the game: the VU1NativeAccess functions the blocks call are defined here and for
+ block keys, one per line) are left out; <out>/<name>.keys lists the ones written.
+ """
+ import os
++import gzip
++import hashlib
++import json
+ import struct
+ import sys
+ 
+@@ -746,11 +749,15 @@ def main():
+     parts = 6
+     dll = None
+     skip_file = None
++    use_cache = True
+     files = []
+     out = args[0]
+     i = 1
+     while i < len(args):
+-        if args[i] == '--heads':
++        if args[i] == '--no-cache':
++            use_cache = False
++            i += 1
++        elif args[i] == '--heads':
+             heads_file = args[i + 1]
+             i += 2
+         elif args[i] == '--parts':
+@@ -784,6 +791,26 @@ def main():
+             line = line.strip()
+             if line:
+                 skip.add(int(line, 16))
++    # Cache only pure analysis, never machine code. The checksum detects damaged files; the implementation and heads
++    # invalidate the whole cache. Content hashes invalidate individual images. All cached data stays in the build dir.
++    use_cache = use_cache and not dll
++    cache_path = os.path.join(out, 'vu1n-analysis.cache')
++    signature = hashlib.sha256(open(__file__, 'rb').read() + repr(sorted(extra)).encode()).hexdigest()
++    cached_images, cached_blocks = {}, {}
++    if use_cache:
++        try:
++            packed = open(cache_path, 'rb').read()
++            checksum, payload = packed.split(b'\n', 1)
++            if hashlib.sha256(payload).hexdigest().encode() != checksum:
++                raise ValueError('cache checksum')
++            saved = json.loads(gzip.decompress(payload))
++            if saved['signature'] == signature:
++                cached_images = saved['images']
++                cached_blocks = {int(k): v for k, v in saved['blocks'].items()}
++        except (OSError, ValueError, KeyError, TypeError, EOFError):
++            cached_images, cached_blocks = {}, {}
++    next_images = {}
++    cache_hits = 0
+     # Pass 1: the distinct blocks, and per micro-memory a forward fixpoint of the clean-operand state over its static
+     # control flow (meet = AND); a block's entry assumption is the AND over every image it appears in.
+     info = {}   # key -> (pc, pairs, gen, keep, successors)
+@@ -792,6 +819,15 @@ def main():
+         code = open(f, 'rb').read()
+         if len(code) != CODE_SIZE:
+             continue
++        image_hash = hashlib.sha256(code).hexdigest()
++        cached = cached_images.get(image_hash)
++        if cached is not None:
++            for key, st in cached:
++                info.setdefault(key, cached_blocks[key])
++                entry[key] = entry.get(key, ALL_LANES) & st
++            next_images[image_hash] = cached
++            cache_hits += 1
++            continue
+         nodes = {}
+         for pc in sorted(heads_of(code, extra)):
+             pairs = extent(code, pc)
+@@ -821,9 +857,20 @@ def main():
+                 if new != state[pc]:
+                     state[pc] = new
+                     changed = True
++        image_entries = []
+         for pc, key in nodes.items():
+             st = state[pc] if state[pc] != ALL_LANES else VF0_LANES  # only reached through cycles: assume nothing
+             entry[key] = entry.get(key, ALL_LANES) & st
++            image_entries.append((key, st))
++        next_images[image_hash] = image_entries
++    if use_cache:
++        os.makedirs(out, exist_ok=True)
++        payload = gzip.compress(json.dumps(dict(signature=signature, images=next_images, blocks=info),
++                                           separators=(',', ':')).encode(), compresslevel=1, mtime=0)
++        with open(cache_path + '.tmp', 'wb') as cache_file:
++            cache_file.write(hashlib.sha256(payload).hexdigest().encode() + b'\n' + payload)
++        os.replace(cache_path + '.tmp', cache_path)
++        print(f'[vu1n_gen] analysis cache: {cache_hits}/{len(inputs)} images reused', flush=True)
+     # Pass 2: the code, each block compiled for its entry assumption
+     blocks = {}
+     unsupported = 0

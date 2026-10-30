@@ -1,0 +1,42 @@
+Clear STR when completing scratchpad DMA chains.
+
+The chain epilogue restored the original STR bit after eeDmaStore cleared it,
+leaving completed SPR_FROM/SPR_TO transfers marked busy. Preserve channel mode,
+direction and terminal tag while keeping STR cleared. Regression cases check
+copied bytes, both channel causes, preserved configuration and single consumption.
+Correctness fix; no measured FPS improvement claimed.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1800,7 +1800,8 @@
+         chcr = (chcr & ~(0x3u << 4u)) | ((asp & 0x3u) << 4u);
+     }
+ 
+-    m_ioRegisters[channelBase + 0x00u] = (chcr & 0x0000FFFFu) | (lastTagUpper << 16u);
++    // Completion must not restore STR from the submitted chain configuration.
++    m_ioRegisters[channelBase + 0x00u] = (chcr & 0x0000FEFFu) | (lastTagUpper << 16u);
+     m_ioRegisters[channelBase + 0x10u] = madr & 0x7FFFFFF0u;
+     m_ioRegisters[channelBase + 0x20u] = 0u;
+     m_ioRegisters[channelBase + 0x80u] = sadr & 0x3FF0u;
+--- a/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2182,6 +2182,9 @@
+             t.IsTrue((mem.readIORegister(kChannel + 0x00u) & 0x100u) == 0u, "chain completion should clear CHCR.STR");
+             const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+             t.Equals(causes.size(), static_cast<size_t>(1u), "SPR_FROM chain should queue one completion");
++            t.IsTrue(causes == std::vector<uint32_t>{8u}, "SPR_FROM reports its own channel");
++            t.Equals(mem.readIORegister(kChannel) & 0xFFFFu, 4u, "chain mode survives completion without STR");
++            t.IsTrue(mem.consumeCompletedDmacCauses().empty(), "completion cannot be consumed twice");
+         });
+ 
+         tc.Run("DMAC SPR_TO source chain copies tagged RDRAM data to scratchpad", [](TestCase &t)
+@@ -2218,6 +2221,9 @@
+             t.IsTrue((mem.readIORegister(kChannel + 0x00u) & 0x100u) == 0u, "chain completion should clear CHCR.STR");
+             const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+             t.Equals(causes.size(), static_cast<size_t>(1u), "SPR_TO chain should queue one completion");
++            t.IsTrue(causes == std::vector<uint32_t>{9u}, "SPR_TO reports its own channel");
++            t.Equals(mem.readIORegister(kChannel) & 0xFFFFu, 5u, "direction and chain mode survive completion without STR");
++            t.IsTrue(mem.consumeCompletedDmacCauses().empty(), "completion cannot be consumed twice");
+         });
+ 
+         tc.Run("sceDmaReset clears the native DMA environment", [](TestCase &t)

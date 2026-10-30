@@ -18,6 +18,7 @@ Item {
     // fast this machine went so far). fixed: real-time steps (the game playing itself), not scaled.
     readonly property var etapas: ({
         tools: [{ id: "tools", w: 1 }],
+        verify: [{ id: "verify", w: 5 }],
         fetch: [{ id: "fetch", w: 1.5 }],
         discs: [{ id: "discs", w: 2 }],
         configure: [{ id: "configure", w: 1 }],
@@ -26,23 +27,27 @@ Item {
         build: [{ id: "build", w: 12 }],
         pgo: [{ id: "pgoBuild", w: 12 }, { id: "pgoPlay", w: 4, fixed: true }, { id: "pgoRebuild", w: 12 }],
         optimize: [{ id: "record", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
-        native: [{ id: "native", w: 0.5 }, { id: "rebuild", w: 2 }]
+        // tune (install with first-play preparation): instrumented build, one recorded run, final build with the profile
+        tune: [{ id: "pgoBuild", w: 10 }, { id: "pgoPlay", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "pgoRebuild", w: 9 }],
+        native: [{ id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
+        vu1disc: [{ id: "vu1disc", w: 3 }]
     })
     // the step of a "=== <step> ===" line (the texts build.ps1 writes)
     function pasoDe(s) {
-        var map = [["build tools", "tools"], ["runtime", "fetch"], ["discs", "discs"], ["configure", "configure"],
+        var map = [["verify runtime", "verify"], ["build tools", "tools"], ["runtime", "fetch"], ["discs", "discs"], ["configure", "configure"],
                    ["recompile the executable", "recomp"], ["generated code", "sync"], ["build the game", "build"],
                    ["profile-guided optimisation: instrumented", "pgoBuild"], ["profile-guided optimisation: the game", "pgoPlay"],
-                   ["rebuild with the profile", "pgoRebuild"], ["record", "record"], ["native VU1", "native"], ["rebuild", "rebuild"]]
+                   ["rebuild with the profile", "pgoRebuild"], ["record", "record"], ["native VU1", "native"], ["rebuild", "rebuild"],
+                   ["VU1 microcode from the disc", "vu1disc"]]
         for (var i = 0; i < map.length; ++i)
             if (s.indexOf(map[i][0]) === 0) return map[i][1]
         return ""
     }
     function nombrePaso(id) {
-        var map = { tools: "instStepTools", fetch: "instStepRuntime", discs: "instStepDiscs", configure: "instStepConfigure",
+        var map = { verify: "instStepVerify", tools: "instStepTools", fetch: "instStepRuntime", discs: "instStepDiscs", configure: "instStepConfigure",
                     recomp: "instStepRecomp", sync: "instStepSync", build: "instStepBuild", pgoBuild: "instStepPgo",
                     pgoPlay: "cargaPasoGrabar", pgoRebuild: "instStepPgo", record: "cargaPasoGrabar", native: "instStepNative",
-                    rebuild: "cargaPasoFinal" }
+                    rebuild: "cargaPasoFinal", vu1disc: "instStepVu1Disc" }
         return map[id] ? Tema.t(map[id]) : ""
     }
     function planDe(stages) {
@@ -58,7 +63,7 @@ Item {
     }
     // a run that takes long enough to deserve the screen (not "tools" or "tools,fetch" alone)
     function esLarga(stages) {
-        return /(^|,)(recomp|build|optimize|native|pgo)(,|$)/.test(stages)
+        return /(^|,)(recomp|build|optimize|native|pgo|tune|vu1disc)(,|$)/.test(stages)
     }
 
     // ------------------------------------------------------------------------------------------------ state
@@ -81,14 +86,17 @@ Item {
         for (var i = 0; i < plan.length; ++i) s += plan[i].w
         return s
     }
-    // the overall bar: finished steps by weight plus the share done in the current one
-    readonly property real fraccion: {
-        if (estado === "done") return 1
-        if (pesoTotal <= 0 || actual < 0) return 0
+    // Update only after a complete step/progress event, never from intermediate property assignments.
+    // A revised Ninja total may lower the estimate, but must not move the overall bar backwards.
+    property real progressValue: 0
+    readonly property real fraccion: estado === "done" ? 1 : progressValue
+    function updateProgress() {
+        if (pesoTotal <= 0 || actual < 0) return
         var s = 0
         for (var i = 0; i < actual && i < plan.length; ++i) s += plan[i].w
         if (actual < plan.length) s += plan[actual].w * fraccionPaso
-        return Math.min(1, s / pesoTotal)
+        // 100% belongs to the successful process exit, not its last compiler output line.
+        progressValue = Math.max(progressValue, Math.min(0.99, s / pesoTotal))
     }
     // how much slower (> 1) or faster than the expected weights this machine is, from the finished scaled steps
     readonly property real ritmo: {
@@ -150,6 +158,7 @@ Item {
             raiz.verRegistro = false; raiz.inicio = raiz.inicioPaso = raiz.ahora = Date.now()
             raiz.arte = installer.loadingArt()
             raiz.iniciarArte()
+            raiz.progressValue = 0
             raiz.estado = "running"
         }
         function onStepChanged(s) {
@@ -166,10 +175,15 @@ Item {
                     raiz.plan = p
                     raiz.actual = i; raiz.hechos = 0; raiz.total = 0; raiz.estadoTexto = ""
                     raiz.inicioPaso = raiz.ahora = Date.now()
+                    raiz.updateProgress()
                     return
                 }
         }
-        function onProgress(d, t) { if (raiz.estado === "running") { raiz.hechos = d; raiz.total = t } }
+        function onProgress(d, t) {
+            if (raiz.estado !== "running" || raiz.actual < 0 || t <= 0 || d < 0 || d > t) return
+            raiz.hechos = d; raiz.total = t
+            raiz.updateProgress()
+        }
         function onStatusText(t) { if (raiz.estado === "running") raiz.estadoTexto = t }
         function onLogLine(l) { if (raiz.estado === "running") raiz.addLog(l) }
         function onFinished(ok, code) {

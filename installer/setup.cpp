@@ -1165,7 +1165,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
     {
         // the copy in %TEMP% deletes itself once it has exited
         std::wstring cmd = L"cmd.exe /c ping 127.0.0.1 -n 3 >nul & del /q \"" + selfToDelete + L"\"";
-        STARTUPINFOW si{sizeof(si)};
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
         si.dwFlags = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION pi{};

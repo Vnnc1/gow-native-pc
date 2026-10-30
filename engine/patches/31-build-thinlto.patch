@@ -1,0 +1,24 @@
+Select explicit ThinLTO for non-MSVC Clang when PS2X_RELEASE_LTCG is enabled.
+Hide non-exported symbols in non-MSVC Release builds. The pipeline keeps LTCG opt-in.
+No gameplay performance measurement is claimed by this patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+index 09df97b..0610562 100644
+--- a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
++++ b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+@@ -55,8 +55,15 @@ function(EnableFastReleaseMode TargetName)
+         endif()
+     endif()
+ 
++    if(NOT MSVC)
++        target_compile_options(${TargetName} PRIVATE $<$<CONFIG:Release>:-fvisibility=hidden>)
++    endif()
+     if(NOT PS2X_RELEASE_LTCG)
+         message(STATUS "LTCG off for ${TargetName} (PS2X_RELEASE_LTCG=OFF)")
++    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC)
++        # Explicit ThinLTO; the pipeline controls lld parallelism and keeps this opt-in.
++        target_compile_options(${TargetName} PRIVATE $<$<CONFIG:Release>:-flto=thin>)
++        target_link_options(${TargetName} PRIVATE $<$<CONFIG:Release>:-flto=thin>)
+     elseif(IPO_SUPPORTED)
+         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+         if(NOT MSVC AND PS2X_LTO_JOBS)

@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "tools": {
+    "git": {
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip",
+      "sha": "da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be",
+      "dir": "mingit",
+      "exe": "cmd/git.exe",
+      "mb": 40
+    },
+    "python": {
+      "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip",
+      "sha": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
+      "dir": "python",
+      "exe": "python.exe",
+      "mb": 11
+    },
+    "cmake": {
+      "url": "https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-windows-x86_64.zip",
+      "sha": "0c4baa40f28b3f8225eb3fdf6946c987b4fe901403b4eaf2fbbd9378100aaa0c",
+      "dir": "cmake",
+      "exe": "cmake-3.31.12-windows-x86_64/bin/cmake.exe",
+      "mb": 52,
+      "skip": [
+        "*/doc/*",
+        "*/man/*"
+      ]
+    },
+    "ninja": {
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip",
+      "sha": "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65",
+      "dir": "ninja",
+      "exe": "ninja.exe",
+      "mb": 1
+    },
+    "clang": {
+      "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-x86_64.zip",
+      "sha": "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd",
+      "dir": "llvm-mingw-20261020-ucrt-x86_64",
+      "exe": "bin/clang++.exe",
+      "strip": true,
+      "mb": 170,
+      "skip": [
+        "*/aarch64-w64-mingw32/*",
+        "*/armv7-w64-mingw32/*",
+        "*/i686-w64-mingw32/*",
+        "*/python/*"
+      ]
+    },
+    "sccache": {
+      "url": "https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip",
+      "sha": "28be8c61f6b2c89b9eb2869f6af7f78e6f992e78a8abae0ce855fcc129cbeac1",
+      "dir": "sccache-0.19.0",
+      "exe": "sccache.exe",
+      "strip": true,
+      "mb": 10
+    }
+  },
+  "qt": {
+    "version": "6.8.3",
+    "modules": [
+      {
+        "name": "qtbase",
+        "url": "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtbase-everywhere-src-6.8.3.tar.xz",
+        "sha": "56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80"
+      },
+      {
+        "name": "qtshadertools",
+        "url": "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtshadertools-everywhere-src-6.8.3.tar.xz",
+        "sha": "f6ec88bf42deba84d8f6b5d0914636ceed4749ccb51d1945b2f79b322b7ecf47"
+      },
+      {
+        "name": "qtdeclarative",
+        "url": "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtdeclarative-everywhere-src-6.8.3.tar.xz",
+        "sha": "1f03a2b8f5588b4face7da87926e9b2c1372b3a32157c52df07a75067a9db1af"
+      }
+    ]
+  }
+}

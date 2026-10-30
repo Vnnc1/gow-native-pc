@@ -1,0 +1,40 @@
+Disable host math errno and trapping assumptions in non-MSVC Release targets.
+Does not enable fast-math or require AVX2; PS2X_CPU_ARCH selects x86-64-v2/v3 instead of native.
+No gameplay performance measurement is claimed by this patch.
+
+diff --git a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+index 0610562..791c0c2 100644
+--- a/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
++++ b/PS2Recomp/ps2xRuntime/cmake/ReleaseMode.cmake
+@@ -56,7 +56,11 @@ function(EnableFastReleaseMode TargetName)
+     endif()
+ 
+     if(NOT MSVC)
+-        target_compile_options(${TargetName} PRIVATE $<$<CONFIG:Release>:-fvisibility=hidden>)
++        # No host errno/trap observation is required by these math helpers. Keep FP contraction disabled separately.
++        target_compile_options(${TargetName} PRIVATE
++            $<$<CONFIG:Release>:-fvisibility=hidden>
++            $<$<CONFIG:Release>:-fno-math-errno>
++            $<$<CONFIG:Release>:-fno-trapping-math>)
+     endif()
+     if(NOT PS2X_RELEASE_LTCG)
+         message(STATUS "LTCG off for ${TargetName} (PS2X_RELEASE_LTCG=OFF)")
+diff --git a/PS2Recomp/CMakeLists.txt b/PS2Recomp/CMakeLists.txt
+index 6b37e8e..a4f7ef8 100644
+--- a/PS2Recomp/CMakeLists.txt
++++ b/PS2Recomp/CMakeLists.txt
+@@ -83,7 +83,13 @@ endif()
+ # fusionan a*b+c en FMA por defecto (-ffp-contract=fast); MSVC no (/fp:precise), y la FMAC de VU y la FPU del EE
+ # redondean el producto y la suma por separado: -ffp-contract=off da los mismos resultados que en Windows.
+ if(NOT MSVC AND NOT PS2X_IS_ARM_TARGET AND NOT PS2X_IS_AARCH64_TARGET AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+-    add_compile_options(-march=native -ffp-contract=off)
++    # Portable SSE4.1-class baseline; select x86-64-v3 explicitly for AVX2-class machines.
++    set(PS2X_CPU_ARCH "x86-64-v2" CACHE STRING "x86-64 compiler target (x86-64-v2 or x86-64-v3)")
++    set_property(CACHE PS2X_CPU_ARCH PROPERTY STRINGS x86-64-v2 x86-64-v3)
++    if(NOT PS2X_CPU_ARCH MATCHES "^x86-64-v[23]$")
++        message(FATAL_ERROR "Unsupported PS2X_CPU_ARCH: ${PS2X_CPU_ARCH}")
++    endif()
++    add_compile_options(-march=${PS2X_CPU_ARCH} -ffp-contract=off)
+ endif()
+ 
+ if(PS2X_BUILD_RECOMP)

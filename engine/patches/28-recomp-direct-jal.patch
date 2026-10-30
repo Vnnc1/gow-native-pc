@@ -1,0 +1,249 @@
+Static JAL calls take a lean inline path (PS2Runtime::callGuestFunction) instead of the full dispatchGuestBranch.
+Same checkpoint charge, function-table entry (overrides still apply), missing-function handling and return checks;
+no branch trace ring, dispatch history, perf hook or trace getenv tests per call. Full dispatch: GOW_DISPATCH_FULL=1,
+PS2X_GS_WORKER_TRACE, calls to GOW_PERF_FRAME_PC, missing targets; PS2X_STATIC_CALLS=dispatch at recompile time emits
+the old call. Micro-benchmark (empty callee, Linux clang -O2): 9.5 -> 6.3 ns per call. Tests: parity with DirectCall.
+
+diff --git a/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp b/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index 711b346..d21041e 100644
+--- a/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/PS2Recomp/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -6,6 +6,7 @@
+ #include "ps2_runtime_calls.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <fmt/format.h>
+ #include <sstream>
+ #include <utility>
+@@ -227,6 +228,21 @@ namespace ps2recomp
+     void ControlFlowEmitter::emitExternalJumpDispatch(uint32_t target, StaticBranchKind kind, std::string_view indent)
+     {
+         const bool isCall = kind == StaticBranchKind::Call;
++        // gow-native-pc (patch 28): a JAL calls PS2Runtime::callGuestFunction, the inline fast path of the same dispatch
++        // (no trace ring, history or perf hook per call). PS2X_STATIC_CALLS=dispatch: the full dispatch, as before.
++        static const bool fullDispatch = []
++        {
++            const char *mode = std::getenv("PS2X_STATIC_CALLS");
++            return mode != nullptr && std::string_view(mode) == "dispatch";
++        }();
++        if (isCall && !fullDispatch)
++        {
++            m_ss << fmt::format("{}if (!runtime->callGuestFunction(rdram, ctx, 0x{:X}u, 0x{:X}u, 0x{:X}u)) {{\n",
++                                indent, target, branchPc(), fallthroughPc());
++            m_ss << fmt::format("{}    return;\n", indent);
++            m_ss << fmt::format("{}}}\n", indent);
++            return;
++        }
+         emitRuntimeBranchDispatch(fmt::format("0x{:X}u", target),
+                                   branchPc(),
+                                   isCall ? fallthroughPc() : 0u,
+diff --git a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+index 1109fc6..a26628a 100644
+--- a/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
++++ b/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+@@ -348,6 +348,13 @@ public:
+                              uint32_t fallthroughPc,
+                              GuestBranchKind kind,
+                              const char *debugName);
++    // gow-native-pc (patch 28): the generated code's static JAL (a call to a constant address). Same result as
++    // dispatchGuestBranch(..., DirectCall, "JAL") (same checkpoint charge, table entry, return checks), without the
++    // per-call diagnostics: the branch trace ring, the dispatch history, GOW_PERF's frame counter and
++    // PS2X_GS_WORKER_TRACE. The full dispatch still runs for a missing function, for every call when
++    // GOW_DISPATCH_FULL=1 or PS2X_GS_WORKER_TRACE is set, and for calls to GOW_PERF_FRAME_PC. Defined inline below.
++    static constexpr uint32_t kStaticCallCycles = 8u; // EeScheduler::kGuestDispatchCycles
++    bool callGuestFunction(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc, uint32_t fallthroughPc);
+     void reportMissingFunction(uint8_t *rdram,
+                                R5900Context *ctx,
+                                uint32_t targetPc,
+@@ -586,4 +593,36 @@ extern const uint32_t g_ps2RecompiledFunctionTableEnd;
+ extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
+ extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+ 
++// gow-native-pc (patch 28): state of PS2Runtime::callGuestFunction, set once at start-up (ps2_runtime.cpp).
++extern bool g_ps2FullCallDispatch;   // every static call through dispatchGuestBranch
++extern uint32_t g_ps2CallWatchPc;    // calls to this address through dispatchGuestBranch (0 = none)
++// Jumps dispatched on this thread (dispatchGuestBranch): a callee that ends with a jump back to its own entry has not
++// returned, although ctx->pc equals its entry again. Constant-initialised and visible, so no TLS wrapper call.
++inline thread_local uint64_t g_ps2GuestJumpSerial = 0u;
++
++inline bool PS2Runtime::callGuestFunction(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc,
++                                          uint32_t fallthroughPc)
++{
++    const uint32_t offset = targetPc - g_ps2RecompiledFunctionTableBase;
++    const uint32_t slot = offset >> 2;
++    RecompiledFunction fn = nullptr;
++    if ((targetPc & 3u) == 0u && slot < g_ps2RecompiledFunctionTableSlotCount)
++        fn = g_ps2RecompiledFunctionTable[slot];
++    // a missing function, a diagnostic: the full dispatch (it reports and applies the missing-function policy)
++    if (fn == nullptr || g_ps2FullCallDispatch || targetPc == g_ps2CallWatchPc) [[unlikely]]
++        return dispatchGuestBranch(rdram, ctx, targetPc, sourcePc, fallthroughPc, GuestBranchKind::DirectCall, "JAL");
++
++    ctx->pc = targetPc;
++    if (m_eeScheduler && eeCheckpointDue(kStaticCallCycles))
++        return false;
++    const uint64_t checkpointSerial = m_eeCheckpointSerial;
++    const uint64_t jumpSerial = g_ps2GuestJumpSerial;
++    fn(rdram, ctx, this);
++    if (m_stopRequested.load(std::memory_order_relaxed) || ctx->pc == 0u)
++        return false;
++    if (ctx->pc == targetPc && m_eeCheckpointSerial == checkpointSerial && jumpSerial == g_ps2GuestJumpSerial)
++        ctx->pc = fallthroughPc;
++    return ctx->pc == fallthroughPc;
++}
++
+ #endif // PS2_RUNTIME_H
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 81ebdda..2a7056d 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -217,9 +217,9 @@ namespace
+     };
+ 
+     thread_local DispatchHistory g_dispatchHistory;
+-    // GOW-Port: cuenta los saltos (no llamadas) despachados, para distinguir un retorno implicito de un salto final
+-    // que vuelve a la entrada de la funcion llamada (fork de SotC, c4c20e8).
+-    thread_local uint64_t g_guestJumpSerial = 0u;
++    // GOW-Port: dispatched jumps (not calls) are counted in g_ps2GuestJumpSerial (ps2_runtime.h; patch 28 moved it
++    // there for callGuestFunction), to tell an implicit return from a final jump back to the callee's entry (SotC
++    // fork, c4c20e8).
+ 
+     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
+     {
+@@ -1509,6 +1509,19 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+     }
+ }
+ 
++// gow-native-pc (patch 28): which static calls (callGuestFunction) take the full dispatch. GOW_DISPATCH_FULL=1 or
++// PS2X_GS_WORKER_TRACE: all of them (the branch ring and the dispatch history then see every call again); otherwise the
++// calls to GOW_PERF_FRAME_PC, the function ps2_perf::guestEntry counts as guest frames (about 60 calls a second).
++static_assert(PS2Runtime::kStaticCallCycles == EeScheduler::kGuestDispatchCycles);
++bool g_ps2FullCallDispatch = [] {
++    const char *full = std::getenv("GOW_DISPATCH_FULL");
++    return (full && full[0] != '\0' && full[0] != '0') || std::getenv("PS2X_GS_WORKER_TRACE") != nullptr;
++}();
++uint32_t g_ps2CallWatchPc = [] {
++    const char *value = std::getenv("GOW_PERF_FRAME_PC");
++    return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
++}();
++
+ // GOW-Port branch trace ring
+ struct GowBranchRec { uint32_t src, dst, ra, kind; };
+ GowBranchRec g_gowRing[256]; std::atomic<uint32_t> g_gowRingPos{0};
+@@ -1547,7 +1560,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+ 
+     if (!isCall)
+     {
+-        ++g_guestJumpSerial;
++        ++g_ps2GuestJumpSerial;
+         if (!hasFunction(targetPc))
+         {
+             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+@@ -1586,7 +1599,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     pushDispatchPc(targetPc); // as lookupFunction
+     const uint32_t entryPc = ctx->pc;
+     const uint64_t checkpointSerial = m_eeCheckpointSerial;
+-    const uint64_t jumpSerial = g_guestJumpSerial;
++    const uint64_t jumpSerial = g_ps2GuestJumpSerial;
+     ps2_perf::guestEntry(targetPc, rdram); // GOW-Port: también cuenta llamadas que no vuelven al dispatcher.
+     // GOW-Port: PS2X_GS_WORKER_TRACE=<s>: for 2 s after <s> s of uptime, host µs of vid::Flip (0x1837B8),
+     // vid::WaitForDMAComplete (0x183878) and 0x13F730 entry/return, to see the per-frame dependency chain.
+@@ -1612,7 +1625,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    if (ctx->pc == entryPc && m_eeCheckpointSerial == checkpointSerial && jumpSerial == g_guestJumpSerial)
++    if (ctx->pc == entryPc && m_eeCheckpointSerial == checkpointSerial && jumpSerial == g_ps2GuestJumpSerial)
+     {
+         ctx->pc = fallthroughPc;
+     }
+diff --git a/PS2Recomp/ps2xTest/src/code_generator_tests.cpp b/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
+index ed78df3..e22b2c0 100644
+--- a/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/code_generator_tests.cpp
+@@ -1660,15 +1660,13 @@ void register_code_generator_tests()
+             // SET_GPR_U32(ctx, 31, 0xA008u);
+             // ctx->pc = 0xA004u;
+             // ... delay slot ...
+-            // runtime->dispatchGuestBranch(..., DirectCall, "JAL")
++            // runtime->callGuestFunction(rdram, ctx, 0xB000u, 0xA000u, 0xA008u) (patch 28: the inline static call)
+ 
+             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA008u);") != std::string::npos, "JAL should set RA");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, 0xB000u") != std::string::npos,
+-                     "JAL should dispatch through the runtime branch helper");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::DirectCall") != std::string::npos,
+-                     "JAL should identify itself as a direct call");
+-            t.IsTrue(generated.find("0xA000u, 0xA008u") != std::string::npos,
+-                     "JAL should pass call-site and fallthrough PCs to the runtime helper");
++            t.IsTrue(generated.find("runtime->callGuestFunction(rdram, ctx, 0xB000u, 0xA000u, 0xA008u)") != std::string::npos,
++                     "JAL should call through the runtime's static call helper with call-site and fallthrough PCs");
++            t.IsTrue(generated.find("dispatchGuestBranch") == std::string::npos,
++                     "a static JAL should not take the full dispatch");
+         });
+ 
+         tc.Run("JAL to a resolved syscall publishes fallthrough before the handler", [](TestCase &t) {
+@@ -1721,7 +1719,7 @@ void register_code_generator_tests()
+ 
+             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA108u);") != std::string::npos,
+                      "truncated trailing JAL should still set RA");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, 0xB000u") != std::string::npos,
++            t.IsTrue(generated.find("runtime->callGuestFunction(rdram, ctx, 0xB000u") != std::string::npos,
+                      "truncated trailing JAL should still emit the call dispatch");
+             t.IsTrue(generated.find("0xA100u, 0xA108u") != std::string::npos,
+                      "truncated trailing JAL should still pass the fallthrough to runtime dispatch");
+diff --git a/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp b/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+index 4870fed..6ac5b66 100644
+--- a/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp
++++ b/PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+@@ -509,6 +509,51 @@ void register_ps2_runtime_expansion_tests()
+                      "the callee's stack pointer belongs to the pending tail call");
+         });
+ 
++        // gow-native-pc (patch 28): the static call fast path gives the full dispatch's result in every case.
++        tc.Run("callGuestFunction matches dispatchGuestBranch DirectCall", [](TestCase &t)
++        {
++            struct Case
++            {
++                const char *name;
++                uint32_t target;
++                PS2Runtime::RecompiledFunction fn;
++            };
++            const Case cases[] = {
++                {"implicit return", 0x3000u, &testGuestBranchImplicitReturnHandler},
++                {"transfer elsewhere", 0x3100u, &testGuestBranchTransferHandler},
++                {"checkpoint at entry", 0x3300u, &testGuestBranchCheckpointHandler},
++                {"tail jump to entry", 0x3600u, &testGuestBranchSelfTailJumpHandler},
++                {"missing target", 0x3210u, nullptr},
++            };
++            for (const Case &c : cases)
++            {
++                bool results[2] = {};
++                R5900Context out[2] = {};
++                bool stopped[2] = {};
++                for (int fast = 0; fast < 2; ++fast)
++                {
++                    PS2Runtime runtime;
++                    runtime.setMissingFunctionPolicy(PS2Runtime::MissingFunctionPolicy::Stop);
++                    if (c.fn)
++                        runtime.registerFunction(c.target, c.fn);
++                    R5900Context ctx{};
++                    ctx.pc = c.target; // the generated code stores the target before the call
++                    setRegU32(ctx, 29, 0x00002000u);
++                    results[fast] = fast ? runtime.callGuestFunction(nullptr, &ctx, c.target, 0x2000u, 0x2008u)
++                                         : runtime.dispatchGuestBranch(nullptr, &ctx, c.target, 0x2000u, 0x2008u,
++                                                                       PS2Runtime::GuestBranchKind::DirectCall, "JAL");
++                    out[fast] = ctx;
++                    stopped[fast] = runtime.isStopRequested();
++                }
++                const std::string name = c.name;
++                t.Equals(results[1], results[0], name + ": same continue/unwind result");
++                t.Equals(out[1].pc, out[0].pc, name + ": same pc");
++                t.Equals(::getRegU32(&out[1], 2), ::getRegU32(&out[0], 2), name + ": same v0");
++                t.Equals(::getRegU32(&out[1], 29), ::getRegU32(&out[0], 29), name + ": same sp");
++                t.Equals(stopped[1], stopped[0], name + ": same stop request");
++            }
++        });
++
+         tc.Run("dispatchGuestBranch jump returns to central dispatcher without nesting", [](TestCase &t)
+         {
+             PS2Runtime runtime;

@@ -1,12 +1,13 @@
-// Resources of the installer (setup.cpp): icon (shared with the launcher) and version info; the manifest is added by
-// CMakeLists.txt.
-#include <winres.h>
+// Embed the manifest explicitly for llvm-rc, including per-monitor DPI and asInvoker.
+#include <windows.h>
+
+1 RT_MANIFEST "setup.manifest"
 
 1 ICON "../launcher/icon.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 2,0,0,0
-PRODUCTVERSION 2,0,0,0
+FILEVERSION 3,0,0,0
+PRODUCTVERSION 3,0,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -17,8 +18,8 @@ BEGIN
             VALUE "FileDescription", "God of War Native PC Setup"
             VALUE "ProductName", "God of War Native PC"
             VALUE "CompanyName", "gow-native-pc"
-            VALUE "FileVersion", "2.1.0.0"
-            VALUE "ProductVersion", "2.1.0.0"
+            VALUE "FileVersion", "3.0.0.0"
+            VALUE "ProductVersion", "3.0.0.0"
             VALUE "OriginalFilename", "gow-native-pc-setup.exe"
         END
     END

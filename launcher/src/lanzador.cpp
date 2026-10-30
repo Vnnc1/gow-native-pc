@@ -1,4 +1,5 @@
 #include "lanzador.h"
+#include "session_diagnostics.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -9,10 +10,13 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QImageReader>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcessEnvironment>
 #include <QScreen>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QSaveFile>
 #include <QTextStream>
 #include <QTimer>
 
@@ -164,6 +168,8 @@ QString Lanzador::rutaIcono() const
 
 QString Lanzador::rutaRegistro() const
 {
+    const QString session = m_session.isEmpty() ? SessionDiagnostics::latest(carpetaDatos() + "/registros") : m_session;
+    if (!session.isEmpty()) return session + "/runtime.log";
     return carpetaDatos() + QStringLiteral("/registros/ultimo.log");
 }
 
@@ -395,16 +401,32 @@ bool Lanzador::iniciar(const QVariantMap &a)
     else
         entorno.insert(QStringLiteral("TOBIICHI_TRUCOS"), trucos);
     entorno.insert(QStringLiteral("TOBIICHI_IDIOMA"), a.value(QStringLiteral("idioma"), QStringLiteral("en")).toString());
-    // gow-native-pc: continuous optimisation. The runtime writes each VU1 micro-memory it has not seen before (cheap: only
-    // new code); the Install tab's "Speed up visited areas" compiles them into the game as native code.
+    // Capture context for missing native blocks; "Speed up visited areas" compiles it for future sessions.
     const QString capturaVu1 = a.value(QStringLiteral("capturaVu1")).toString();
     if (!capturaVu1.isEmpty() && QDir().mkpath(capturaVu1))
         entorno.insert(QStringLiteral("GOW_VU1_CAPTURA"), capturaVu1);
     else
         entorno.remove(QStringLiteral("GOW_VU1_CAPTURA"));
+    entorno.insert(QStringLiteral("GOW_VU1_CAPTURE_MISSES"), QStringLiteral("1"));
+    // Keep diagnostic overrides from leaking into normal play; the JIT helper tier is a user-selected fallback.
+    entorno.remove(QStringLiteral("GOW_VU1X_ONLY"));
+    entorno.insert(QStringLiteral("GOW_VU1X_INLINE"), a.value(QStringLiteral("jitInline"), true).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
+    // Runtime patch 40: FINISH raised when the frame's VIF1 packet is queued, so the EE prepares the next frame while
+    // VU1 draws this one (about +20% in VU1-bound combat, measured). Off restores the serial frame order.
+    entorno.insert(QStringLiteral("GOW_GS_EARLY_FINISH"), a.value(QStringLiteral("finAnticipado"), true).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
+    // gow-native-pc: VU1 code the build did not compile (areas the first-play recording never reached) is compiled while
+    // playing by the in-process x86-64 JIT (engine/patches/18, GOW_VU1N_X64: no compiler or files needed, any toolchain).
+    // The background clang compiler (patch 17, GOW_VU1N_JIT + data/<game>/vu1_jit.json) stays available by hand.
+    if (!a.value(QStringLiteral("datosJit")).toString().isEmpty())
+        entorno.insert(QStringLiteral("GOW_VU1N_X64"), QStringLiteral("1"));
+    else
+        entorno.remove(QStringLiteral("GOW_VU1N_X64"));
     // Window.
-    const bool completa = a.value(QStringLiteral("modoPantalla")).toString() == QStringLiteral("completa");
-    entorno.insert(QStringLiteral("TOBIICHI_PANTALLA"), completa ? QStringLiteral("completa") : QStringLiteral("ventana"));
+    // completa: exclusive full screen; sin_bordes: borderless window over the monitor (capture and scaling tools see it,
+    // runtime patch 39); anything else: a window.
+    const QString modo = a.value(QStringLiteral("modoPantalla")).toString();
+    entorno.insert(QStringLiteral("TOBIICHI_PANTALLA"), modo == QStringLiteral("completa") || modo == QStringLiteral("sin_bordes")
+                                                            ? modo : QStringLiteral("ventana"));
     entorno.insert(QStringLiteral("TOBIICHI_ANCHO"), QString::number(a.value(QStringLiteral("ancho")).toInt()));
     entorno.insert(QStringLiteral("TOBIICHI_ALTO"), QString::number(a.value(QStringLiteral("alto")).toInt()));
     entorno.insert(QStringLiteral("TOBIICHI_TITULO"), QStringLiteral("God of War"));
@@ -418,10 +440,8 @@ bool Lanzador::iniciar(const QVariantMap &a)
     else
         entorno.insert(QStringLiteral("TOBIICHI_PANORAMICO"), aspecto);
     entorno.insert(QStringLiteral("TOBIICHI_ASPECTO"), a.value(QStringLiteral("estirar")).toBool() ? QStringLiteral("estirar") : QStringLiteral("auto"));
-    entorno.insert(QStringLiteral("TOBIICHI_FILTRO"), a.value(QStringLiteral("filtro"), QStringLiteral("fsr")).toString());
-    // Sharpness 0..1 in the interface -> RCAS steps (2 = soft, 0 = maximum).
+    // Sharpness 0..1 in the interface -> GOW_SHARPEN below.
     const double nitidez = std::clamp(a.value(QStringLiteral("nitidez"), 0.8).toDouble(), 0.0, 1.0);
-    entorno.insert(QStringLiteral("TOBIICHI_NITIDEZ"), QString::number(2.0 * (1.0 - nitidez), 'f', 2));
     bandera("TOBIICHI_FXAA", a.value(QStringLiteral("fxaa")).toBool());
     // Anisotropic filtering of the game's textures (gs_hw_backend.cpp, from the God of War II port): 1 = off.
     const int aniso = std::clamp(a.value(QStringLiteral("anisotropico"), 1).toInt(), 1, 16);
@@ -444,13 +464,13 @@ bool Lanzador::iniciar(const QVariantMap &a)
             entorno.insert(QStringLiteral("GOW_SHARPEN"), QStringLiteral("0"));
         }
     }
-    // GS internal resolution (1..8; the interface resolves "automatic" from the display) and sharp image.
-    entorno.insert(QStringLiteral("PS2X_GS_ESCALA"), QString::number(std::clamp(a.value(QStringLiteral("escala"), 1).toInt(), 1, 8)));
-    // The render-target renderer reads the scale from PS2X_GS_HW_SCALE.
+    // GS internal resolution (1..8; the interface resolves "automatic" from the display). The render-target renderer
+    // reads only PS2X_GS_HW_SCALE: it is always on and has no dynamic scale or line-doubling switch, so the variables
+    // older launchers set for those (and the unread filter/sharpness/shader-cache names) are removed.
     entorno.insert(QStringLiteral("PS2X_GS_HW_SCALE"), QString::number(std::clamp(a.value(QStringLiteral("escala"), 2).toInt(), 1, 8)));
-    bandera("PS2X_GS_NITIDO", a.value(QStringLiteral("imagenNitida"), true).toBool(), "0");
-    bandera("PS2X_GS_ESCALA_DINAMICA", a.value(QStringLiteral("escalaDinamica"), true).toBool(), "0");
-    bandera("PS2X_GS_HW", a.value(QStringLiteral("dibujoHardware"), true).toBool(), "0");
+    for (const char *unread : {"PS2X_GS_ESCALA", "PS2X_GS_NITIDO", "PS2X_GS_ESCALA_DINAMICA", "PS2X_GS_HW", "TOBIICHI_FILTRO",
+                               "TOBIICHI_NITIDEZ", "PS2X_GS_SHADER_CACHE_DIR"})
+        entorno.remove(QString::fromLatin1(unread));
     // Window pacing.
     entorno.insert(QStringLiteral("TOBIICHI_VENTANA_FPS"), QString::number(a.value(QStringLiteral("fpsLimite"), 120).toInt()));
     bandera("TOBIICHI_VSYNC", a.value(QStringLiteral("vsync")).toBool());
@@ -466,26 +486,67 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.remove(QStringLiteral("GOW_ISO"));
     else
         entorno.insert(QStringLiteral("GOW_ISO"), iso);
-    const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/sombreadores");
-    QDir().mkpath(cache);
-    if (!entorno.contains(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR")))
-        entorno.insert(QStringLiteral("PS2X_GS_SHADER_CACHE_DIR"), cache);
     aplicarTarjeta(entorno, a.value(QStringLiteral("gpu")).toString(), ejecutable);
+    // Frame-only accounting avoids the expensive per-call timing scopes in normal play.
+    entorno.insert(QStringLiteral("GOW_PERF_DIAG"), a.value(QStringLiteral("diagnostics"), false).toBool() ? QStringLiteral("1") : QStringLiteral("frames"));
+    entorno.insert(QStringLiteral("GOW_FRAME_DIAG"), QStringLiteral("1"));
+    for (const QString &key : {QStringLiteral("GOW_AUDIO_STATS"), QStringLiteral("GOW_IOP_DRIFT"), QStringLiteral("GOW_VU1N_DIAG"), QStringLiteral("GOW_SYNC_DIAG")}) {
+        if (a.value(QStringLiteral("diagnostics"), false).toBool()) entorno.insert(key, QStringLiteral("1"));
+        else entorno.remove(key);
+    }
+    // The frame-loop pc of the profile ([diagnostics].frame_pc in games/<id>/game.toml), for the frame timings of
+    // GOW_PERF_DIAG; tools/test/jit-smoke.ps1 passes the same value.
+    const QString framePc = a.value(QStringLiteral("framePc")).toString();
+    if (!framePc.isEmpty())
+        entorno.insert(QStringLiteral("GOW_PERF_FRAME_PC"), framePc);
+    // Saves (F1 > Saves in game copies the card here; the Saves page restores them). The card path is set explicitly so
+    // the game and the launcher always agree on it.
+    const QString partidas = a.value(QStringLiteral("partidas")).toString();
+    if (!partidas.isEmpty() && QDir().mkpath(partidas))
+        entorno.insert(QStringLiteral("GOW_SAVES_DIR"), partidas);
+    else
+        entorno.remove(QStringLiteral("GOW_SAVES_DIR"));
+    if (!entorno.contains(QStringLiteral("GOW_MC0")))
+        entorno.insert(QStringLiteral("GOW_MC0"), rutaTarjeta(elf));
 
-    // Log: the previous game's log is kept as anterior.log.
-    const QString registro = rutaRegistro();
-    const QString anterior = carpetaDatos() + QStringLiteral("/registros/anterior.log");
-    QFile::remove(anterior);
-    QFile::rename(registro, anterior);
+    // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
+    QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
+    if (boot.open(QIODevice::WriteOnly))
+    {
+        QByteArray bytes = "GOW_NATIVE_BOOT_V1\n" + QFileInfo(elf).absoluteFilePath().toUtf8() + '\n';
+        for (const QString &key : entorno.keys())
+            if (key.startsWith(QStringLiteral("TOBIICHI_")) || key.startsWith(QStringLiteral("PS2X_")) || key.startsWith(QStringLiteral("GOW_")))
+            {
+                const QString value = entorno.value(key);
+                if (!value.contains('\n') && !value.contains('\r'))
+                    bytes += key.toUtf8() + '=' + value.toUtf8() + '\n';
+            }
+        if (boot.write(bytes) == bytes.size()) boot.commit();
+    }
+
+    const QString helper = QCoreApplication::applicationDirPath() +
+#ifdef Q_OS_WIN
+        QStringLiteral("/gow-session.exe");
+#else
+        QStringLiteral("/gow-session");
+#endif
+    m_session = SessionDiagnostics::create(carpetaDatos() + "/registros", a);
+    if (m_session.isEmpty() || !QFileInfo::exists(helper)) {
+        emit error(QStringLiteral("diagnosticsError"), QStringLiteral("Cannot create the report or find gow-session.exe."));
+        return false;
+    }
+    const QString pin = buscarHaciaArriba(QCoreApplication::applicationDirPath(), QStringLiteral("engine/runtime.toml"));
+    const QString root = QFileInfo(pin).dir().absoluteFilePath(QStringLiteral(".."));
 
     delete m_proceso;
     m_proceso = new QProcess(this);
-    m_proceso->setProgram(ejecutable);
-    m_proceso->setArguments({elf});
+    // A separate collector keeps draining and sampling if the launcher window is closed.
+    m_proceso->setProgram(helper);
+    m_proceso->setArguments({m_session, ejecutable, elf, root});
     m_proceso->setProcessEnvironment(entorno);
     m_proceso->setWorkingDirectory(carpetaDatos());
     m_proceso->setProcessChannelMode(QProcess::MergedChannels);
-    m_proceso->setStandardOutputFile(registro);
+    m_proceso->setStandardOutputFile(QProcess::nullDevice());
     connect(m_proceso, &QProcess::finished, this, &Lanzador::terminado);
     connect(m_proceso, &QProcess::errorOccurred, this, [this](QProcess::ProcessError fallo)
     {
@@ -503,6 +564,12 @@ bool Lanzador::iniciar(const QVariantMap &a)
 
 void Lanzador::terminado(int codigo, QProcess::ExitStatus estado)
 {
+    QFile report(m_session + "/session.json");
+    if (report.open(QIODevice::ReadOnly)) {
+        const auto metadata = QJsonDocument::fromJson(report.readAll()).object();
+        if (metadata.contains("exit_code")) codigo = metadata.value("exit_code").toInt();
+        if (metadata.value("state").toString() == "crashed") estado = QProcess::CrashExit;
+    }
     const int segundos = static_cast<int>(m_reloj.elapsed() / 1000);
     const bool fallo = estado == QProcess::CrashExit || codigo != 0;
     QString resumen;
@@ -535,13 +602,146 @@ void Lanzador::detener()
 {
     if (!jugando())
         return;
-    m_proceso->terminate();
-    QProcess *proceso = m_proceso;
-    QTimer::singleShot(3000, proceso, [proceso]
+    QFile request(m_session + "/stop.request");
+    if (request.open(QIODevice::WriteOnly)) request.write("stop\n");
+}
+
+void Lanzador::exportDiagnostics()
+{
+    const auto session = m_session.isEmpty() ? SessionDiagnostics::latest(carpetaDatos() + "/registros") : m_session;
+    QString detail;
+    const auto path = SessionDiagnostics::exportZip(session, &detail);
+    if (path.isEmpty()) { emit error(QStringLiteral("diagnosticsError"), detail); return; }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+    emit diagnosticsExported(path);
+}
+
+bool Lanzador::markDiagnostic(const QString &note)
+{
+    return jugando() && SessionDiagnostics::mark(m_session, note);
+}
+
+// ---------------------------------------------------------------- Saves (memory card copies)
+namespace
+{
+    // MemoryCard::ImageSize (ps2xIOP memory_card.h): 16384 pages of 528 bytes, the PCSX2 .ps2 layout.
+    constexpr qint64 kTamanoTarjeta = 528ll * 16384ll;
+
+    // a save's folder name as given by QML: one plain folder inside the saves folder, nothing else
+    bool nombreValido(const QString &nombre)
     {
-        if (proceso->state() != QProcess::NotRunning)
-            proceso->kill();
-    });
+        return !nombre.isEmpty() && nombre == QFileInfo(nombre).fileName() && nombre != QStringLiteral(".") &&
+               nombre != QStringLiteral("..");
+    }
+
+    bool escribirArchivo(const QString &ruta, const QByteArray &datos)
+    {
+        QSaveFile archivo(ruta);
+        return archivo.open(QIODevice::WriteOnly) && archivo.write(datos) == datos.size() && archivo.commit();
+    }
+}
+
+QString Lanzador::rutaTarjeta(const QString &elf) const
+{
+    const QString ajuste = qEnvironmentVariable("GOW_MC0");
+    if (!ajuste.isEmpty() && ajuste != QStringLiteral("0"))
+        return ajuste;
+    return elf.isEmpty() ? QString() : QDir(QFileInfo(elf).absolutePath()).absoluteFilePath(QStringLiteral("Mcd001.ps2"));
+}
+
+QString Lanzador::nuevaPartida(const QString &carpeta, const QByteArray &tarjeta, const QString &etiqueta,
+                               const QString &origen) const
+{
+    const QDateTime ahora = QDateTime::currentDateTime();
+    const QString sello = ahora.toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QDir raiz(carpeta);
+    QString nombre = sello;
+    for (int n = 2; raiz.exists(nombre); ++n)
+        nombre = sello + QLatin1Char('-') + QString::number(n);
+    if (!raiz.mkpath(nombre))
+        return {};
+    const QString destino = raiz.absoluteFilePath(nombre);
+    QJsonObject info{{QStringLiteral("label"), etiqueta.left(40)},
+                     {QStringLiteral("time"), ahora.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))},
+                     {QStringLiteral("source"), origen},
+                     {QStringLiteral("card"), QStringLiteral("Mcd001.ps2")},
+                     {QStringLiteral("bytes"), static_cast<double>(tarjeta.size())}};
+    if (!escribirArchivo(destino + QStringLiteral("/Mcd001.ps2"), tarjeta) ||
+        !escribirArchivo(destino + QStringLiteral("/save.json"), QJsonDocument(info).toJson()))
+    {
+        QDir(destino).removeRecursively();
+        return {};
+    }
+    return nombre;
+}
+
+QVariantList Lanzador::partidas(const QString &carpeta) const
+{
+    QVariantList lista;
+    const QDir raiz(carpeta);
+    const QStringList nombres = raiz.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed);
+    for (const QString &nombre : nombres)
+    {
+        const QString ruta = raiz.absoluteFilePath(nombre);
+        if (!QFileInfo::exists(ruta + QStringLiteral("/Mcd001.ps2")))
+            continue;
+        QFile archivo(ruta + QStringLiteral("/save.json"));
+        QJsonObject info;
+        if (archivo.open(QIODevice::ReadOnly))
+            info = QJsonDocument::fromJson(archivo.readAll()).object();
+        lista << QVariantMap{{QStringLiteral("nombre"), nombre},
+                             {QStringLiteral("etiqueta"), info.value(QStringLiteral("label")).toString()},
+                             {QStringLiteral("fecha"), info.value(QStringLiteral("time")).toString(nombre)},
+                             {QStringLiteral("origen"), info.value(QStringLiteral("source")).toString()},
+                             {QStringLiteral("ruta"), ruta}};
+    }
+    return lista;
+}
+
+QString Lanzador::guardarPartida(const QString &carpeta, const QString &elf, const QString &etiqueta) const
+{
+    QFile tarjeta(rutaTarjeta(elf));
+    if (carpeta.isEmpty() || !tarjeta.open(QIODevice::ReadOnly))
+        return {};
+    return nuevaPartida(carpeta, tarjeta.readAll(), etiqueta, QStringLiteral("launcher"));
+}
+
+QString Lanzador::importarPartida(const QString &carpeta, const QString &archivo) const
+{
+    QFile origen(archivo);
+    if (carpeta.isEmpty() || origen.size() != kTamanoTarjeta || !origen.open(QIODevice::ReadOnly))
+        return {};
+    return nuevaPartida(carpeta, origen.readAll(), QFileInfo(archivo).completeBaseName(), QStringLiteral("import"));
+}
+
+bool Lanzador::restaurarPartida(const QString &carpeta, const QString &nombre, const QString &elf)
+{
+    const QString destino = rutaTarjeta(elf);
+    if (jugando() || !nombreValido(nombre) || destino.isEmpty())
+        return false; // the running game keeps the card in memory and would write over the restored file
+    QFile copia(QDir(carpeta).absoluteFilePath(nombre) + QStringLiteral("/Mcd001.ps2"));
+    if (copia.size() != kTamanoTarjeta || !copia.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray datos = copia.readAll();
+    QFile actual(destino);
+    if (actual.open(QIODevice::ReadOnly))
+    {
+        const QByteArray anterior = actual.readAll();
+        actual.close();
+        if (anterior == datos)
+            return true;
+        if (nuevaPartida(carpeta, anterior, QStringLiteral("before ") + nombre, QStringLiteral("backup")).isEmpty())
+            return false; // never replace the card without a copy of it
+    }
+    return escribirArchivo(destino, datos);
+}
+
+bool Lanzador::borrarPartida(const QString &carpeta, const QString &nombre) const
+{
+    if (!nombreValido(nombre) || carpeta.isEmpty())
+        return false;
+    QDir partida(QDir(carpeta).absoluteFilePath(nombre));
+    return partida.exists(QStringLiteral("Mcd001.ps2")) && partida.removeRecursively();
 }
 
 void Lanzador::abrirCarpeta(const QString &ruta) const

@@ -1,0 +1,27 @@
+Build the generated register_functions.cpp on its own at -O1, without unity batching or the precompiled header.
+It is one constructor with every function-table store (God of War: 155k stores, 12.8 MB) and runs once at start-up.
+At -O3 inside unity batch 0 it took 331 s, the game build's longest unit; at -O1 alone it takes 9.8 s (measured,
+Xeon E5-2666 v3, clang 23). The PCH is skipped because clang rejects a PCH built at another optimisation level.
+
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -511,6 +511,18 @@
+     )
+ endif()
+ 
++# gow-native-pc (patch 41): register_functions.cpp is one generated constructor with every function-table store
++# (God of War: 155k stores, 12.8 MB). At -O3 inside a unity batch it alone took 331 s, the build's critical path; it runs
++# once at start-up. Built on its own at -O1 (later options override the configuration's -O3).
++set(PS2X_REGISTER_FUNCTIONS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/register_functions.cpp")
++if(EXISTS "${PS2X_REGISTER_FUNCTIONS_SOURCE}")
++    # own includes, no precompiled header: the PCH is built at the configuration's level and clang rejects the mismatch
++    set_source_files_properties("${PS2X_REGISTER_FUNCTIONS_SOURCE}" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
++    if(NOT MSVC)
++        set_source_files_properties("${PS2X_REGISTER_FUNCTIONS_SOURCE}" PROPERTIES COMPILE_OPTIONS "-O1")
++    endif()
++endif()
++
+ if(PS2X_ENABLE_RUNNER_PCH)
+     set(PS2X_RUNNER_PCH_HEADERS
+         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime_macros.h"
