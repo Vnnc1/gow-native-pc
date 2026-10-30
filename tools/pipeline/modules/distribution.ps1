@@ -39,7 +39,9 @@ if ($Stages -contains 'launcher') {
 # --- package: the release zip (GitHub Releases) ---------------------------------------------------------------------
 # launcher/bin = the built launcher + its Qt DLLs; the rest is this repository without generated data. Users unzip it
 # anywhere and start launcher\bin\gow-launcher.exe (it finds the repository root by games\<id>\game.toml above it).
-if ($Stages -contains 'package' -or ($Stages -contains 'installer' -and -not (Test-Path (Join-Path $root 'data\_package\gow-native-pc')))) {
+# The installer always packs a fresh staging folder: reusing an existing one shipped a 2-day-old launcher and repository
+# in a 3.0.0 setup (found 2026-10-30) because nothing compared it with the current sources.
+if ($Stages -contains 'package' -or $Stages -contains 'installer') {
     Step 'release package'
     $lb = Join-Path $root 'launcher/build-clang/deploy'
     $exe = Join-Path $lb 'gow-launcher.exe'
