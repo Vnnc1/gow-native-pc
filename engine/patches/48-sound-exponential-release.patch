@@ -1,0 +1,48 @@
+Sound: an exponential release / decrease reaches ENVX 0 (arithmetic shift as PCSX2 and DuckStation); keyed-off voices no longer stay taken and fill the effects core in combat. GOW_SND_VOICESTATS=1 prints voices in use / in release every 5 s.
+
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+@@ -497,8 +497,12 @@
+         step <<= std::max(0, 11 - shiftValue);
+         if (exponential && increase && v.envelope > 0x6000)
+             cycles *= 4u;
++        // gow-native-pc: an arithmetic shift, as PCSX2 and DuckStation (psx-spx: Step * Level / 8000h on the hardware's
++        // two's complement value). A division truncates toward zero: the step became 0 near silence and an exponential
++        // release / decrease stopped above 0 (at 1/8 of full level with slow rates), the voice kept sounding and stayed taken:
++        // in combat the effects core filled its 24 voices with them and new hits found none free.
+         if (exponential && !increase)
+-            step = step * v.envelope / 0x8000;
++            step = (step * v.envelope) >> 15;
+ 
+         if (++v.envelopeCounter >= cycles)
+         {
+@@ -747,6 +751,28 @@
+         else
+             mixBatch(m_batch.data(), static_cast<size_t>(samples));
+         m_lastCycle += samples * CyclesPerSample;
++        // GOW_SND_VOICESTATS=1: every 5 s of audio, the voices in use per core, those keyed off (release) and those keyed
++        // off and already silent to the ear (level below 0x100) that the driver cannot reuse until ENVX reaches 0
++        static const bool voiceStats = std::getenv("GOW_SND_VOICESTATS") != nullptr;
++        if (voiceStats)
++        {
++            static uint64_t mixed = 0;
++            mixed += samples;
++            if (mixed >= 240000u)
++            {
++                mixed = 0;
++                unsigned active[2] = {}, release[2] = {}, quiet[2] = {};
++                for (uint32_t core = 0; core < 2u; ++core)
++                    for (const Voice &v : m_cores[core].voices)
++                    {
++                        active[core] += v.active ? 1u : 0u;
++                        release[core] += v.active && v.phase == Voice::Phase::Release ? 1u : 0u;
++                        quiet[core] += v.active && v.phase == Voice::Phase::Release && v.envelope < 0x100 ? 1u : 0u;
++                    }
++                std::fprintf(stderr, "[snd-voicestats] active=%u/%u release=%u/%u release_quiet=%u/%u\n", active[0], active[1],
++                             release[0], release[1], quiet[0], quiet[1]);
++            }
++        }
+         std::lock_guard<std::mutex> lock(m_outputMutex);
+         m_output.insert(m_output.end(), m_batch.begin(), m_batch.end());
+         if (m_output.size() > kMaxBufferedFrames * 2u)

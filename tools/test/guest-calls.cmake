@@ -71,3 +71,10 @@ set_tests_properties(gow_dma_worker_tests PROPERTIES TIMEOUT 30)
 add_executable(gow_vu1_tasks "${CMAKE_CURRENT_LIST_DIR}/vu1_tasks.cpp")
 target_compile_features(gow_vu1_tasks PRIVATE cxx_std_20)
 target_link_libraries(gow_vu1_tasks PRIVATE ps2_runtime)
+# The IOP mixer alone (no game data): saturation of a full mix and envelopes that reach silence.
+add_executable(gow_sound_regression "${CMAKE_CURRENT_LIST_DIR}/sound_regression.cpp"
+    "${CMAKE_SOURCE_DIR}/ps2xIOP/src/emulator/core/sound_engine.cpp")
+target_compile_features(gow_sound_regression PRIVATE cxx_std_20)
+target_include_directories(gow_sound_regression PRIVATE "${CMAKE_SOURCE_DIR}/ps2xIOP/src/emulator/core")
+add_test(NAME gow_sound_regression COMMAND gow_sound_regression)
+set_tests_properties(gow_sound_regression PROPERTIES TIMEOUT 60)

@@ -33,4 +33,39 @@ int main() {
   }
   }
     std::puts("PASS: 2-48 voice positive/negative saturation and queue drain");
+
+  // An exponential release must reach ENVX 0: 989snd only reuses a keyed-off voice once its envelope is silent. With the
+  // step truncated toward zero (step * level / 0x8000) the level stopped above 0 and the voices piled up until hits and
+  // other effects found no free voice (silent combat, sound back after an area change).
+  for (unsigned rate : {0u, 4u, 8u, 11u, 13u, 15u}) {
+  for (bool exponential : {true, false}) {
+    SoundEngine sound;
+    std::array<unsigned char,16> block{};
+    block[1]=3; // end + repeat: the sample loops, only the envelope can stop the voice
+    for (size_t i=2;i<block.size();++i) block[i]=0x77;
+    sound.writeSampleRam(0,block.data(),block.size());
+    sound.setParam(0x900,0x3fff); sound.setParam(0xa00,0x3fff);
+    sound.setSwitch(0x1800,1); sound.setSwitch(0x1a00,1);
+    sound.setParam(0x000,0x3fff); sound.setParam(0x100,0x3fff); sound.setParam(0x200,0x1000);
+    sound.setParam(0x300,0x000f);                                        // fastest linear attack, sustain level max
+    sound.setParam(0x400,static_cast<uint16_t>((exponential ? 0x20u : 0u) | rate)); // release rate, sustain held
+    sound.setAddr(0x2000,0);
+    sound.setSwitch(0x1500,1);
+    uint64_t cycle=4800*SoundEngine::CyclesPerSample;                    // 0.1 s at full level
+    sound.advanceTo(cycle);
+    require(sound.getParam(0x500)>=0x7000,"attack reaches full level");
+    sound.setSwitch(0x1600,1);
+    for (unsigned second=0;second<10 && sound.getParam(0x500)!=0;++second) {
+        cycle+=48000ull*SoundEngine::CyclesPerSample;
+        sound.advanceTo(cycle);
+        std::vector<int16_t> sink(96000);
+        while (sound.drainOutput(sink.data(),48000)!=0) {}
+    }
+    if (sound.getParam(0x500)!=0) {
+        std::fprintf(stderr,"release rate %u (%s) stops at ENVX %u\n",rate,exponential?"exponential":"linear",sound.getParam(0x500));
+        require(false,"released voice must reach ENVX 0");
+    }
+  }
+  }
+    std::puts("PASS: linear and exponential releases reach ENVX 0");
 }
