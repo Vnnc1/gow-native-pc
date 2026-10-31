@@ -12,6 +12,7 @@ patch) and in the history of this repository.
 | [god-of-war-recomp](https://github.com/KIexster/god-of-war-recomp) | KIexster | The patch stack that first reached God of War (USA) gameplay, its recompiler configuration and function map, and the VU1 capture fix in `engine/patches/02-vu1-capture-with-native.patch` | see its repository |
 | [Tobiichi-Port](https://github.com/YYOzcan/Tobiichi-Port) | YYOzcan | The runtime this project downloads (`engine/runtime.toml`: it bundles the three above) and the **launcher** in `launcher/` (Tobiichi Launcher: Qt 6 interface, settings, controls, cheats, widescreen, image filters) | GPL-3.0 |
 | [GoW2-nativo-PS2](https://github.com/cxldsakeb/GoW2-nativo-PS2) | cxldsakeb, DaniSBR1, Alejrr2 | Runtime fixes from their fork [DaniSBR1/PS2Recomp](https://github.com/DaniSBR1/PS2Recomp) (branch `godofwar2`) in `engine/patches/05` (GS upscaling fixes, anisotropic filtering, guest pools, DMA, MPEG audio, memory card, IOP imports) and the MOVZ/MOVN fix redone in `06` | GPL-3.0 |
+| [gow-native-pc-optimization](https://github.com/huanghuangdaquan-beep/gow-native-pc-optimization) | huanghuangdaquan-beep | A fork of this project: its VU1 lazy pair decode and GIF zero-copy patches, rebased as `engine/patches/45` and `46` | GPL-3.0 |
 | [Qt](https://www.qt.io/) | The Qt Company | The launcher's toolkit (dynamically linked) | LGPL-3.0 |
 
 ## Added in this project

@@ -1,0 +1,121 @@
+VU1 decoded-pair cache decodes on demand. refreshDecodedCodeCache (formerly rebuildDecodedCodeCache) decoded all 2048
+pairs of the micro image whenever the VU1 code generation changed, on the VIF1/VU1 worker, and compiledProgramFor
+refreshes it on every new generation; most pairs of an image are never executed. The refresh now records the image
+identity, clears a per-pair valid bit and derives m_statusUnread / m_statusQuiet from the raw words (the lower opcode
+and the upper I bit, the same two values decodeInstructionPair takes); getDecodedInstructionPairForPc decodes a pair
+the first time it is asked for. decodeInstructionPair is const and reads no interpreter state, so a pair decodes to
+the same value whenever it is decoded: results are bit-identical. compiledProgramFor keeps refreshing because the
+compiled program reads m_statusQuiet. Only getDecodedInstructionPairForPc reads the cache.
+From huanghuangdaquan-beep/gow-native-pc-optimization (its patch 44), rebased on patches 30-44 here. Measured there
+on an i3-4170 (tools/test/vu1_change_cost.cpp): one refresh 39-112 us -> about 1 us. Not yet measured on this
+project's hardware (replay bench and A/B FPS pairs pending).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h
+index e0084f7..17d04cf 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -2,6 +2,7 @@
+ #define PS2_VU1_H
+ 
+ #include <array>
++#include <bitset>
+ #include <cmath>
+ #include <cstring>
+ #include <limits>
+@@ -265,6 +266,9 @@ private:
+     Unit m_unit;
+     VU1State m_state;
+     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
++    // Which entries of m_decodedCodeCache belong to the current image. A pair decodes on its first read:
++    // refreshing the cache used to decode all 2048 of them, and combat refreshes it hundreds of times per second.
++    std::bitset<kMaxDecodedPairs> m_decodedValid{};
+     const uint8_t *m_cachedVuCode = nullptr;
+     const PS2Memory *m_cachedMemory = nullptr;
+     uint32_t m_cachedCodeSize = 0;
+@@ -356,7 +360,7 @@ private:
+     static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
+     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
+     const DecodedInstructionPair &getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+-    void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
++    void refreshDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
+ 
+     void execUpper(uint32_t instr);
+     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 0fd6c6c..03eb445 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1836,12 +1836,11 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
+     return decoded;
+ }
+ 
+-void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
++void VU1Interpreter::refreshDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
+                                              const PS2Memory *memory, uint64_t generation)
+ {
+     const uint32_t pairCount = std::min<uint32_t>(codeSize / 8u, kMaxDecodedPairs);
+-    for (uint32_t i = 0; i < pairCount; ++i)
+-        m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
++    m_decodedValid.reset(); // the pairs themselves decode on demand in getDecodedInstructionPairForPc
+ 
+     m_cachedVuCode = vuCode;
+     m_cachedMemory = memory;
+@@ -1849,19 +1848,25 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+     m_cachedCodeGeneration = generation;
+     m_decodedCodeCacheValid = true;
+     // FSAND (0x16), FSEQ (0x14) y FSOR (0x17) son las únicas lecturas del estado en VU1.
++    // Both scans read a pair's two words the way decodeInstructionPair does: only the lower opcode and the upper
++    // I bit matter here, so nothing needs decoding to answer them.
+     m_statusUnread = m_directRegisterWrites;
+     for (uint32_t i = 0; i < pairCount && m_statusUnread; ++i)
+     {
+-        const DecodedInstructionPair &pair = m_decodedCodeCache[i];
+-        const uint32_t op = pair.lower >> 25;
+-        if (!pair.iBit && (op == 0x14u || op == 0x16u || op == 0x17u))
++        uint32_t lower = 0u, upper = 0u;
++        std::memcpy(&lower, vuCode + i * 8u, sizeof(lower));
++        std::memcpy(&upper, vuCode + i * 8u + sizeof(lower), sizeof(upper));
++        const uint32_t op = lower >> 25;
++        if ((upper & 0x80000000u) == 0u && (op == 0x14u || op == 0x16u || op == 0x17u))
+             m_statusUnread = false;
+     }
+     m_statusQuiet = m_statusUnread;
+     for (uint32_t i = 0; i < pairCount && m_statusQuiet; ++i)
+     {
+-        const DecodedInstructionPair &pair = m_decodedCodeCache[i];
+-        if (!pair.iBit && (pair.lower >> 25) == 0x15u) // FSSET
++        uint32_t lower = 0u, upper = 0u;
++        std::memcpy(&lower, vuCode + i * 8u, sizeof(lower));
++        std::memcpy(&upper, vuCode + i * 8u + sizeof(lower), sizeof(upper));
++        if ((upper & 0x80000000u) == 0u && (lower >> 25) == 0x15u) // FSSET
+             m_statusQuiet = false;
+     }
+     // GOW-Port: GOW_VU1C_FLAGS_VIVOS=1 calcula siempre los flags de las FMAC "muertas" de los bloques (diagnostico).
+@@ -1889,11 +1894,16 @@ const VU1Interpreter::DecodedInstructionPair &VU1Interpreter::getDecodedInstruct
+         m_cachedCodeSize != codeSize ||
+         m_cachedCodeGeneration != generation)
+     {
+-        rebuildDecodedCodeCache(vuCode, codeSize, memory, generation);
++        refreshDecodedCodeCache(vuCode, codeSize, memory, generation);
+     }
+     const uint32_t pairIndex = pc / 8u;
+     if (pairIndex >= kMaxDecodedPairs)
+         return m_decodedScratch = decodeInstructionPair(vuCode, pc);
++    if (!m_decodedValid[pairIndex])
++    {
++        m_decodedCodeCache[pairIndex] = decodeInstructionPair(vuCode, pairIndex * 8u);
++        m_decodedValid[pairIndex] = true;
++    }
+     return m_decodedCodeCache[pairIndex];
+ }
+ 
+@@ -2446,7 +2456,8 @@ VU1Interpreter::CompiledProgramFn VU1Interpreter::compiledProgramFor(uint8_t *vu
+     {
+         m_compiledGeneration = generation;
+         // Mantener al día la caché de decodificación (y m_statusUnread) aunque se use el código compilado.
+-        (void)getDecodedInstructionPairForPc(vuCode, codeSize, memory, 0u);
++        // The compiled program reads m_statusQuiet, so the refresh still happens here; it no longer decodes pairs.
++        refreshDecodedCodeCache(vuCode, codeSize, memory, generation);
+         // GOW_VU1_CAPTURA=<carpeta>: guarda cada micromemoria distinta (entrada de generar_vu1). Son datos del
+         // juego: no se publican.
+         static const char *captureDir = std::getenv("GOW_VU1_CAPTURA");

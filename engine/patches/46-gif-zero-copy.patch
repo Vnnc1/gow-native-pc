@@ -1,0 +1,159 @@
+GS worker: hand GIF (PATH3) DMA packets to the GIF arbiter instead of copying them again. runGsWorkerJob gathered
+each GIF item into item.data (appendGuestBytes) and submitGifPacket(..., false) memcpy'd it once more into the
+arbiter's queue. submitGifPacketBuffer / GifArbiter::submitBuffer move the vector in instead. The arbiter gives
+those buffers back to the DMA buffer pool through a recycle callback (set by setGifArbiter) after drain() processed
+them, so the pool that keeps the EE thread from reallocating and faulting in new pages stays fed; without it the
+moved buffers were freed and the pool lost them. The masked PATH3 FIFO still keeps its own copy and the no-arbiter
+callback reads in place; in both the item buffer stays with the job and returns to the pool as before. Packet order
+and contents are unchanged.
+From huanghuangdaquan-beep/gow-native-pc-optimization (its patch 42), rebased on patches 30-45 here; the recycle
+callback is this project's addition. Not yet measured on this project's hardware (A/B FPS pairs pending).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+index b26ab91..82ef873 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+@@ -18,6 +18,7 @@ struct GifArbiterPacket
+     GifPathId pathId;
+     bool path2DirectHl = false;
+     bool path3Image = false;
++    bool recycle = false; // data came from submitBuffer: handed to the recycle callback after processing
+     std::vector<uint8_t> data;
+ };
+ 
+@@ -33,9 +34,15 @@ public:
+ 
+     void setProcessPacketFn(ProcessPacketFn fn);
+     void setProcessPathPacketFn(ProcessPathPacketFn fn) { m_processFn = std::move(fn); }
++    // Receives the buffers given to submitBuffer once drain() has processed them (the DMA buffer pool).
++    using RecycleFn = std::function<void(std::vector<uint8_t> &&)>;
++    void setRecycleFn(RecycleFn fn) { m_recycleFn = std::move(fn); }
+     void reset() { m_queue.clear(); m_path3Input = {}; }
+ 
+     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
++    // Move-in overload: takes over an already-materialized buffer (the DMA worker's packet copy) without the
++    // second full-packet memcpy that submit() would make.
++    void submitBuffer(GifPathId pathId, std::vector<uint8_t> &&data, bool path2DirectHl = false);
+     // submit + drain. With nothing queued the packet is the whole batch: it goes to the callback in place, without the
+     // queue's copy (every XGKICK takes this path).
+     void submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+@@ -45,6 +52,7 @@ public:
+ 
+ private:
+     ProcessPathPacketFn m_processFn;
++    RecycleFn m_recycleFn;
+     std::vector<GifArbiterPacket> m_queue;
+ 
+     // GOW-Port: el primer quadword de un bloque DMA puede ser payload, no una GIFtag.
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+index a7d0e87..4cea673 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -365,7 +365,7 @@ public:
+ 
+     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
+     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
+-    void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
++    void setGifArbiter(GifArbiter *arbiter); // also gives it the DMA buffer pool (submitGifPacketBuffer)
+ 
+     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
+     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+@@ -385,6 +385,9 @@ public:
+     void flushMaskedPath3Packets(bool drainImmediately = true);
+ 
+     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
++    // Move-in variant for buffers the caller already materialized (the GS worker's item copies): queues without
++    // the second full-packet memcpy. Only the enqueue path (drainImmediately=false semantics).
++    void submitGifPacketBuffer(GifPathId pathId, std::vector<uint8_t> &&data, bool path2DirectHl = false);
+     // PS2X_GS_WORKER_TRACE=<s>: one "[gsw-trace] <host us> <what> <value>" line (kick/job-start/job-done/gs-irq)
+     static void gsWorkerTrace(const char *what, size_t value);
+     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index 592a4f6..284f5b7 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -77,6 +77,20 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
+     m_queue.push_back(std::move(pkt));
+ }
+ 
++void GifArbiter::submitBuffer(GifPathId pathId, std::vector<uint8_t> &&data, bool path2DirectHl)
++{
++    if (data.size() < 16 || !m_processFn || pathId < GifPathId::Path1 || pathId > GifPathId::Path3)
++        return;
++
++    GifArbiterPacket pkt;
++    pkt.pathId = pathId;
++    pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
++    pkt.path3Image = (pathId == GifPathId::Path3) && trackPath3Packet(data.data(), static_cast<uint32_t>(data.size()));
++    pkt.data = std::move(data); // zero-copy handover of the DMA worker's buffer
++    pkt.recycle = true;
++    m_queue.push_back(std::move(pkt));
++}
++
+ void GifArbiter::submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
+ {
+     if (!m_queue.empty() || !data || sizeBytes < 16 || !m_processFn || pathId < GifPathId::Path1 || pathId > GifPathId::Path3)
+@@ -130,6 +144,11 @@ void GifArbiter::drain()
+             if (!pkt.data.empty())
+                 m_processFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
++        // buffers taken over by submitBuffer go back to their owner's pool once processed
++        if (m_recycleFn)
++            for (size_t i = 0u; i < count; ++i)
++                if (m_queue[i].recycle)
++                    m_recycleFn(std::move(m_queue[i].data));
+         // GOW-Port: conservar los paquetes que el callback haya añadido; se procesan en otra tanda.
+         m_queue.erase(m_queue.begin(), m_queue.begin() + count);
+     }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+index e68b498..3c12787 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2195,7 +2195,8 @@ void PS2Memory::runGsWorkerJob(GsWorkerJob &job)
+         {
+             m_seenGifCopy = true;
+             m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+-            submitGifPacket(GifPathId::Path3, item.data.data(), size, false);
++            // the item buffer was materialized in appendGuestBytes: hand it over instead of copying again
++            submitGifPacketBuffer(GifPathId::Path3, std::move(item.data));
+         }
+     }
+     if (m_gifArbiter)
+@@ -2388,6 +2389,37 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t
+         m_gifPacketCallback(data, sizeBytes);
+ }
+ 
++void PS2Memory::setGifArbiter(GifArbiter *arbiter)
++{
++    m_gifArbiter = arbiter;
++    if (arbiter)
++        arbiter->setRecycleFn([](std::vector<uint8_t> &&buffer) { returnDmaBuffer(std::move(buffer)); });
++}
++
++// The masked FIFO copies and the callback reads in place, so there `data` is left to the caller (runGsWorkerJob
++// returns it to the DMA buffer pool); only the arbiter takes it over, and gives it back through its recycle callback.
++void PS2Memory::submitGifPacketBuffer(GifPathId pathId, std::vector<uint8_t> &&data, bool path2DirectHl)
++{
++    const uint32_t sizeBytes = static_cast<uint32_t>(data.size());
++    if (sizeBytes < 16)
++        return;
++
++    if (pathId == GifPathId::Path3)
++    {
++        if (m_path3Masked)
++        {
++            m_path3MaskedFifo.emplace_back(data.begin(), data.end()); // the FIFO keeps its own copy
++            return;
++        }
++        flushMaskedPath3Packets(false);
++    }
++
++    if (m_gifArbiter)
++        m_gifArbiter->submitBuffer(pathId, std::move(data), path2DirectHl); // zero-copy handover
++    else if (m_gifPacketCallback)
++        m_gifPacketCallback(data.data(), sizeBytes);
++}
++
+ void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
+ {
+     syncGsWorkerIfOtherThread("processGIFPacket");
