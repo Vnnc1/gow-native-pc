@@ -27,6 +27,9 @@ class InstallerBackend : public QObject
 
 public:
     explicit InstallerBackend(QObject *parent = nullptr);
+    // finished(false, kPipelineScriptGone): tools/pipeline/build.ps1 is missing before or after the run (an antivirus
+    // quarantined it); the QML pages explain that instead of an exit code
+    static constexpr int kPipelineScriptGone = -2;
 
     QString repoRoot() const { return m_root; }
     QString gameId() const { return m_game; }

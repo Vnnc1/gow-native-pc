@@ -381,6 +381,9 @@ var tabla = {
     instCancel: { en: "Cancel", es: "Cancelar", pt: "Cancelar" },
     instDone: { en: "Finished", es: "Terminado", pt: "Concluído" },
     instFailed: { en: "Failed (code %1): see the log", es: "Falló (código %1): mira el registro", pt: "Falhou (código %1): veja o log" },
+    // installer.finished code -2 (InstallerBackend::kPipelineScriptGone): build.ps1 disappeared, usually into an antivirus quarantine
+    instScriptGone: { en: "Failed: a file of the installation was removed", es: "Falló: se borró un archivo de la instalación", pt: "Falhou: um arquivo da instalação foi removido" },
+    instScriptGoneHelp: { en: "tools\\pipeline\\build.ps1 is missing: an antivirus usually quarantines it while it runs. Restore it from the antivirus (Windows Security → Protection history), add an exclusion for this installation's folder and run the setup again.", es: "Falta tools\\pipeline\\build.ps1: suele ser el antivirus, que lo pone en cuarentena al ejecutarlo. Restáuralo desde el antivirus (Seguridad de Windows → Historial de protección), añade una exclusión para la carpeta de esta instalación y vuelve a ejecutar el instalador.", pt: "Falta tools\\pipeline\\build.ps1: em geral é o antivírus, que o põe em quarentena ao executá-lo. Restaure-o pelo antivírus (Segurança do Windows → Histórico de proteção), adicione uma exclusão para a pasta desta instalação e execute o instalador de novo." },
     instNotReady: { en: "Install the game first (Install tab)", es: "Instala el juego primero (pestaña Instalación)", pt: "Instale o jogo primeiro (aba Instalação)" },
     langQuestion: { en: "Which language do you want to play in?", es: "¿En qué idioma quieres jugar?", pt: "Em qual idioma você quer jogar?" },
     langRemember: { en: "You can change it later in Other → Game text.", es: "Puedes cambiarlo luego en Otros → Texto del juego.", pt: "Você pode trocar depois em Outros → Idioma do jogo." },

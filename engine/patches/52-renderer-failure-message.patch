@@ -1,0 +1,149 @@
+Renderer start failure: the window says why instead of a frozen magenta screen. The GS renderer is the only renderer, and
+when it cannot start (no OpenGL 4.3 core context: old GPU, the Microsoft Basic Display Adapter, Remote Desktop; or a
+driver that rejects the shaders) no frame ever arrives and the window kept its magenta placeholder: players reported
+"a pink screen, frozen". The renderer records the reason (GSSharedPresent::SetRendererFailure) and the host window draws
+a short explanation in the launcher's language (TOBIICHI_IDIOMA en/es/pt; ASCII, raylib's default font). Nothing
+changes while the renderer works. GOW_GS_FAIL_TEST=context|shaders (test) fails the start on purpose.
+Checked on an RX 580: both test failures show their message (es, pt; long lines shrink to fit 1920x1080), and a normal
+run shows the title screen as before.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_shared_present.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_shared_present.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_shared_present.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_shared_present.h
+@@ -30,4 +30,10 @@
+     bool Active();
+     bool Acquire(Frame &frame);
+     void ShutdownHost();
++
++    // gow-native-pc (patch 52): the GS renderer is the only renderer, so when it cannot start the window would show its
++    // magenta placeholder forever. The renderer records why here and the host window explains it instead.
++    enum class RendererFailure { None, NoContext, Shaders };
++    void SetRendererFailure(RendererFailure failure);
++    RendererFailure GetRendererFailure();
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+@@ -621,6 +621,22 @@
+         return s_sharedActive.load(std::memory_order_acquire);
+     }
+ 
++    // gow-native-pc (patch 52): written by the GS worker, read by the host window
++    namespace
++    {
++        std::atomic<RendererFailure> s_rendererFailure{RendererFailure::None};
++    }
++
++    void SetRendererFailure(RendererFailure failure)
++    {
++        s_rendererFailure.store(failure, std::memory_order_release);
++    }
++
++    RendererFailure GetRendererFailure()
++    {
++        return s_rendererFailure.load(std::memory_order_acquire);
++    }
++
+     bool Acquire(Frame &frame)
+     {
+         if (!Active())
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -676,18 +676,25 @@
+             return true;
+         if (failed)
+             return false;
++        // gow-native-pc (patch 52): GOW_GS_FAIL_TEST=context|shaders (test) fails the start the way a driver without
++        // OpenGL 4.3 or one that rejects the shaders does, to check the message the window shows instead
++        static const std::string failTest = [] { const char *v = std::getenv("GOW_GS_FAIL_TEST"); return std::string(v ? v : ""); }();
+         std::string error;
+-        if (!context.Create(error) || !gl().hwRaster)
+-        {
+-            std::fprintf(stderr, "[gs-hw] GL unavailable: %s\n", error.c_str());
++        if (failTest == "context" || !context.Create(error) || !gl().hwRaster)
++        {
++            std::fprintf(stderr, "[gs-hw] GL unavailable: %s\n", failTest == "context" ? "GOW_GS_FAIL_TEST=context" : error.c_str());
++            GSSharedPresent::SetRendererFailure(GSSharedPresent::RendererFailure::NoContext);
+             failed = true;
+             return false;
+         }
+         const Api &g = gl();
+         const GLuint v = compile(GSGL::kVertexShader, kVsSource);
+-        const GLuint f = compile(GSGL::kFragmentShader, {kFsSource, kReinterpretSource, kFsTail});
++        const GLuint f = failTest == "shaders" ? 0u : compile(GSGL::kFragmentShader, {kFsSource, kReinterpretSource, kFsTail});
+         if (!v || !f)
+         {
++            if (failTest == "shaders")
++                std::fprintf(stderr, "[gs-hw] shader error: GOW_GS_FAIL_TEST=shaders\n");
++            GSSharedPresent::SetRendererFailure(GSSharedPresent::RendererFailure::Shaders);
+             failed = true;
+             return false;
+         }
+@@ -703,6 +710,7 @@
+             GLsizei n = 0;
+             g.GetProgramInfoLog(program, sizeof(log), &n, log);
+             std::fprintf(stderr, "[gs-hw] link error: %s\n", log);
++            GSSharedPresent::SetRendererFailure(GSSharedPresent::RendererFailure::Shaders);
+             failed = true;
+             return false;
+         }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+@@ -11,6 +11,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <iostream>
++#include <string>
+ 
+ float gowAspectoPresentacion();                                // GOW-Port: gow_integracion.cpp
+ void gowCuadroDibujar(float x, float y, float w, float h); // GOW-Port: gow_integracion.cpp
+@@ -328,6 +329,38 @@
+     current.borrowed = current.blank = false;
+     current.frame = {};
+     return current;
++}
++
++// gow-native-pc (patch 52): when the GS renderer could not start no frame ever arrives and the window kept the magenta
++// placeholder, which players reported as a frozen pink screen. Say why instead, in the launcher's language.
++static void drawRendererFailure(GSSharedPresent::RendererFailure failure)
++{
++    const char *v = std::getenv("TOBIICHI_IDIOMA");
++    const std::string language = v ? v : "en";
++    const bool es = language == "es", pt = language == "pt";
++    const bool noContext = failure == GSSharedPresent::RendererFailure::NoContext;
++    const char *lines[4] = {
++        es ? "No se pudo iniciar el renderizador de la GPU." : pt ? "Nao foi possivel iniciar o renderizador da GPU." : "The GPU renderer could not start.",
++        noContext ? (es ? "El driver de video no ofrece OpenGL 4.3." : pt ? "O driver de video nao oferece OpenGL 4.3." : "The graphics driver does not offer OpenGL 4.3.")
++                  : (es ? "El driver de video rechazo los shaders del juego." : pt ? "O driver de video recusou os shaders do jogo." : "The graphics driver rejected the game's shaders."),
++        noContext ? (es ? "Instala el driver mas reciente de NVIDIA, AMD o Intel (no sirven el adaptador basico de Microsoft ni el Escritorio remoto)."
++                        : pt ? "Instale o driver mais recente da NVIDIA, AMD ou Intel (o adaptador basico da Microsoft e a Area de Trabalho Remota nao servem)."
++                             : "Install the latest driver from NVIDIA, AMD or Intel (Microsoft Basic Display Adapter and Remote Desktop do not work).")
++                  : (es ? "Actualiza el driver de video y envia standalone.log en un reporte de error."
++                        : pt ? "Atualize o driver de video e envie o standalone.log num relato de bug."
++                             : "Update the graphics driver and send standalone.log with a bug report."),
++        es ? "Detalles en el registro: lineas [gs-hw]." : pt ? "Detalhes no log: linhas [gs-hw]." : "Details in the log: [gs-hw] lines."};
++    const int width = GetScreenWidth(), height = GetScreenHeight();
++    DrawRectangle(0, 0, width, height, BLACK);
++    const int size = std::max(16, height / 36), gap = size / 2;
++    int y = height / 2 - (4 * size + 3 * gap) / 2;
++    for (int i = 0; i < 4; ++i, y += size + gap)
++    {
++        int lineSize = i == 0 ? size + size / 3 : size;
++        while (lineSize > 10 && MeasureText(lines[i], lineSize) > width - 32) // a long line shrinks to fit the window
++            --lineSize;
++        DrawText(lines[i], std::max(8, (width - MeasureText(lines[i], lineSize)) / 2), y, lineSize, i == 0 ? RED : RAYWHITE);
++    }
+ }
+ 
+ GSHostPresentation::View GSHostPresentation::renderFrame(GS &gs, uint64_t vsyncTick, const std::function<void()> &overlay)
+@@ -412,6 +445,8 @@
+     DrawTexturePro(shown, shownSource, destination, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+     if (scaler)
+         EndShaderMode();
++    if (selected.blank && GSSharedPresent::GetRendererFailure() != GSSharedPresent::RendererFailure::None)
++        drawRendererFailure(GSSharedPresent::GetRendererFailure());
+     gowCuadroDibujar(destination.x, destination.y, destination.width, destination.height); // GOW-Port
+     if (overlay)
+         overlay();

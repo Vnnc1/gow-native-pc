@@ -11,7 +11,7 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-3.0.1-crimson)
+![version](https://img.shields.io/badge/version-0.3.1-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
@@ -32,8 +32,8 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ## Contents
 
 - [What is this?](#what-is-this)
-- [What's new in 3.0.1](#whats-new-in-301)
-- [What's new in 3.0.0](#whats-new-in-300)
+- [What's new in 0.3.1](#whats-new-in-031)
+- [What's new in 0.3.0](#whats-new-in-030)
 - [Required: the PS2Recomp runtime](#required-the-ps2recomp-runtime)
 - [Requirements](#requirements)
 - [Getting started](#getting-started)
@@ -66,7 +66,13 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
 
-## What's new in 3.0.1
+## What's new in 0.3.1
+
+> [!NOTE]
+> **Releases were renumbered on 2026-10-31**: v1.0.0, v2.0.0, v3.0.0 and v3.0.1 are now v0.1.0, v0.2.0, v0.3.0 and
+> v0.3.1 (same files). Every release and the meaning of the numbers: [`CHANGELOG.md`](CHANGELOG.md). A launcher from
+> before the renumbering does not see the new numbers as an update: install the next release (v0.4.0) once from its
+> setup, over your installation; your game build, discs and saves are kept.
 
 Measured on the test PC (Xeon E5-2666 v3 + RX 580, save route, full screen, alternating pairs); details in
 [`docs/research/roteiro-60fps.pt-BR.md`](docs/research/roteiro-60fps.pt-BR.md):
@@ -84,9 +90,9 @@ Measured on the test PC (Xeon E5-2666 v3 + RX 580, save route, full screen, alte
 - **Updates**: the "rebuild" notice clears only after a rebuild with the new runtime, and the launcher recommends
   retraining the profile-guided optimisation after an update.
 
-## What's new in 3.0.0
+## What's new in 0.3.0
 
-Compared with 2.0.0 (details: [`docs/tested-hardware.md`](docs/tested-hardware.md) and the
+Compared with 0.2.0 (details: [`docs/tested-hardware.md`](docs/tested-hardware.md) and the
 [review of this release](docs/research/revisao-2026-10-30.pt-BR.md)):
 
 | Area | Change |
@@ -264,7 +270,7 @@ The full plan, with measurement gates for each item: [`docs/research/roadmap-202
 
 | Priority | Focus | Status |
 |---|---|---|
-| 1 | Build and recompilation quality | Largely done in 3.0.0 (pinned toolchain, caching, verify, faster install with PGO); a sub-20-minute install is next |
+| 1 | Build and recompilation quality | Largely done in 0.3.0 (pinned toolchain, caching, verify, faster install with PGO); a sub-20-minute install is next |
 | 2 | Stable 60 fps | Early FINISH and PGO done; next: static VU1 timing (the remaining ~14% in heavy combat), native VU1 ops still interpreted |
 | 3 | Audio | PT-BR cutscene alignment and transition gaps |
 | 4 | Mods and texture packs | ISO patches, file overrides and texture replacement ([`docs/research/audio-standalone-mods-2026-10-26.md`](docs/research/audio-standalone-mods-2026-10-26.md)) |

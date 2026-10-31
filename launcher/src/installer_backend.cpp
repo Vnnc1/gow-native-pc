@@ -256,8 +256,16 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
 {
     if (m_process)
         return false;
+    const QString script = m_root + QStringLiteral("/tools/pipeline/build.ps1");
+    // An antivirus can quarantine the pipeline script: PowerShell then reports "the term ... is not recognized" (the file
+    // was there when it checked -File and gone when it ran it), which says nothing to a player. Say what happened.
+    if (!QFileInfo::exists(script))
+    {
+        QMetaObject::invokeMethod(this, [this] { emit finished(false, kPipelineScriptGone); }, Qt::QueuedConnection);
+        return true;
+    }
     QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
-                     QStringLiteral("-File"), m_root + QStringLiteral("/tools/pipeline/build.ps1"),
+                     QStringLiteral("-File"), script,
                      QStringLiteral("-Game"), m_game, QStringLiteral("-Stages"), stages};
     // no -BuildRoot: build.ps1 picks this copy's build folder and records it in data/build-root.txt
     const QStringList isos = options.value(QStringLiteral("isos")).toStringList();
@@ -288,10 +296,12 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
         emit finished(false, -1);
     });
     connect(m_process, &QProcess::readyReadStandardOutput, this, &InstallerBackend::readOutput);
-    connect(m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status)
+    connect(m_process, &QProcess::finished, this, [this, script](int code, QProcess::ExitStatus status)
     {
         if (!m_process)
             return;
+        if ((status != QProcess::NormalExit || code != 0) && !QFileInfo::exists(script))
+            code = kPipelineScriptGone;
         readOutput();
         if (!m_pending.isEmpty())
             emit logLine(QString::fromLocal8Bit(m_pending));

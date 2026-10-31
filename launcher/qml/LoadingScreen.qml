@@ -188,6 +188,7 @@ Item {
         function onLogLine(l) { if (raiz.estado === "running") raiz.addLog(l) }
         function onFinished(ok, code) {
             if (raiz.estado !== "running") return
+            if (code === -2) raiz.addLog(Tema.t("instScriptGoneHelp"))
             raiz.codigo = code
             raiz.estado = ok ? "done" : "failed"
             if (!ok) raiz.verRegistro = true
@@ -281,7 +282,7 @@ Item {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             text: raiz.estado === "done" ? Tema.t("cargaListo")
-                  : raiz.estado === "failed" ? Tema.tf("instFailed", raiz.codigo) : Tema.t("cargaTitulo")
+                  : raiz.estado === "failed" ? (raiz.codigo === -2 ? Tema.t("instScriptGone") : Tema.tf("instFailed", raiz.codigo)) : Tema.t("cargaTitulo")
             color: raiz.estado === "failed" ? Tema.mal : Tema.texto
             font.family: Tema.fuenteTitulo
             font.pixelSize: 38

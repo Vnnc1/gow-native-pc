@@ -362,6 +362,22 @@ void finish(bool ok, const std::wstring &message)
 }
 
 // ------------------------------------------------------------------------------------------------ install / remove
+// The runtime patches of an installation (engine\patches\*.patch, file name -> contents).
+std::vector<std::pair<std::wstring, std::vector<uint8_t>>> readPatches(const std::wstring &dir)
+{
+    std::vector<std::pair<std::wstring, std::vector<uint8_t>>> patches;
+    std::error_code ec;
+    for (const auto &f : fs::directory_iterator(dir + L"\\engine\\patches", ec))
+        if (f.path().extension() == L".patch")
+        {
+            std::vector<uint8_t> bytes;
+            readAll(f.path().wstring(), bytes);
+            patches.emplace_back(f.path().filename().wstring(), std::move(bytes));
+        }
+    std::sort(patches.begin(), patches.end());
+    return patches;
+}
+
 void installWorker(std::wstring dir, bool desktop)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -415,6 +431,16 @@ void installWorker(std::wstring dir, bool desktop)
         p += 8;
         entries.push_back(std::move(e));
     }
+    // An update over an installation: patches removed upstream go (fetch applies every file in the folder), and when
+    // the patch set changes the game must be rebuilt, as after a launcher update (tools/pipeline/update.ps1). Without
+    // it, moving from a 1.0.0-3.0.1 launcher (which cannot see 0.x releases) by running this setup kept the old build.
+    const auto patchesBefore = readPatches(dir);
+    for (const auto &[name, bytes] : patchesBefore)
+    {
+        const std::wstring rel = L"engine\\patches\\" + name;
+        if (std::none_of(entries.begin(), entries.end(), [&](const Entry &e) { return _wcsicmp(e.path.c_str(), rel.c_str()) == 0; }))
+            DeleteFileW(longPath(dir + L"\\" + rel).c_str());
+    }
     std::wstring list;
     uint64_t written = 0;
     for (const Entry &e : entries)
@@ -429,6 +455,13 @@ void installWorker(std::wstring dir, bool desktop)
         written += e.size + 4096;
         list += e.path + L"\r\n";
         progress(300 + static_cast<int>(670 * written / (g_footer.raw + 4096ull * entries.size())), e.path);
+    }
+    if (!patchesBefore.empty() && readPatches(dir) != patchesBefore && fs::is_directory(dir + L"\\data", ec))
+    {
+        // the launcher offers the rebuild (needs-rebuild) and recommends training the profile again (pgo-stale)
+        const std::string version = GOW_VERSION;
+        writeAll(dir + L"\\data\\needs-rebuild.txt", reinterpret_cast<const uint8_t *>(version.data()), version.size());
+        writeAll(dir + L"\\data\\pgo-stale.txt", reinterpret_cast<const uint8_t *>(version.data()), version.size());
     }
 
     // uninstaller, Windows' Apps entry, shortcuts (97-100 %)

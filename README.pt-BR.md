@@ -11,7 +11,7 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/vers%C3%A3o-3.0.1-crimson)
+![version](https://img.shields.io/badge/vers%C3%A3o-0.3.1-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
@@ -32,8 +32,8 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 ## Conteúdo
 
 - [O que é](#o-que-é)
-- [Novidades da 3.0.1](#novidades-da-301)
-- [Novidades da 3.0.0](#novidades-da-300)
+- [Novidades da 0.3.1](#novidades-da-031)
+- [Novidades da 0.3.0](#novidades-da-030)
 - [Obrigatório: o runtime PS2Recomp](#obrigatório-o-runtime-ps2recomp)
 - [Requisitos](#requisitos)
 - [Como usar](#como-usar)
@@ -67,7 +67,13 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
   mapeamento botão a botão.
 - **Menu no jogo (F1)**: ajustes gráficos ao vivo, truques e cópias do cartão de memória.
 
-## Novidades da 3.0.1
+## Novidades da 0.3.1
+
+> [!NOTE]
+> **As versões foram renumeradas em 31/10/2026**: v1.0.0, v2.0.0, v3.0.0 e v3.0.1 agora são v0.1.0, v0.2.0, v0.3.0 e
+> v0.3.1 (os mesmos arquivos). Todas as versões e o significado dos números: [`CHANGELOG.pt-BR.md`](CHANGELOG.pt-BR.md).
+> Um launcher de antes da renumeração não enxerga os números novos como atualização: instale a próxima versão (v0.4.0)
+> uma vez pelo setup, por cima da sua instalação; a compilação do jogo, os discos e os saves são mantidos.
 
 Medido no PC de teste (Xeon E5-2666 v3 + RX 580, rota do save, tela cheia, pares alternados); detalhes em
 [`docs/research/roteiro-60fps.pt-BR.md`](docs/research/roteiro-60fps.pt-BR.md):
@@ -85,9 +91,9 @@ Medido no PC de teste (Xeon E5-2666 v3 + RX 580, rota do save, tela cheia, pares
 - **Atualizações**: o aviso de "recompilar" só some depois de recompilar com o runtime novo, e o launcher recomenda
   retreinar o PGO depois de uma atualização.
 
-## Novidades da 3.0.0
+## Novidades da 0.3.0
 
-Em relação à 2.0.0 (detalhes em [`docs/tested-hardware.md`](docs/tested-hardware.md) e na
+Em relação à 0.2.0 (detalhes em [`docs/tested-hardware.md`](docs/tested-hardware.md) e na
 [revisão desta versão](docs/research/revisao-2026-10-30.pt-BR.md)):
 
 | Área | Mudança |
@@ -266,7 +272,7 @@ O plano completo, com os critérios de medição de cada item: [`docs/research/r
 
 | Prioridade | Foco | Situação |
 |---|---|---|
-| 1 | Qualidade da compilação e da recompilação | Em grande parte feito na 3.0.0 (toolchain fixada, cache, verify, instalação mais rápida com PGO); próximo: instalação abaixo de 20 minutos |
+| 1 | Qualidade da compilação e da recompilação | Em grande parte feito na 0.3.0 (toolchain fixada, cache, verify, instalação mais rápida com PGO); próximo: instalação abaixo de 20 minutos |
 | 2 | 60 fps estáveis | Early FINISH e PGO feitos; próximo: timing estático da VU1 (os ~14% que faltam no combate pesado) e instruções da VU1 ainda interpretadas |
 | 3 | Áudio | Alinhamento das cutscenes PT-BR e falhas em transições |
 | 4 | Mods e texture packs | Patches de ISO, substituição de arquivos e de texturas ([`docs/research/audio-standalone-mods-2026-10-26.md`](docs/research/audio-standalone-mods-2026-10-26.md)) |

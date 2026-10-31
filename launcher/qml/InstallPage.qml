@@ -101,7 +101,8 @@ ScrollView {
         function onLogLine(l) { root.addLog(l) }
         function onFinished(ok, code) {
             root.lastOk = ok
-            root.step = ok ? Tema.t("instDone") : Tema.tf("instFailed", code)
+            root.step = ok ? Tema.t("instDone") : code === -2 ? Tema.t("instScriptGone") : Tema.tf("instFailed", code)
+            if (code === -2) root.addLog(Tema.t("instScriptGoneHelp"))
             if (!ok) root.showLog = true
             root.refresh()
             if (ok && root.pendingIsos.length > 0) {
