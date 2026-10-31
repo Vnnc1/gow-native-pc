@@ -49,6 +49,8 @@ public:
     Q_INVOKABLE bool pgoApplied() const;
     // logical processors; the install skips the profile-guided build on small CPUs (InstallPage.qml)
     Q_INVOKABLE int cpuThreads() const;
+    // the CPU runs the game's build (x86-64-v2: SSE4.2 and POPCNT; older CPUs, such as Core 2 or Phenom II, do not)
+    Q_INVOKABLE bool cpuSupported() const;
     Q_INVOKABLE QVariantMap discScanReport() const;
     // pictures for the loading screen: the player's own images in data/<game>/loading (png, jpg, webp; none ship with
     // this repository), as file URLs, sorted by name

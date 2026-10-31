@@ -141,6 +141,10 @@ function Build-Game([string]$dir = $bld) {
     if ($dir -eq $bld) {
         [IO.File]::WriteAllText($toolchainFile, 'clang')
         [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
+        # a launcher update that changed the runtime patches asked for a rebuild (tools/pipeline/update.ps1): done once the
+        # game was built from the runtime this run fetched (build, tune, optimize, pgo all end here), not by a build of
+        # the runtime already on disk
+        if ($Stages -contains 'fetch') { Remove-Item (Join-Path $root 'data\needs-rebuild.txt') -ErrorAction SilentlyContinue }
     }
     Write-Host "OK: $(Join-Path $dir 'ps2xRuntime\ps2EntryRunner.exe')"
     $bootFile = Join-Path $dir 'ps2xRuntime\gow-native.boot'
@@ -164,7 +168,5 @@ function Build-Game([string]$dir = $bld) {
 if ($Stages -contains 'build') {
     Step "build the game ($Config, $Toolchain)"
     Build-Game
-    # a launcher update that changed the runtime patches asked for this rebuild (tools/pipeline/update.ps1)
-    Remove-Item (Join-Path $root 'data\needs-rebuild.txt') -ErrorAction SilentlyContinue
 }
 

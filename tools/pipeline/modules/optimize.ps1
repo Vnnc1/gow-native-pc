@@ -4,6 +4,14 @@
 # GOW_AUDIO_PCM=NUL keeps the audio stream paced at volume 0); closing its window writes the profile (engine/patches/12),
 # which is merged into gow.profdata and used by every later clang build. A new recompile leaves it partly stale (those
 # functions are just not profiled).
+# A launcher update that changed the runtime patches marks the profile stale (data\pgo-stale.txt, tools/pipeline/update.ps1;
+# the launcher then recommends this step again). A new profile clears it when it was trained on the current runtime: this
+# run fetched it, or no rebuild after an update is pending.
+function Clear-StaleProfile {
+    if (($Stages -contains 'fetch') -or -not (Test-Path (Join-Path $root 'data\needs-rebuild.txt'))) {
+        Remove-Item (Join-Path $root 'data\pgo-stale.txt') -ErrorAction SilentlyContinue
+    }
+}
 if ($Stages -contains 'pgo') {
     $genBld = "$bld-pgogen"
     Step 'profile-guided optimisation: instrumented build'
@@ -25,6 +33,7 @@ if ($Stages -contains 'pgo') {
     Native (Join-Path $script:llvmBin 'llvm-profdata.exe') (@('merge', '-o', $pgoProfile) + @($raw.FullName)) 'llvm-profdata merge'
     $raw | Remove-Item
     Write-Host ("profile: {0} ({1:N0} MB)" -f $pgoProfile, ((Get-Item $pgoProfile).Length / 1MB))
+    Clear-StaleProfile
     Step "rebuild with the profile ($Config, clang)"
     Configure -MaySkip
     Build-Game
@@ -56,6 +65,7 @@ if ($Stages -contains 'tune') {
     Native (Join-Path $script:llvmBin 'llvm-profdata.exe') (@('merge', '-o', $pgoProfile) + @($raw.FullName)) 'llvm-profdata merge'
     $raw | Remove-Item
     Write-Host ("profile: {0} ({1:N0} MB)" -f $pgoProfile, ((Get-Item $pgoProfile).Length / 1MB))
+    Clear-StaleProfile
     Step 'native VU1 and IOP code'
     $nVu1 = @(Get-ChildItem $vu1 -Filter *.bin -ErrorAction SilentlyContinue).Count
     $nIop = @(Get-ChildItem $iopMods -Filter *.bin -ErrorAction SilentlyContinue).Count

@@ -194,6 +194,12 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   LoadingScreen.qml and InstallPage.qml match by prefix.
 - Small CPUs (`installer.cpuThreads() <= 4`) install with `build,optimize` instead of `tune`: no PGO, so one full -O3
   build fewer. Build jobs reserve 1 thread (not 2) on such CPUs (context.ps1). PGO stays available via the `pgo` stage.
+- CPUs without SSE4.2/POPCNT (x86-64-v2) cannot run the build: the Install page blocks the install
+  (`installer.cpuSupported()`) instead of compiling a game that would not start.
+- Update markers: `data/needs-rebuild.txt` is removed by a successful final build only in a run that also fetched the
+  runtime (a `sync,build` of the old runtime keeps it). `data/pgo-stale.txt` (written with it by update.ps1) makes
+  `pgoApplied()` false so the launcher recommends PGO again; a new profile clears it when trained on the current runtime
+  (`Clear-StaleProfile` in optimize.ps1).
 - PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
   `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
 - Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts

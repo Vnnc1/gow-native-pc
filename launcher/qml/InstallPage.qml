@@ -77,7 +77,9 @@ ScrollView {
             if (s.indexOf(map[i][0]) === 0 || s.indexOf(map[i][0]) > 0) return Tema.t(map[i][1])
         return s
     }
-    readonly property bool canInstall: !installer.running && (compatibleIsos().length > 0 || languages.length > 0)
+    // the game is built for x86-64-v2 (SSE4.2): on an older CPU it would not start after the whole install
+    readonly property bool cpuOk: installer.cpuSupported()
+    readonly property bool canInstall: cpuOk && !installer.running && (compatibleIsos().length > 0 || languages.length > 0)
 
     Connections {
         target: installer
@@ -165,6 +167,25 @@ ScrollView {
     ColumnLayout {
         width: root.availableWidth
         spacing: 22
+
+        // a CPU without SSE4.2 / POPCNT: the install is blocked before it compiles a game that cannot start
+        Rectangle {
+            visible: !root.cpuOk
+            Layout.fillWidth: true
+            implicitHeight: avisoCpu.implicitHeight + 28
+            radius: 6
+            color: "#2a1d0c"
+            border.color: Tema.aviso
+            Text {
+                id: avisoCpu
+                anchors.fill: parent
+                anchors.margins: 14
+                wrapMode: Text.WordWrap
+                color: Tema.texto
+                font.pixelSize: 13
+                text: Tema.t("instCpuUnsupported")
+            }
+        }
 
         // after a launcher update that changed the runtime patches (data/needs-rebuild.txt)
         Rectangle {

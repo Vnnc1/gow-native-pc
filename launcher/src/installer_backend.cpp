@@ -378,10 +378,23 @@ int InstallerBackend::cpuThreads() const
     return QThread::idealThreadCount();
 }
 
+bool InstallerBackend::cpuSupported() const
+{
+#if (defined(__clang__) || defined(__GNUC__)) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt");
+#else
+    return true;
+#endif
+}
+
 bool InstallerBackend::pgoApplied() const
 {
     const QString runner = runnerPath();
     if (runner.isEmpty())
+        return false;
+    // trained on a runtime an update has since changed (tools/pipeline/update.ps1): recommend training it again
+    if (QFileInfo::exists(m_root + QStringLiteral("/data/pgo-stale.txt")))
         return false;
     QFile cache(QFileInfo(runner).dir().absoluteFilePath(QStringLiteral("../CMakeCache.txt")));
     if (!cache.open(QIODevice::ReadOnly))

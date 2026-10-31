@@ -6,7 +6,9 @@
 #                                this copy and starts the launcher again. data\ (game, saves, tools, recorded code, build
 #                                choices) and engine\runtime are never touched. When engine\patches changed, it writes
 #                                data\needs-rebuild.txt: the launcher then offers to rebuild the game (build.ps1 removes the
-#                                file after a successful build). Log: data\_update\update.log.
+#                                file after a successful build from the runtime that run fetched), and data\pgo-stale.txt:
+#                                the launcher recommends training the profile again (removed by a new profile trained on
+#                                the current runtime). Log: data\_update\update.log.
 param(
     [switch]$Check,
     [switch]$Apply,
@@ -85,6 +87,9 @@ try {
     }
     if ($before -ne $after) {
         [IO.File]::WriteAllText((Join-Path $root 'data\needs-rebuild.txt'), "$Version")
+        # the profile-guided data describes the former runtime: the launcher recommends training it again (a rebuild with
+        # it still works; the functions the new patches changed just lose their profile)
+        [IO.File]::WriteAllText((Join-Path $root 'data\pgo-stale.txt'), "$Version")
         Log 'runtime patches changed: the game needs a rebuild'
     }
     Remove-Item -Recurse -Force $unpacked, $zip
