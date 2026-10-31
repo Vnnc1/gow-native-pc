@@ -57,3 +57,4 @@
 | 41-register-functions-o1 | Generated register_functions.cpp built alone at -O1 without unity/PCH: 331 s -> 9.8 s | this project |
 | 42-shallow-dependency-clones | raylib, toml11, fmt, rabbitizer cloned at their tag only; toml11 without its test/docs submodules (345 MB) | this project |
 | 43-leaner-vu1-native-code | Generated VU1 blocks: cheaper exact operand normalisation, no redundant clamps under round-toward-zero, operands/ACC in locals; bit-identical, VU1 -8.6%, +11% FPS (combat +8%) | this project |
+| 44-gs-stage-ring | GS stage queue as a lock-free byte ring (one producer, one consumer, short spin before sleeping): ~150k fewer context switches/s, combat +3.5% on top of 43 | this project |

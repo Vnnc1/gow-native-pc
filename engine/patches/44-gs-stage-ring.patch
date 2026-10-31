@@ -1,0 +1,329 @@
+GS stage queue as a byte ring with one producer (the GS worker, the only caller of push) and one consumer (the
+stage thread). In ship combat the worker sends ~240k packets per second; the former mutex + vector queue made both
+threads take the lock for every packet and woke the sleeping stage through the kernel for ~60% of them (~150k
+context switches per second). Packets are now written into the ring and read in place; the mutex and condition
+variables are used only when a side really sleeps, which the stage first avoids by spinning up to
+GOW_GS_STAGE_SPIN_US (default 50, 0: sleep at once). The 4 MB bound on queued bytes is kept; packets above 1 MB go
+through a heap copy. afterBatch still runs after every batch (the records written when the stage looked).
+Measured on top of patch 43 (save route, full screen, 4 alternating pairs): combat 52.8 -> 54.7 FPS, 4 of 4 pairs;
+mean 52.8 -> 54.7 FPS.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+@@ -1,22 +1,58 @@
+ #include "runtime/gs/gs_stage.h"
+ 
++#include <atomic>
++#include <chrono>
+ #include <condition_variable>
+ #include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <mutex>
++#include <new>
+ #include <thread>
+ #include <vector>
+-
++#if defined(__x86_64__) || defined(_M_X64)
++#include <immintrin.h>
++#endif
++
++// gow-native-pc (patch 44): the queue is a byte ring with one producer (the GS worker, the only caller of push) and one
++// consumer (the stage thread). In ship combat the worker sends ~240k packets per second; the former mutex + vector queue
++// made both threads take the lock for every packet and woke the sleeping stage through the kernel for most of them
++// (~15% of the worker's time). Now a packet is written into the ring and read in place; the mutex and the condition
++// variables are used only when one side really goes to sleep, which the stage first avoids by spinning briefly.
+ namespace
+ {
+-    struct Packet
+-    {
+-        GifPathId path = GifPathId::Path1;
+-        std::vector<uint8_t> data;
+-    };
+-
+     // Bound on queued bytes: enough for several XGKICK packets of a batch, small enough that the worker never
+     // runs a whole frame ahead of the GS frontend.
+     constexpr size_t kMaxQueuedBytes = 4u << 20;
++    // Ring size: the bound above plus record headers, padding and the unused end before a wrap.
++    constexpr uint64_t kRingBytes = 8u << 20;
++    static_assert((kRingBytes & (kRingBytes - 1u)) == 0u, "ring offsets are masked");
++    // Larger packets (big image uploads) are queued as a heap copy, so a record always fits the ring.
++    constexpr uint32_t kInlineMax = 1u << 20;
++
++    enum : uint32_t { kInline = 0u, kHeap = 1u, kWrap = 2u };
++    struct Record
++    {
++        uint32_t path;
++        uint32_t size;
++        uint32_t kind;
++        uint32_t pad;
++    };
++    static_assert(sizeof(Record) == 16u);
++
++    constexpr uint64_t bodyBytes(uint32_t kind, uint32_t size)
++    {
++        return kind == kInline ? (uint64_t(size) + 15u) & ~uint64_t(15u) : 16u;
++    }
++
++    inline void cpuRelax()
++    {
++#if defined(__x86_64__) || defined(_M_X64)
++        _mm_pause();
++#else
++        std::this_thread::yield();
++#endif
++    }
+ 
+     struct Stage
+     {
+@@ -24,11 +60,15 @@
+         std::condition_variable work;   // stage waits for packets
+         std::condition_variable space;  // producer waits for room
+         std::condition_variable idle;   // waitIdle
+-        std::vector<Packet> queue; // a vector keeps its capacity across swaps (MSVC deque allocates per Packet)
+-        std::vector<std::vector<uint8_t>> spare; // recycled buffers (avoid an allocation per packet)
+-        size_t queuedBytes = 0;
+-        bool busy = false;
+-        bool stop = false;
++        uint8_t *ring = nullptr;
++        std::atomic<uint64_t> head{0};     // bytes written (producer)
++        std::atomic<uint64_t> tail{0};     // bytes consumed (stage)
++        std::atomic<bool> busy{false};     // the stage is processing records
++        std::atomic<bool> sleeping{false}; // the stage waits on `work`
++        std::atomic<bool> producerWaiting{false};
++        std::atomic<int> idleWaiters{0};
++        std::atomic<bool> stop{false};
++        uint32_t spinUs = 50;
+         std::thread thread;
+         std::thread::id threadId;
+         ps2_gs_stage::ProcessFn process;
+@@ -41,36 +81,99 @@
+         return s;
+     }
+ 
++    bool hasWork(const Stage &s)
++    {
++        return s.head.load(std::memory_order_acquire) != s.tail.load(std::memory_order_relaxed);
++    }
++
+     void loop()
+     {
+         Stage &s = stage();
+-        std::vector<Packet> batch;
+         for (;;)
+         {
++            if (!hasWork(s))
+             {
+-                std::unique_lock<std::mutex> lock(s.mutex);
+-                for (Packet &p : batch)
+-                {
+-                    p.data.clear();
+-                    s.spare.push_back(std::move(p.data));
+-                }
+-                batch.clear();
+-                s.busy = false;
+-                if (s.queue.empty())
++                s.busy.store(false, std::memory_order_seq_cst);
++                if (s.idleWaiters.load(std::memory_order_seq_cst) > 0)
++                {
++                    std::lock_guard<std::mutex> lock(s.mutex);
+                     s.idle.notify_all();
+-                s.work.wait(lock, [&s] { return s.stop || !s.queue.empty(); });
+-                if (s.queue.empty())
+-                    return;
+-                batch.swap(s.queue);
+-                s.queuedBytes = 0;
+-                s.busy = true;
++                }
++                // While the worker draws it sends a packet every few microseconds: a short spin catches the next one
++                // without either thread sleeping (GOW_GS_STAGE_SPIN_US, 0: sleep at once).
++                if (s.spinUs != 0u && !s.stop.load(std::memory_order_relaxed))
++                {
++                    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(s.spinUs);
++                    for (uint32_t n = 1; !hasWork(s); ++n)
++                    {
++                        cpuRelax();
++                        if ((n & 63u) == 0u && std::chrono::steady_clock::now() >= until)
++                            break;
++                    }
++                }
++                if (!hasWork(s))
++                {
++                    std::unique_lock<std::mutex> lock(s.mutex);
++                    s.sleeping.store(true, std::memory_order_seq_cst);
++                    s.work.wait(lock, [&s] { return s.stop.load(std::memory_order_relaxed) || hasWork(s); });
++                    s.sleeping.store(false, std::memory_order_relaxed);
++                    if (!hasWork(s))
++                        return; // stop requested and nothing left
++                }
++                continue;
+             }
+-            s.space.notify_all();
+-            for (const Packet &p : batch)
+-                s.process(p.path, p.data.data(), static_cast<uint32_t>(p.data.size()));
++            s.busy.store(true, std::memory_order_seq_cst);
++            // one batch: the records written up to now (afterBatch then runs, as after each swap of the former queue)
++            const uint64_t end = s.head.load(std::memory_order_acquire);
++            uint64_t tail = s.tail.load(std::memory_order_relaxed);
++            while (tail != end)
++            {
++                const uint64_t offset = tail & (kRingBytes - 1u);
++                Record r;
++                std::memcpy(&r, s.ring + offset, sizeof(r));
++                if (r.kind == kWrap)
++                {
++                    tail += kRingBytes - offset;
++                    continue;
++                }
++                const uint8_t *body = s.ring + offset + sizeof(Record);
++                if (r.kind == kHeap)
++                {
++                    std::vector<uint8_t> *copy = nullptr;
++                    std::memcpy(&copy, body, sizeof(copy));
++                    s.process(static_cast<GifPathId>(r.path), copy->data(), r.size);
++                    delete copy;
++                }
++                else
++                    s.process(static_cast<GifPathId>(r.path), body, r.size);
++                tail += sizeof(Record) + bodyBytes(r.kind, r.size);
++                s.tail.store(tail, std::memory_order_seq_cst);
++                if (s.producerWaiting.load(std::memory_order_seq_cst))
++                {
++                    std::lock_guard<std::mutex> lock(s.mutex);
++                    s.space.notify_all();
++                }
++            }
++            s.tail.store(tail, std::memory_order_seq_cst); // past a trailing wrap record
+             if (s.afterBatch)
+                 s.afterBatch();
+         }
++    }
++
++    // Producer: returns once `target` (a head position) is at most a ring's size ahead of the consumer.
++    void waitSpace(Stage &s, uint64_t target)
++    {
++        const auto fits = [&s, target] { return target - s.tail.load(std::memory_order_acquire) <= kRingBytes; };
++        for (uint32_t n = 0; n < 4096u; ++n)
++        {
++            if (fits())
++                return;
++            cpuRelax();
++        }
++        std::unique_lock<std::mutex> lock(s.mutex);
++        s.producerWaiting.store(true, std::memory_order_seq_cst);
++        s.space.wait(lock, fits);
++        s.producerWaiting.store(false, std::memory_order_relaxed);
+     }
+ }
+ 
+@@ -82,9 +185,14 @@
+         std::lock_guard<std::mutex> lock(s.mutex);
+         if (s.thread.joinable())
+             return;
++        if (!s.ring)
++            s.ring = static_cast<uint8_t *>(::operator new(kRingBytes, std::align_val_t(64)));
+         s.process = std::move(process);
+         s.afterBatch = std::move(afterBatch);
+-        s.stop = false;
++        s.stop.store(false);
++        // GOW_GS_STAGE_SPIN_US: how long the stage waits actively for the next packet before sleeping (0: at once)
++        if (const char *spin = std::getenv("GOW_GS_STAGE_SPIN_US"))
++            s.spinUs = static_cast<uint32_t>(std::strtoul(spin, nullptr, 10));
+         s.thread = std::thread(loop);
+         s.threadId = s.thread.get_id();
+         std::fprintf(stderr, "[gs-stage] GS frontend on its own thread, pipelined behind VU1 (PS2X_GS_PIPELINE=0 disables)\n");
+@@ -97,7 +205,7 @@
+             std::lock_guard<std::mutex> lock(s.mutex);
+             if (!s.thread.joinable())
+                 return;
+-            s.stop = true;
++            s.stop.store(true);
+         }
+         s.work.notify_all();
+         s.thread.join();
+@@ -117,31 +225,39 @@
+     void push(GifPathId path, const uint8_t *data, uint32_t size)
+     {
+         Stage &s = stage();
+-        // gow-native-pc: the packet is copied before taking the lock (the copy under it made the stage thread and the
+-        // VU1 worker wait on each other for every XGKICK). Patch 38: recycled buffers come from a per-producer pool that
+-        // is refilled while the queue lock is held anyway, so a push takes the lock once instead of twice.
+-        thread_local std::vector<std::vector<uint8_t>> pool;
+-        Packet p;
+-        p.path = path;
+-        if (!pool.empty())
+-        {
+-            p.data = std::move(pool.back());
+-            pool.pop_back();
+-        }
+-        p.data.assign(data, data + size);
+-        std::unique_lock<std::mutex> lock(s.mutex);
+-        s.space.wait(lock, [&s, size] { return s.queuedBytes == 0 || s.queuedBytes + size <= kMaxQueuedBytes; });
+-        s.queuedBytes += size;
+-        const bool wasEmpty = s.queue.empty();
+-        s.queue.push_back(std::move(p));
+-        for (size_t take = 0; take < 8u && !s.spare.empty() && pool.size() < 16u; ++take)
+-        {
+-            pool.push_back(std::move(s.spare.back()));
+-            s.spare.pop_back();
+-        }
+-        lock.unlock();
+-        if (wasEmpty)
++        const uint32_t kind = size > kInlineMax ? kHeap : kInline;
++        const uint64_t need = sizeof(Record) + bodyBytes(kind, size);
++        uint64_t head = s.head.load(std::memory_order_relaxed);
++        // the former queue's bound: wait while more than kMaxQueuedBytes are queued (a lone larger packet still goes)
++        if (head != s.tail.load(std::memory_order_acquire))
++            waitSpace(s, head + need + (kRingBytes - kMaxQueuedBytes));
++        uint64_t offset = head & (kRingBytes - 1u);
++        if (offset + need > kRingBytes)
++        {
++            // the record does not fit before the end: a wrap record fills the rest, the record starts at offset 0
++            waitSpace(s, head + (kRingBytes - offset) + need);
++            const Record wrap{0u, 0u, kWrap, 0u};
++            std::memcpy(s.ring + offset, &wrap, sizeof(wrap));
++            head += kRingBytes - offset;
++            offset = 0u;
++        }
++        else
++            waitSpace(s, head + need);
++        const Record r{static_cast<uint32_t>(path), size, kind, 0u};
++        std::memcpy(s.ring + offset, &r, sizeof(r));
++        if (kind == kHeap)
++        {
++            auto *copy = new std::vector<uint8_t>(data, data + size);
++            std::memcpy(s.ring + offset + sizeof(Record), &copy, sizeof(copy));
++        }
++        else
++            std::memcpy(s.ring + offset + sizeof(Record), data, size);
++        s.head.store(head + need, std::memory_order_seq_cst);
++        if (s.sleeping.load(std::memory_order_seq_cst))
++        {
++            std::lock_guard<std::mutex> lock(s.mutex);
+             s.work.notify_one();
++        }
+     }
+ 
+     bool waitIdle()
+@@ -149,9 +265,17 @@
+         if (!running() || onStageThread())
+             return false;
+         Stage &s = stage();
++        const auto idleNow = [&s] {
++            return s.head.load(std::memory_order_acquire) == s.tail.load(std::memory_order_acquire) &&
++                   !s.busy.load(std::memory_order_seq_cst);
++        };
++        s.idleWaiters.fetch_add(1, std::memory_order_seq_cst);
+         std::unique_lock<std::mutex> lock(s.mutex);
+-        const bool busy = !s.queue.empty() || s.busy;
+-        s.idle.wait(lock, [&s] { return s.queue.empty() && !s.busy; });
+-        return busy;
++        const bool waited = !idleNow();
++        while (!idleNow())
++            s.idle.wait_for(lock, std::chrono::milliseconds(1));
++        lock.unlock();
++        s.idleWaiters.fetch_sub(1, std::memory_order_seq_cst);
++        return waited;
+     }
+ }

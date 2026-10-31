@@ -180,6 +180,51 @@ static bool earlyFinish()
     return raised && noWait && shadowed && order;
 }
 
+// Patch 44: the stage's byte ring keeps every packet whole and in order across many wraps, sends packets larger than
+// its inline limit through the heap, and waitIdle returns only after the last one was processed.
+static bool stageRing()
+{
+    std::vector<uint32_t> seen;
+    std::mutex seenMutex;
+    bool intact = true;
+    ps2_gs_stage::start([&](GifPathId path, const uint8_t *data, uint32_t size) {
+        uint32_t id = 0;
+        std::memcpy(&id, data, 4);
+        for (uint32_t i = 4; i < size; ++i)
+            intact = intact && data[i] == static_cast<uint8_t>(id * 31u + i);
+        intact = intact && static_cast<uint32_t>(path) == 1u + id % 3u;
+        std::lock_guard<std::mutex> lock(seenMutex);
+        seen.push_back(id);
+    }, {});
+    constexpr uint32_t kPackets = 30000;
+    std::vector<uint8_t> buffer;
+    uint64_t bytes = 0;
+    for (uint32_t id = 0; id < kPackets; ++id)
+    {
+        // mostly XGKICK-sized packets, some odd sizes, a few above the inline limit (1 MB)
+        const uint32_t size = id % 4999u == 0u ? (1u << 20) + 4096u + id : 16u + (id * 2654435761u) % 6000u;
+        buffer.resize(size);
+        std::memcpy(buffer.data(), &id, 4);
+        for (uint32_t i = 4; i < size; ++i)
+            buffer[i] = static_cast<uint8_t>(id * 31u + i);
+        ps2_gs_stage::push(static_cast<GifPathId>(1u + id % 3u), buffer.data(), size);
+        bytes += size;
+    }
+    ps2_gs_stage::waitIdle();
+    bool ordered = false;
+    {
+        std::lock_guard<std::mutex> lock(seenMutex);
+        ordered = seen.size() == kPackets;
+        for (uint32_t i = 0; ordered && i < kPackets; ++i)
+            ordered = seen[i] == i;
+    }
+    ps2_gs_stage::stop();
+    if (!(intact && ordered))
+        std::printf("stage ring: intact=%d ordered=%d packets=%zu bytes=%llu\n", intact, ordered, seen.size(),
+                    static_cast<unsigned long long>(bytes));
+    return intact && ordered && bytes > (64ull << 20); // > 8 wraps of the 8 MB ring
+}
+
 int main()
 {
     const bool ok = check("1", "0", true) && check("0", "1", false)
@@ -190,5 +235,8 @@ int main()
     const bool early = earlyFinish();
     std::puts(early ? "PASS: early FINISH scan, raise at submission, unblocked CSR/display, stage marker order"
                     : "FAIL: early FINISH");
-    return ok && early ? 0 : 1;
+    const bool ring = stageRing();
+    std::puts(ring ? "PASS: GS stage ring order, contents, wraps, heap packets and idle wait"
+                   : "FAIL: GS stage ring");
+    return ok && early && ring ? 0 : 1;
 }
