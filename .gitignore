@@ -1,5 +1,6 @@
 # downloaded runtime, generated data (discs, saves, recorded microcode, logs, Qt), builds
 engine/runtime/
+engine/runtime-patches/
 data/
 launcher/build/
 launcher/build-clang/

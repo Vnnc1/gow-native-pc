@@ -141,6 +141,13 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **Runtime code**: edit in `engine/runtime/`, then turn the change into a new `engine/patches/NN-name.patch` (git diff
   in engine/runtime, with a header saying what/why/measured result). Patches apply in order; a later patch may depend
   on an earlier one. Keep each patch to one concern.
+- **Moving the patches to a newer runtime commit**: `tools/pipeline/patches.ps1 start -Onto <commit or ref>` turns
+  engine/patches into a commit stack (branch gow-patches, worktree engine/runtime-patches) and rebases it with git's
+  3-way merge; resolve conflicts there (`git add`, `git rebase --continue`), then `patches.ps1 export` rewrites only the
+  patches whose file no longer applies exactly, removes those already upstream, updates runtime.toml's commit and checks
+  the chain gives the stack's tree; `patches.ps1 drop` removes the worktree. Commit message = name, header,
+  `Patch: <name>`. `git apply --3way` is no substitute: most patch files have no `index` lines.
+  Test: `tools/test/patch-stack-tests.ps1` (in verify).
 - **New game**: see `docs/adding-a-game.md`.
 - **New translation / edition**: add an `[[editions]]` entry (elf_crc from `identify.py`); if it changes code (.text
   differs) it is not supported.

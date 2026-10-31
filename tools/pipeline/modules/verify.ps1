@@ -6,6 +6,8 @@ if ($Stages -contains 'verify') {
     Native $python @('-I', (Join-Path $root 'tools/test/worker-ab-tests.py')) 'worker comparison methodology tests'
     Native (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
         (Join-Path $root 'tools/test/pipeline-tests.ps1')) 'pipeline configure and process tests'
+    Native (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        (Join-Path $root 'tools/test/patch-stack-tests.ps1')) 'runtime patch stack rebase tests'
     $testBuild = "$BuildRoot-verify-clang"
     if (Test-ForeignCache $testBuild) { throw "Regression build belongs to another checkout: $testBuild. Choose another -BuildRoot." }
     $testArgs = @('-S', $rec, '-B', $testBuild, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',

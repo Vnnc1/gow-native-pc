@@ -1,0 +1,116 @@
+VU1: the debug and recording code that copies the whole interpreter (GOW_VU1_STARTMAC, GOW_VU1N_VERIFY in VU1Interpreter::run; GOW_VU1N_RECORD / GOW_VU1N_REPLAY in recordReplay; the task recorder in recordTask) runs in its own out-of-line lambda frame. Those three functions run for every VU1 program; inline, the copies gave run() a 202 KB stack frame and the two recorders large ones too, each probed page by page by ___chkstk_ms on every call, recording or not: 2.3% of the VU1 worker in combat (save route profile), 0% after. No behaviour change (replay 0 differ).
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1957,6 +1957,13 @@
+     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+ }
+ 
++// gow-native-pc: a debug lambda kept out of its caller's frame (see run)
++#if defined(__clang__) || defined(__GNUC__)
++#define VU1_DEBUG_FRAME __attribute__((noinline, cold))
++#else
++#define VU1_DEBUG_FRAME
++#endif
++
+ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+@@ -1975,13 +1982,17 @@
+     // GOW_VU1_STARTMAC=1: debug, the MAC and clip flags a startPc 0 program starts with (committed / with pending writes)
+     static const bool startMacLog = std::getenv("GOW_VU1_STARTMAC") != nullptr;
+     static unsigned startMacShown = 0;
++    // gow-native-pc: the debug blocks that copy the whole interpreter (GOW_VU1_STARTMAC, GOW_VU1N_VERIFY) run in their own
++    // out-of-line frames. Inline, those copies gave run() a ~200 KB stack frame, probed page by page (___chkstk_ms) on every
++    // VU1 program run: ~2% of the VU1 worker in combat, plus its stack pages pushed through the cache.
+     if (startMacLog && m_unit == Unit::VU1 && m_state.pc == 0u && startMacShown < 4000u && (startMacShown++ % 50u) == 0u)
+-    {
+-        VU1Interpreter probe(*this);
+-        probe.commitEverythingNow();
+-        std::fprintf(stderr, "[vu1-startmac] ours mac=%x clip=%x (after committing pending: mac=%x clip=%x)\n", m_state.mac & 0xFFFFu,
+-                     m_state.clip & 0xFFFFFFu, probe.m_state.mac & 0xFFFFu, probe.m_state.clip & 0xFFFFFFu);
+-    }
++        [this]() VU1_DEBUG_FRAME
++        {
++            VU1Interpreter probe(*this);
++            probe.commitEverythingNow();
++            std::fprintf(stderr, "[vu1-startmac] ours mac=%x clip=%x (after committing pending: mac=%x clip=%x)\n", m_state.mac & 0xFFFFu,
++                         m_state.clip & 0xFFFFFFu, probe.m_state.mac & 0xFFFFu, probe.m_state.clip & 0xFFFFFFu);
++        }();
+     // GOW-Port: GOW_VU1_STATS=1 prints, every 5 s, MSCAL runs, VU1 cycles, interpreted steps and host time in run().
+     static const bool vuStats = std::getenv("GOW_VU1_STATS") != nullptr;
+     const uint64_t statCycle0 = vuStats ? m_cycle : 0u;
+@@ -2018,6 +2029,7 @@
+     if (m_unit == Unit::VU1 && m_native && m_native->enabled && vuData && codeSize == PS2_VU1_CODE_SIZE)
+         VU1NativeAccess::recordReplay(*this, &context, maxCycles);
+     if (m_unit == Unit::VU1 && m_native && m_native->enabled && m_native->verifyLeft != 0u && vuData && codeSize == PS2_VU1_CODE_SIZE)
++    [&]() VU1_DEBUG_FRAME
+     {
+         --m_native->verifyLeft;
+         const uint32_t startPc = m_state.pc;
+@@ -2240,7 +2252,7 @@
+         }
+         else if (checked % 2000u == 0u)
+             std::fprintf(stderr, "[vu1n-verify] %u runs checked, %u mismatches\n", checked, bad);
+-    }
++    }();
+     if (m_unit == Unit::VU1 && m_native && m_native->enabled && vuData && codeSize == PS2_VU1_CODE_SIZE)
+     {
+         // GOW_VU1_CAPTURA records also while the native VU1 runs (the launcher keeps it on while playing).
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -73,6 +73,12 @@
+     }
+ }
+ 
++// gow-native-pc: a rarely used lambda kept out of its caller's frame (recordReplay, recordTask)
++#if defined(__clang__) || defined(__GNUC__)
++#define VU1N_COLD_FRAME __attribute__((noinline, cold))
++#else
++#define VU1N_COLD_FRAME
++#endif
+ #include "ps2_vu1_jit.inl" // gow-native-pc: background VU1 compiler (GOW_VU1N_JIT)
+ #include "ps2_vu1_x64.inl" // gow-native-pc: in-process x86-64 JIT (GOW_VU1N_X64)
+ 
+@@ -1304,6 +1310,10 @@
+     static const char *repPath = std::getenv("GOW_VU1N_REPLAY");
+     if ((!recPath && !repPath) || context.dataSize != 16384u || context.codeSize != PS2_VU1_CODE_SIZE)
+         return;
++    // gow-native-pc: recording / replay in their own frame (copies of the interpreter): called for every VU1 program, this
++    // function would otherwise probe that frame's stack pages (___chkstk_ms) on every call, with both off
++    [&]() VU1N_COLD_FRAME
++    {
+     if (repPath)
+     {
+         static bool done = false;
+@@ -1392,4 +1402,5 @@
+         std::fclose(f), std::fprintf(stderr, "[vu1n-record] %u records written\n", written);
+     else if (written % 500u == 0u)
+         std::fflush(f);
+-}
++    }();
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
+@@ -89,6 +89,10 @@
+ {
+     static gow_vu_tasks::Recorder out;
+     if (!out.path || !*out.path || codeSize != 16384 || dataSize != 16384 || !code || !data) return;
++    // gow-native-pc: recording in its own frame (it holds a whole VU1Interpreter): called for every VU1 program, this function
++    // would otherwise probe that frame's stack pages (___chkstk_ms) on every call, recording or not
++    [&]() VU1N_COLD_FRAME
++    {
+     std::lock_guard<std::mutex> lock(out.mutex);
+     if (out.failed || out.written >= out.limit || maxCycles == 0 || maxCycles > gow_vu_tasks::MaxCycles) return;
+     if (out.delay && std::chrono::steady_clock::now() - out.start < std::chrono::seconds(out.delay)) return;
+@@ -124,6 +128,7 @@
+         std::fprintf(stderr, "[gow-vu1-task] recorded=%llu bytes=%llu limit=%llu\n",
+             (unsigned long long)out.written, (unsigned long long)(out.written * sizeof(*r)), (unsigned long long)out.limit);
+     if (out.written == out.limit) { std::fclose(out.file); out.file = nullptr; }
++    }();
+ }
+ 
+ int VU1NativeAccess::replayTasks(const char *path, unsigned repetitions, bool exact)
