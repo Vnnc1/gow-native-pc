@@ -67,7 +67,10 @@ $env:GIT_CONFIG_KEY_1 = 'safe.directory'; $env:GIT_CONFIG_VALUE_1 = (Barra $rt)
 # Release, PGO): 7 compilers used 3.4 GB together, the largest one 0.64 GB; register_functions.cpp, the only outlier,
 # builds at -O1 since runtime patch 41. The former 1.6 GB per compiler left 16 GB machines at 7 of 18 usable cores.
 $ramGb = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB
-$jobs = [int][math]::Max(1, [math]::Min([Environment]::ProcessorCount - 2, [math]::Floor(($ramGb - 4) / 1.0)))
+# Small CPUs (a 2-core/4-thread i3-4170 got 2 compilers, i.e. half the machine, for a ~2 h install) keep one thread free
+# instead of two: the pipeline already runs at BelowNormal priority, which is what keeps the desktop usable.
+$cpuReserve = if ([Environment]::ProcessorCount -le 4) { 1 } else { 2 }
+$jobs = [int][math]::Max(1, [math]::Min([Environment]::ProcessorCount - $cpuReserve, [math]::Floor(($ramGb - 4) / 1.0)))
 # the whole pipeline (clang, ninja, python) runs below normal priority so the desktop stays usable; the recorded test
 # game goes back to normal priority in the optimize stage
 try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }

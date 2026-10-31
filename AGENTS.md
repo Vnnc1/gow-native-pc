@@ -192,6 +192,8 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   profile in one run, then one final build. Keep its training build at -O3: a -O1 training build compiled 2.2x faster
   but its profile produced a build measured ~9% slower (3/3 pairs). Its step texts reuse the pgo/native ones, which
   LoadingScreen.qml and InstallPage.qml match by prefix.
+- Small CPUs (`installer.cpuThreads() <= 4`) install with `build,optimize` instead of `tune`: no PGO, so one full -O3
+  build fewer. Build jobs reserve 1 thread (not 2) on such CPUs (context.ps1). PGO stays available via the `pgo` stage.
 - PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
   `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
 - Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts

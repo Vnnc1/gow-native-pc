@@ -11,6 +11,7 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QThread>
 #include <QUrl>
 
 namespace
@@ -370,6 +371,11 @@ bool InstallerBackend::applyUpdate(const QString &url, const QString &sha256, co
     if (started)
         QCoreApplication::quit();
     return started;
+}
+
+int InstallerBackend::cpuThreads() const
+{
+    return QThread::idealThreadCount();
 }
 
 bool InstallerBackend::pgoApplied() const

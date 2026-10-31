@@ -54,7 +54,10 @@ ScrollView {
         stages += ",configure,recomp,sync"
         // with the first-play preparation one "tune" pass replaces build + optimize and adds the profile-guided build
         // (build.ps1 stage tune); without it the plain build
-        stages += prepareFirstPlay ? ",tune" : ",build"
+        // On small CPUs (4 threads or fewer) the profile-guided pass is two full -O3 builds, about an extra hour or more:
+        // record the game on the plain build instead (build + optimize); the "pgo" maintenance button stays available.
+        if (!prepareFirstPlay) stages += ",build"
+        else stages += installer.cpuThreads() <= 4 ? ",build,optimize" : ",tune"
         installer.run(stages, { isos: compatibleIsos(), config: "Release" })
     }
     function maintenance(stages) { begin(); installer.run(stages, { config: "Release" }) }
