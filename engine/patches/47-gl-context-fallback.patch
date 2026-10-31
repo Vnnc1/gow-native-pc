@@ -1,0 +1,173 @@
+GS OpenGL context: ask for 4.6, then 4.5, 4.4 and 4.3 (the shaders are GLSL 430) instead of 4.6 only. GPUs whose
+drivers stop at 4.3-4.5 (Intel HD 4000-4600 on Windows, older AMD / NVIDIA) fell back to the software renderer: a
+session report from an i3-4170 + Intel HD 4400 (driver 20.19.15.4531) showed 'OpenGL 4.6 core context unavailable'
+and ~23 FPS. Worker contexts ask for the version the GS context got. glTextureBarrier falls back to
+glTextureBarrierNV (NV_texture_barrier, same function); glBufferStorage (4.4) is optional, used only by the presented
+frame's device hash. A driver that has 4.6 takes the same path as before.
+GOW_GL_MAX_MINOR=<n> (test) starts at 4.n. Checked on an RX 580 with GOW_GL_MAX_MINOR=3: 4.3 context, GPU renderer
+and shared presentation active, save route 57.7 FPS (57.8 with 4.6). Not yet run on an Intel HD 4400.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+@@ -59,6 +59,23 @@
+     {
+         const char *value = std::getenv("PS2X_GS_DIRECT_PRESENT");
+         return !(value && *value == '0');
++    }
++
++    // gow-native-pc (patch 47): the GS context asks for OpenGL 4.6 and then 4.5, 4.4 and 4.3 (the shaders are GLSL 430).
++    // Asking for 4.6 only left GPUs whose drivers stop at 4.3-4.5 (Intel HD 4000-4600 on Windows, older AMD / NVIDIA) on
++    // the software renderer. The version the GS context got is the one its worker contexts ask for.
++    // GOW_GL_MAX_MINOR=<n> (test): start at 4.n, to try a 4.3-class driver on a newer GPU.
++    int s_contextMinor = 6;
++
++    std::array<int, 4> contextMinors()
++    {
++        int top = 6;
++        if (const char *value = std::getenv("GOW_GL_MAX_MINOR"))
++            top = std::atoi(value) < 3 ? 3 : (std::atoi(value) > 6 ? 6 : std::atoi(value));
++        std::array<int, 4> minors{};
++        for (int i = 0; i < 4; ++i)
++            minors[i] = top - i < 3 ? -1 : top - i; // -1: not tried
++        return minors;
+     }
+ 
+     using ProcLoader = void *(*)(const char *);
+@@ -99,7 +116,10 @@
+         load(a.BindBufferRange, "glBindBufferRange", missing);
+         load(a.ClearBufferData, "glClearBufferData", missing);
+         load(a.CopyBufferSubData, "glCopyBufferSubData", missing);
+-        load(a.BufferStorage, "glBufferStorage", missing);
++        // gow-native-pc (patch 47): OpenGL 4.4 / ARB_buffer_storage, used only by the presented frame's hash buffer
++        // (without it the frame has no device hash): optional, so a 4.3 context keeps the GPU renderer
++        std::string storageMissing;
++        load(a.BufferStorage, "glBufferStorage", storageMissing);
+         load(a.MapBufferRange, "glMapBufferRange", missing);
+         load(a.UnmapBuffer, "glUnmapBuffer", missing);
+         load(a.GenQueries, "glGenQueries", missing);
+@@ -182,7 +202,10 @@
+         load(a.ReadPixels, "glReadPixels", hwMissing);
+         load(a.BlitFramebuffer, "glBlitFramebuffer", hwMissing);
+         load(a.PixelStorei, "glPixelStorei", hwMissing);
+-        load(a.TextureBarrier, "glTextureBarrier", hwMissing);
++        // OpenGL 4.5 / ARB_texture_barrier; NV_texture_barrier has the same function under its own name (4.3-class drivers)
++        std::string barrierMissing;
++        if (!load(a.TextureBarrier, "glTextureBarrier", barrierMissing))
++            load(a.TextureBarrier, "glTextureBarrierNV", hwMissing);
+         std::string copyMissing;
+         load(a.CopyImageSubData, "glCopyImageSubData", copyMissing);
+         a.hwRaster = graphicsMissing.empty() && hwMissing.empty();
+@@ -334,14 +357,27 @@
+         HGLRC context = nullptr;
+         if (createAttribs)
+         {
+-            const int attributes[] = {kContextMajorVersion, 4, kContextMinorVersion, 6, kContextProfileMask, kContextCoreProfileBit,
+-                                      kContextFlags, 0, 0};
+-            context = createAttribs(dc, s_hostContext, attributes);
+-            m_shared = context && s_hostContext;
+-            if (!context && s_hostContext)
++            // gow-native-pc (patch 47): the newest core version the driver has, down to 4.3 (see contextMinors)
++            for (const int minor : contextMinors())
+             {
+-                std::fprintf(stderr, "[gs-present] WGL sharing failed (%lu); using RAM presentation\n", GetLastError());
+-                context = createAttribs(dc, nullptr, attributes);
++                if (minor < 0 || context)
++                    continue;
++                const int attributes[] = {kContextMajorVersion, 4, kContextMinorVersion, minor, kContextProfileMask,
++                                          kContextCoreProfileBit, kContextFlags, 0, 0};
++                context = createAttribs(dc, s_hostContext, attributes);
++                m_shared = context && s_hostContext;
++                if (!context && s_hostContext)
++                {
++                    context = createAttribs(dc, nullptr, attributes);
++                    if (context)
++                        std::fprintf(stderr, "[gs-present] WGL sharing failed (%lu); using RAM presentation\n", GetLastError());
++                }
++                if (context)
++                {
++                    s_contextMinor = minor;
++                    if (minor < 6)
++                        std::fprintf(stderr, "[gs-gl] OpenGL 4.%d core context (4.6 unavailable)\n", minor);
++                }
+             }
+         }
+         wglMakeCurrent(nullptr, nullptr);
+@@ -352,7 +388,7 @@
+                 wglDeleteContext(context);
+             ReleaseDC(window, dc);
+             DestroyWindow(window);
+-            error = "OpenGL 4.6 core context unavailable";
++            error = "OpenGL 4.3 core context unavailable";
+             return false;
+         }
+         m_window = window;
+@@ -380,8 +416,8 @@
+         const auto createAttribs = reinterpret_cast<CreateContextAttribs>(wglGetProcAddress("wglCreateContextAttribsARB"));
+         if (!createAttribs || !m_context || !m_dc)
+             return nullptr;
+-        const int attributes[] = {kContextMajorVersion, 4, kContextMinorVersion, 6, kContextProfileMask, kContextCoreProfileBit,
+-                                  kContextFlags, 0, 0};
++        const int attributes[] = {kContextMajorVersion, 4, kContextMinorVersion, s_contextMinor, kContextProfileMask,
++                                  kContextCoreProfileBit, kContextFlags, 0, 0};
+         return createAttribs(static_cast<HDC>(m_dc), static_cast<HGLRC>(m_context), attributes);
+     }
+ 
+@@ -489,17 +525,31 @@
+         }
+         // GOW-Port: glfwInit pone LC_CTYPE del sistema (tr_TR rompe tolower/toupper ASCII de 'I'/'i'); se restaura "C".
+         std::setlocale(LC_CTYPE, "C");
+-        contextHints(6);
+-        GLFWwindow *window = glfwCreateWindow(16, 16, "gs", nullptr, s_hostWindow);
+-        m_shared = window && s_hostWindow;
+-        if (!window && s_hostWindow)
+-        {
+-            std::fprintf(stderr, "[gs-present] GLX/EGL sharing failed; using RAM presentation\n");
+-            window = glfwCreateWindow(16, 16, "gs", nullptr, nullptr);
++        GLFWwindow *window = nullptr;
++        // gow-native-pc (patch 47): the newest core version the driver has, down to 4.3 (see contextMinors)
++        for (const int minor : contextMinors())
++        {
++            if (minor < 0 || window)
++                continue;
++            contextHints(minor);
++            window = glfwCreateWindow(16, 16, "gs", nullptr, s_hostWindow);
++            m_shared = window && s_hostWindow;
++            if (!window && s_hostWindow)
++            {
++                window = glfwCreateWindow(16, 16, "gs", nullptr, nullptr);
++                if (window)
++                    std::fprintf(stderr, "[gs-present] GLX/EGL sharing failed; using RAM presentation\n");
++            }
++            if (window)
++            {
++                s_contextMinor = minor;
++                if (minor < 6)
++                    std::fprintf(stderr, "[gs-gl] OpenGL 4.%d core context (4.6 unavailable)\n", minor);
++            }
+         }
+         if (!window)
+         {
+-            error = "OpenGL 4.6 core context unavailable";
++            error = "OpenGL 4.3 core context unavailable";
+             return false;
+         }
+         glfwMakeContextCurrent(window);
+@@ -526,7 +576,7 @@
+     {
+         if (!m_window)
+             return nullptr;
+-        contextHints(6);
++        contextHints(s_contextMinor);
+         return glfwCreateWindow(16, 16, "gs-worker", nullptr, static_cast<GLFWwindow *>(m_window));
+     }
+ 
+@@ -640,7 +690,7 @@
+             gl.DeleteSync(slot.consumed);
+         slot.produced = slot.consumed = nullptr;
+         slot.frame.hashValid = false;
+-        if (hashProgram)
++        if (hashProgram && gl.BufferStorage) // gow-native-pc (patch 47): no device hash without OpenGL 4.4 buffer storage
+         {
+             if (!slot.hashBuffer)
+             {

@@ -80,6 +80,8 @@ Medido no PC de teste (Xeon E5-2666 v3 + RX 580, rota do save, tela cheia, pares
 - **Instalação**: dependências baixadas uma vez só e sem histórico (a etapa do PGO não baixa mais ~1 GB de novo); CPUs
   de até 4 threads pulam o PGO e usam um compilador a mais; CPUs sem SSE4.2 são avisadas antes da instalação, não
   depois.
+- **GPUs mais antigas**: placas cujo driver para no OpenGL 4.3–4.5 (como Intel HD 4000–4600) agora usam o
+  renderizador por GPU em vez de cair no renderizador por software, bem mais lento (patch 47).
 - **Atualizações**: o aviso de "recompilar" só some depois de recompilar com o runtime novo, e o launcher recomenda
   retreinar o PGO depois de uma atualização.
 
@@ -115,7 +117,7 @@ Waffle565 e KIexster) e aplica [`engine/patches`](engine/patches) (01–41 nesta
 | Sistema | Windows 10/11 64 bits |
 | CPU | x86-64 com SSE4.2 (x86-64-v2); AVX/AVX2 são usados pelo JIT da VU1 quando existem. 4 núcleos ou mais recomendados |
 | RAM | 8 GB (16 GB recomendados durante a compilação) |
-| GPU | OpenGL 4.3+ |
+| GPU | OpenGL 4.3+ (no 4.3 é preciso `NV_texture_barrier` ou `ARB_texture_barrier`, que os drivers das Intel HD 4000–4600 têm; sem isso o jogo usa o renderizador por software, mais lento) |
 | Armazenamento | **Menos de 10 GB, como estimativa**, para os arquivos preparados do jogo + uma compilação Release, conforme a edição da ISO. Veja as observações abaixo. |
 | Ferramentas | Git, Python, CMake, Ninja e clang (llvm-mingw) são baixados automaticamente para `data/_tools`. Visual Studio não é necessário. |
 | Internet | Necessária para baixar o runtime, as ferramentas, as dependências e as atualizações |

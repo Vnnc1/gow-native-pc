@@ -79,6 +79,8 @@ Measured on the test PC (Xeon E5-2666 v3 + RX 580, save route, full screen, alte
 - **Install**: dependencies are downloaded once and shallow (the profile-guided step no longer re-downloads ~1 GB);
   CPUs with 4 threads or fewer skip the profile-guided pass and use one more compiler; CPUs without SSE4.2 are told
   before the install instead of after it.
+- **Older GPUs**: GPUs whose drivers stop at OpenGL 4.3-4.5 (such as Intel HD 4000-4600) now use the GPU renderer
+  instead of falling back to the much slower software one (patch 47).
 - **Updates**: the "rebuild" notice clears only after a rebuild with the new runtime, and the launcher recommends
   retraining the profile-guided optimisation after an update.
 
@@ -114,7 +116,7 @@ KIexster's extensions) and applies [`engine/patches`](engine/patches) (01–41 i
 | OS | Windows 10/11 64-bit |
 | CPU | x86-64 with SSE4.2 (x86-64-v2); AVX/AVX2 are used by the VU1 JIT when present. 4 cores or more recommended |
 | RAM | 8 GB (16 GB recommended while building) |
-| GPU | OpenGL 4.3+ |
+| GPU | OpenGL 4.3+ (4.3 needs `NV_texture_barrier` or `ARB_texture_barrier`, as Intel HD 4000-4600 drivers have; otherwise the slower software renderer is used) |
 | Storage | **Under 10 GB as an estimate** for the prepared game files + one Release build, depending on the ISO edition. See the storage notes below. |
 | Tools | Git, Python, CMake, Ninja and clang (llvm-mingw) are downloaded automatically into `data/_tools`. Visual Studio is not required. |
 | Internet | Required to download the runtime, build tools, dependencies and updates |
