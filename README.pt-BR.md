@@ -11,7 +11,7 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/vers%C3%A3o-3.0.0-crimson)
+![version](https://img.shields.io/badge/vers%C3%A3o-3.0.1-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
@@ -32,6 +32,7 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 ## Conteúdo
 
 - [O que é](#o-que-é)
+- [Novidades da 3.0.1](#novidades-da-301)
 - [Novidades da 3.0.0](#novidades-da-300)
 - [Obrigatório: o runtime PS2Recomp](#obrigatório-o-runtime-ps2recomp)
 - [Requisitos](#requisitos)
@@ -65,6 +66,22 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
 - **Controles configuráveis**: teclado e mouse totalmente configuráveis, layouts clássico ou moderno de controle e
   mapeamento botão a botão.
 - **Menu no jogo (F1)**: ajustes gráficos ao vivo, truques e cópias do cartão de memória.
+
+## Novidades da 3.0.1
+
+Medido no PC de teste (Xeon E5-2666 v3 + RX 580, rota do save, tela cheia, pares alternados); detalhes em
+[`docs/research/roteiro-60fps.pt-BR.md`](docs/research/roteiro-60fps.pt-BR.md):
+
+- **Código da VU1 mais rápido**, com o mesmo resultado bit a bit (patch 43 do runtime): média de ~51 para ~57 FPS,
+  combate pesado de ~51 para ~55 FPS.
+- **Envio mais barato para a thread do GS** (patch 44): ~150 mil despertares de thread a menos por segundo, combate +3,5%.
+- **Decodificação da VU1 sob demanda e uma cópia a menos por pacote GIF** (patches 45–46, do fork
+  [gow-native-pc-optimization](https://github.com/huanghuangdaquan-beep/gow-native-pc-optimization)).
+- **Instalação**: dependências baixadas uma vez só e sem histórico (a etapa do PGO não baixa mais ~1 GB de novo); CPUs
+  de até 4 threads pulam o PGO e usam um compilador a mais; CPUs sem SSE4.2 são avisadas antes da instalação, não
+  depois.
+- **Atualizações**: o aviso de "recompilar" só some depois de recompilar com o runtime novo, e o launcher recomenda
+  retreinar o PGO depois de uma atualização.
 
 ## Novidades da 3.0.0
 

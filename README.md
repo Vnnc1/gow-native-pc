@@ -11,7 +11,7 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-3.0.0-crimson)
+![version](https://img.shields.io/badge/version-3.0.1-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
@@ -32,6 +32,7 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ## Contents
 
 - [What is this?](#what-is-this)
+- [What's new in 3.0.1](#whats-new-in-301)
 - [What's new in 3.0.0](#whats-new-in-300)
 - [Required: the PS2Recomp runtime](#required-the-ps2recomp-runtime)
 - [Requirements](#requirements)
@@ -64,6 +65,22 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
   run and builds the final game with both (profile-guided optimisation, PGO).
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
+
+## What's new in 3.0.1
+
+Measured on the test PC (Xeon E5-2666 v3 + RX 580, save route, full screen, alternating pairs); details in
+[`docs/research/roteiro-60fps.pt-BR.md`](docs/research/roteiro-60fps.pt-BR.md):
+
+- **Faster VU1 code**, same results bit for bit (runtime patch 43): average about 51 -> 57 FPS, heavy combat about
+  51 -> 55 FPS.
+- **Cheaper hand-off to the GS thread** (patch 44): about 150,000 fewer thread wake-ups per second, combat +3.5%.
+- **VU1 decode on demand and one copy less per GIF packet** (patches 45-46, from the
+  [gow-native-pc-optimization](https://github.com/huanghuangdaquan-beep/gow-native-pc-optimization) fork).
+- **Install**: dependencies are downloaded once and shallow (the profile-guided step no longer re-downloads ~1 GB);
+  CPUs with 4 threads or fewer skip the profile-guided pass and use one more compiler; CPUs without SSE4.2 are told
+  before the install instead of after it.
+- **Updates**: the "rebuild" notice clears only after a rebuild with the new runtime, and the launcher recommends
+  retraining the profile-guided optimisation after an update.
 
 ## What's new in 3.0.0
 

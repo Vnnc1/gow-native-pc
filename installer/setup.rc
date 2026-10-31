@@ -18,8 +18,8 @@ BEGIN
             VALUE "FileDescription", "God of War Native PC Setup"
             VALUE "ProductName", "God of War Native PC"
             VALUE "CompanyName", "gow-native-pc"
-            VALUE "FileVersion", "3.0.0.0"
-            VALUE "ProductVersion", "3.0.0.0"
+            VALUE "FileVersion", "3.0.1.0"
+            VALUE "ProductVersion", "3.0.1.0"
             VALUE "OriginalFilename", "gow-native-pc-setup.exe"
         END
     END
