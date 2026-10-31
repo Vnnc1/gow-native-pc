@@ -209,7 +209,10 @@ ScrollView {
                 }
                 BotonSecundario {
                     text: Tema.t("instUpdateRebuildRun")
-                    onClicked: root.maintenance("tools,fetch,configure,recomp,sync,build")
+                    // the profile-guided pass (tune) builds the game once with the new runtime and retrains its profile in
+                    // the same run: a plain build followed by the "pgo" step the Home page then recommends compiled the
+                    // whole game three times. Small CPUs (4 threads or fewer) keep the plain build, as the install does.
+                    onClicked: root.maintenance("tools,fetch,configure,recomp,sync," + (installer.cpuThreads() <= 4 ? "build" : "tune"))
                 }
             }
         }

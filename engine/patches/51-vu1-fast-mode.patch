@@ -1,0 +1,169 @@
+VU1 fast mode (GOW_VU1_FAST=1, the launcher's Performance option, off by default): every generated part is compiled a second time (vu1n_fast<k>.cpp includes vu1n_part<k>.cpp with VU1N_FAST=1), taking the exactness helpers from vu1n::fast: VF operands are read without the Inf/NaN -> +-FLT_MAX normalisation and MADD/MSUB skip the overflow check and its double-width evaluation (round-toward-zero still saturates at +-FLT_MAX). The blocks register as their fast build (vu1nRegisterFastBlock); in fast mode slotFor takes it, with no clean-lane requirement on entry and none left known. Like PCSX2's default VU settings. Combat replay (same binary, no PGO): 150.0 -> 132.3 ms (-11.8%), 23 of 4000 records differ from the exact engine; exact mode unchanged (0 differ). No visible difference in the opening, combat and grate scenes.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -122,6 +122,9 @@
+     uint64_t req[2], gen[2], keep[2];
+ };
+ void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes);
++// gow-native-pc (patch 51): the same block compiled with the fast VU helpers (vu1n::fast); the other arguments are those of
++// its exact registration, so the generated table can call either with the same line.
++void vu1nRegisterFastBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes);
+ 
+ struct VU1Interpreter::NativeState
+ {
+@@ -206,6 +209,9 @@
+     bool chain = [] { const char *v = std::getenv("GOW_VU1N_CHAIN"); return v ? v[0] != '0' : VU1N_CHAIN_DEFAULT; }();
+     unsigned verifyLeft = std::getenv("GOW_VU1N_VERIFY") ? static_cast<unsigned>(std::atoi(std::getenv("GOW_VU1N_VERIFY"))) : 0u;
+     bool diag = std::getenv("GOW_VU1N_DIAG") != nullptr;
++    // gow-native-pc (patch 51): fast VU mode (GOW_VU1_FAST=1, the launcher's Performance option): slots take the blocks'
++    // fast build (vu1n::fast helpers) instead of the exact one
++    bool fast = [] { const char *v = std::getenv("GOW_VU1_FAST"); return v && v[0] == '1'; }();
+     unsigned long long nativePairs = 0, nativeBlocks = 0, missBlocks = 0, nativeRuns = 0, codeChanges = 0, slotSetups = 0;
+     unsigned long long laneChecks = 0, laneFails = 0; // gow-native-pc: clean-operand entry checks run / failed
+     unsigned long long selfBlocks = 0, selfPairs = 0;  // gow-native-pc: blocks that branched back to themselves (diag)
+@@ -519,6 +525,23 @@
+             return r;
+         return clampv(maddWide<Sub>(acc, a, b));
+     }
++    // gow-native-pc (patch 51): "fast VU" variants of the exactness helpers, used by the second compilation of the generated
++    // blocks (vu1n_fast<k>.cpp, VU1N_FAST=1; chosen at run time with GOW_VU1_FAST=1). Operands are read as they are (no
++    // Inf/NaN -> +-FLT_MAX normalisation) and MADD / MSUB skip the overflow check and its exact double-width evaluation;
++    // round-toward-zero still saturates an overflowing result at +-FLT_MAX. Like PCSX2's default VU settings: results can
++    // differ from the exact engine where the game relies on Inf/NaN operands or on a product that overflows float.
++    namespace fast
++    {
++        VU1N_INLINE __m128 ldn(const VU1State &s, int r) { return _mm_loadu_ps(s.vf[r]); }
++        template <bool Sub>
++        VU1N_INLINE __m128 madd(__m128 acc, __m128 a, __m128 b)
++        {
++            const __m128 p = _mm_mul_ps(a, b);
++            return Sub ? _mm_sub_ps(acc, p) : _mm_add_ps(acc, p);
++        }
++        template <bool Sub>
++        VU1N_INLINE __m128 maddc(__m128 acc, __m128 a, __m128 b) { return madd<Sub>(acc, a, b); }
++    }
+     // macVal with the DEST mask (SSE order) at run time: flags of a MAC writer read after its block ended
+     inline uint32_t macValRt(__m128 r, uint32_t m)
+     {
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -18,6 +18,7 @@
+         bool readsEntryFlags; // reads MAC/clip flags written before the block (vu1n_gen.py: bit 16 of pairs)
+         std::vector<uint8_t> cyc; // issue cycle of each pair (block entry = 0), filled on first use
+         const VU1NativeLanes *lanes = nullptr; // clean-operand masks (gow-native-pc)
++        VU1NativeFn fastFn = nullptr; // gow-native-pc (patch 51): the block built with the fast VU helpers (GOW_VU1_FAST=1)
+     };
+     std::unordered_map<uint64_t, NativeEntry> &nativeRegistry()
+     {
+@@ -89,6 +90,18 @@
+     // history point into `cyc` (replacing the entry freed it under them)
+     NativeEntry &e = nativeRegistry().try_emplace(key).first->second;
+     e.fn = fn;
++    e.pairs = pairs & 0xFFFFu;
++    e.tail = tail;
++    e.readsEntryFlags = (pairs & 0x10000u) != 0u;
++    e.lanes = lanes;
++}
++
++void vu1nRegisterFastBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, const VU1NativeLanes *lanes)
++{
++    // the exact and the fast tables register in either order (static initialisation of different files): both set the
++    // block's shared description
++    NativeEntry &e = nativeRegistry().try_emplace(key).first->second;
++    e.fastFn = fn;
+     e.pairs = pairs & 0xFFFFu;
+     e.tail = tail;
+     e.readsEntryFlags = (pairs & 0x10000u) != 0u;
+@@ -846,14 +859,18 @@
+                 if (bt.dec.empty())
+                     prepareBlockTiming(vu, bt, code, pc, count, it->second.cyc.data());
+                 bt.readsEntryFlags = it->second.readsEntryFlags;
+-                sl.fn = it->second.fn;
++                // gow-native-pc (patch 51): fast VU mode runs the fast build of the block where there is one; it normalises
++                // no operand, so it needs no clean lanes on entry and leaves none known (blocks without a fast build, such as
++                // the x64 JIT's, then check their entry lanes as usual)
++                const bool fastBlock = ns.fast && it->second.fastFn != nullptr;
++                sl.fn = fastBlock ? it->second.fastFn : it->second.fn;
+                 sl.idle = it->second.cyc.data();
+                 sl.idleEnd = static_cast<uint16_t>(sl.idle[count - 1u] + 1u);
+                 sl.bt = &bt;
+                 sl.readsEntryFlags = bt.readsEntryFlags;
+                 sl.memoable = bt.scalarRead == 0u;
+                 sl.tail = it->second.tail;
+-                if (const VU1NativeLanes *lz = it->second.lanes)
++                if (const VU1NativeLanes *lz = fastBlock ? nullptr : it->second.lanes)
+                     for (uint32_t w = 0; w < 2u; ++w)
+                         sl.laneReq[w] = lz->req[w], sl.laneGen[w] = lz->gen[w], sl.laneKeep[w] = lz->keep[w];
+                 if (bt.scalarPairs.size() > std::size(sl.scalar))
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -621,8 +621,9 @@
+         if(Python3_FOUND AND EXISTS "${PS2X_VU1N_GEN}")
+             set(PS2X_VU1N_DIR "${CMAKE_CURRENT_BINARY_DIR}/vu1n_generado")
+             set(PS2X_VU1N_PARTS)
++            # gow-native-pc (patch 51): vu1n_fast<k>.cpp, the same blocks built with the fast VU helpers (GOW_VU1_FAST=1)
+             foreach(part RANGE 0 5)
+-                list(APPEND PS2X_VU1N_PARTS "${PS2X_VU1N_DIR}/vu1n_part${part}.cpp")
++                list(APPEND PS2X_VU1N_PARTS "${PS2X_VU1N_DIR}/vu1n_part${part}.cpp" "${PS2X_VU1N_DIR}/vu1n_fast${part}.cpp")
+             endforeach()
+             set(PS2X_VU1N_HEADS "${PS2X_VU1_MICROCODE_DIR}/../vu1n_heads.txt")
+             get_filename_component(PS2X_VU1N_HEADS "${PS2X_VU1N_HEADS}" ABSOLUTE)
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -5,8 +5,9 @@
+ 
+ Reads the captured 16 KB VU1 micro-memories (GOW_VU1_CAPTURA), splits them into basic blocks (same rule as
+ VU1Interpreter's nativeExtent in ps2_vu1_native.inl) and writes straight-line C++ for each distinct (pc, words) block:
+-immediate semantics, no cycle model, MAC flags only where they can be observed. Output: vu1n_part<k>.cpp. The exact engine
+-(ps2_vu1_core.cpp) remains the fallback for every block that is not here and the oracle for GOW_VU1N_VERIFY.
++immediate semantics, no cycle model, MAC flags only where they can be observed. Output: vu1n_part<k>.cpp, and
++vu1n_fast<k>.cpp, its fast VU build (patch 51). The exact engine (ps2_vu1_core.cpp) remains the fallback for every
++block that is not here and the oracle for GOW_VU1N_VERIFY.
+ heads.txt (optional): extra entry pcs (hex, one per line), e.g. misses logged by GOW_VU1N_DIAG.
+ gow-native-pc: --dll <name> writes <out>/<name>.cpp for the background VU1 compiler (ps2_vu1_jit.inl) instead of the
+ parts: one module the runtime builds while the game runs and loads as a DLL / shared object. It does not link against
+@@ -971,7 +972,7 @@
+         texts[part].append("\n".join(t))
+         # bit 16: the block reads flags written before it; only such blocks need exact entry timing (see runNative)
+         reads_entry = any("macAt(" in ln or "clipAt(" in ln for ln in body)
+-        reg = "api->reg" if dll else "vu1nRegisterBlock"
++        reg = "api->reg" if dll else "VU1N_REGISTER"
+         regs[part].append(f"    {reg}(0x{key:016x}ull, {name}, {npairs | (0x10000 if reads_entry else 0)}u, "
+                           f"{'&' + name + '_tail' if tail else 'nullptr'}, &{name}_lanes);")
+         written.append(key)
+@@ -993,12 +994,25 @@
+         open(os.path.join(out, f"{dll}.keys"), 'w', encoding='utf-8').write("".join(f"{k:016x}\n" for k in written))
+         print(f"[vu1n_gen] {len(inputs)} images, {len(blocks)} new blocks, {count} generated, {unsupported} unsupported")
+         return
++    # gow-native-pc (patch 51): every part is compiled twice; vu1n_fast<k>.cpp includes it with VU1N_FAST=1, which takes the
++    # exactness helpers (operand normalisation, the MADD overflow check) from vu1n::fast and registers the blocks as their
++    # fast build (the runtime's fast VU mode, GOW_VU1_FAST=1)
++    variant = ('// gow-native-pc (patch 51): exact build, or the fast VU build when vu1n_fast<k>.cpp includes this file\n'
++               '#if defined(VU1N_FAST) && VU1N_FAST\n#define VU1N_V vu1n::fast\n#define VU1N_REGISTER vu1nRegisterFastBlock\n'
++               '#else\n#define VU1N_V vu1n\n#define VU1N_REGISTER vu1nRegisterBlock\n#endif\n\n')
++
++    def swap(text):
++        return text.replace("vu1n::ldn(", "VU1N_V::ldn(").replace("vu1n::maddc<", "VU1N_V::maddc<").replace("vu1n::madd<", "VU1N_V::madd<")
++
+     for k in range(parts):
+-        body = header + "\n".join(texts[k]) + "\nnamespace\n{\n    const bool g_registered = []\n    {\n" + "\n".join(regs[k]) + "\n        return true;\n    }();\n}\n" + footer
+-        path = os.path.join(out, f"vu1n_part{k}.cpp")
+-        old = open(path, encoding='utf-8').read() if os.path.exists(path) else None
+-        if old != body:
+-            open(path, 'w', encoding='utf-8').write(body)
++        body = header + variant + swap("\n".join(texts[k])) + "\nnamespace\n{\n    const bool g_registered = []\n    {\n" + "\n".join(regs[k]) + "\n        return true;\n    }();\n}\n" + footer
++        fast = (f"// Generated by tools/vu1/vu1n_gen.py: the fast VU build of vu1n_part{k}.cpp. Do not publish.\n"
++                f"#define VU1N_FAST 1\n#include \"vu1n_part{k}.cpp\"\n")
++        for name, text in ((f"vu1n_part{k}.cpp", body), (f"vu1n_fast{k}.cpp", fast)):
++            path = os.path.join(out, name)
++            old = open(path, encoding='utf-8').read() if os.path.exists(path) else None
++            if old != text:
++                open(path, 'w', encoding='utf-8').write(text)
+     print(f"[vu1n_gen] {len(inputs)} images, {len(blocks)} distinct blocks, {count} generated, {unsupported} unsupported, "
+           f"{assumed} rely on clean operands on entry")
+ 

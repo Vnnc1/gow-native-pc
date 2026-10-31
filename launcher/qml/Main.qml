@@ -63,6 +63,7 @@ ApplicationWindow {
         property bool compilarAreas: true // in-process x64 JIT; existing saved choices are preserved
         property bool autoNative: false // optional AOT build after a successful play session
         property bool finAnticipado: true // GOW_GS_EARLY_FINISH (runtime patch 40): the EE prepares the next frame while VU1 draws
+        property bool vuRapida: false // GOW_VU1_FAST (runtime patch 51): VU1 blocks without operand normalisation / MADD overflow check
         property bool jitInline: true
         property bool diagnostics: false
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
@@ -230,6 +231,7 @@ ApplicationWindow {
             datosJit: installer.repoRoot + "/data/" + installer.gameId,
             jitInline: true,
             finAnticipado: ajustes.finAnticipado,
+            vuRapida: ajustes.vuRapida,
             diagnostics: ajustes.diagnostics,
             framePc: installer.diagnosticsFramePc(),
             // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)

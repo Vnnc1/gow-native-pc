@@ -5,6 +5,7 @@ done, how it was measured, and what is left.
 
 | Document | Subject |
 |---|---|
+| [texture-replacement.md](texture-replacement.md) | Planned runtime patch: texture dump and replacement (texture packs): how PCSX2 does it, hook points in the GS renderer, content-hash ids, indexed textures, tests, legal limits. Design only |
 | [patches-28-29-review.md](patches-28-29-review.md) | Windows call-path regression review, standalone diagnostic initialization and trace-clock fixes, reproducible tests before patch 30 |
 | [roadmap-2026-10-27.md](roadmap-2026-10-27.md) | Code survey and next phases: direct JAL calls, dispatch/memory fast paths, ThinLTO/cache/PGO, 60 fps (early FINISH, chain, CD reads, pacing), audio, ISO/texture mods, FSR/DXGI/DLSS limits, GoW2 hook (patches 28-47) |
 | [cutscene-audio-2026-10-26.md](cutscene-audio-2026-10-26.md) | Reproduced PT-BR A01MP02 channel-block misalignment; original-disc control, raw PCM comparison and correction plan |

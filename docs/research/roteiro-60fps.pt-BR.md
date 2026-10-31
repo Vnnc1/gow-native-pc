@@ -36,7 +36,7 @@ som fora desta fase (`48-sound-exponential-release`); os itens seguintes começa
 | 49 | Transições entre blocos (`VU1NativeAccess::chain`) | medido direto (`rdtsc` em 1 de cada 64 chamadas): ~10–11 ns por transição, ~18 milhões/s, **~20% do worker**. Testado e descartado: tirar de linha os casos raros (`blockTiming`, `scalarStart`) — neutro; convenção `preserve_none` (sem salvar registradores) — **pior** (+7% sem PGO, +11% com PGO). O custo não está no prólogo, e sim no trabalho por transição. **Estudo de 2026-10-31** (replay de combate, 4000 execuções, ~174 transições por execução): 15% são auto-laços (95% deles fora do caminho rápido por terem cauda de flags ou FDIV/EFU), 20% saem de blocos com um só sucessor, 39% seguem o sucessor dominante de um bloco condicional. Testados, todos com 0 diferenças e **empate** em pares alternados de 8 rodadas: (a) caminho rápido para 89% dos auto-laços (146,1 vs 146,2 ms); (b) `chain` em linha nas saídas de bloco, caso comum (156,3 vs 156,3 ms com PGO; 178,4 vs 178,5 ms sem PGO nos dois lados). Nem o trabalho de contabilidade nem a chamada pesam: o que resta é o desvio dependente de dados e a troca de código entre blocos, que superblocos não garantem tirar | **parado**: sem ganho mensurável no que um patch removeria; superblocos só com evidência nova (ex.: contadores de desvio errado) |
 | 50 | Quadro de pilha de `VU1Interpreter::run`, `recordReplay` e `recordTask` (chamadas a cada programa da VU1): o código de depuração/gravação que copia o interpretador inteiro passa a um quadro próprio fora de linha. Antes, `run()` reservava 202 KB de pilha a cada chamada, sondados página a página por `___chkstk_ms` | perfil do worker no save de combate: `___chkstk_ms` 2,3% → 0%; replay 0 diferenças; `verify` passa | **feito**; falta FPS em pares com o PC ocioso |
 | 52 | Envio de pacotes (XGKICK → estágio GS): cópia e cabeçalhos por pacote | **medido em 2026-10-31** (perfil do worker no save de combate): `ps2_gs_stage::push` 3,2%, `xgkick` 0,5%, resto do caminho <1% — ~4% no total, bem abaixo da estimativa de 12–15% | **baixa prioridade**: teto ~1–2 FPS. No mesmo perfil: `chain` 27%, blocos gerados 35%, `memcmp` 1,9% (candidato), espera do worker 8% (`ZwWaitForAlertByThreadId`, não é custo) |
-| 51 | Sobras de normalização: dados lidos da memória da VU usados como operandos | teto de normalização restante (~7%) | a estudar |
+| 53 | Sobras de normalização: dados lidos da memória da VU usados como operandos | teto de normalização restante (~7%) | a estudar (o modo VU rápida, patch 51, já as dispensa) |
 
 Descartados (medidos, não vale): timing estático completo da VU1 (teto ~5%, dias de trabalho no gerador); AVX2 no
 código da VU1 (0%); checagem de overflow do `madd` mais barata (nenhuma forma exata mais barata que as 5 operações
@@ -46,7 +46,23 @@ Notas de medição desta fase: o PGO sozinho vale ~9% na VU1 (replay 151,7 ms se
 que move o corpo de uma função quente (novo nome, nova forma) perde o perfil no build de teste e parece pior do que é;
 compare sem PGO nos dois lados (pasta de build sem `-fprofile-instr-use`) ou retreine o perfil.
 
-## Fase 2 — modo "VU rápida" (opcional, depois da fase 1)
+## Fase 2 — modo "VU rápida" (opcional; primeira etapa feita no patch 51)
+
+**Patch 51 (2026-10-31): feito, opção desligada por padrão.** Cada parte gerada é compilada duas vezes
+(`vu1n_fast<k>.cpp` inclui `vu1n_part<k>.cpp` com `VU1N_FAST=1`): a variante rápida lê os operandos sem normalizar e faz
+o `madd` sem a checagem de overflow (o arredondamento para zero ainda satura em ±FLT_MAX). O runtime escolhe a variante
+na montagem do slot (`GOW_VU1_FAST=1`, Launcher → Desempenho → "VU rápida (experimental)"); o modo exato não mudou.
+
+| Medição (mesmo executável, sem PGO) | Exato | VU rápida |
+|---|---|---|
+| Replay de combate (4000 execuções, 6 rodadas alternadas) | 150,0 ms | **132,3 ms (−11,8%)** |
+| Execuções que diferem do motor exato | 0 | 23 de 4000 (0,6%) |
+| Quedas de FPS (1 execução por cenário, em janela) | combate 43–45, jogo novo 41–47, Hydra 42–49 | combate 45–53, jogo novo 44–50, Hydra 45–51 |
+| Capturas (abertura, combate no convés, grade) | — | nenhuma diferença visível |
+
+Custos: as 6 partes rápidas somam ~1 min de compilação (paralela). O treino do PGO roda no modo exato, então a variante
+rápida fica sem perfil (no máximo ~9% a menos do que poderia). Falta: pares de FPS com o PC ocioso, sessão longa em
+outras áreas, e a segunda etapa (timing ocioso, ~5,5%).
 
 O PCSX2 roda a 60 porque, por padrão, não é exato: aproxima arredondamento, clamp, flags e timing da VU. O custo de
 cada exatidão aqui (replay, sem a verificação):

@@ -414,6 +414,9 @@ bool Lanzador::iniciar(const QVariantMap &a)
     // Runtime patch 40: FINISH raised when the frame's VIF1 packet is queued, so the EE prepares the next frame while
     // VU1 draws this one (about +20% in VU1-bound combat, measured). Off restores the serial frame order.
     entorno.insert(QStringLiteral("GOW_GS_EARLY_FINISH"), a.value(QStringLiteral("finAnticipado"), true).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
+    // Runtime patch 51: fast VU mode, the VU1 blocks built without operand normalisation and the MADD overflow check (about
+    // 12% less VU1 time in combat, measured); off (the exact build) unless the player turns it on
+    entorno.insert(QStringLiteral("GOW_VU1_FAST"), a.value(QStringLiteral("vuRapida"), false).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
     // gow-native-pc: VU1 code the build did not compile (areas the first-play recording never reached) is compiled while
     // playing by the in-process x86-64 JIT (engine/patches/18, GOW_VU1N_X64: no compiler or files needed, any toolchain).
     // The background clang compiler (patch 17, GOW_VU1N_JIT + data/<game>/vu1_jit.json) stays available by hand.

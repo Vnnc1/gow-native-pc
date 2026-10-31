@@ -60,6 +60,11 @@ ScrollView {
             Interruptor { checked: raiz.ajustes.finAnticipado; onToggled: raiz.ajustes.finAnticipado = checked }
         }
         Fila {
+            titulo: Tema.t("vuRapida")
+            descripcion: Tema.t("vuRapidaDesc")
+            Interruptor { checked: raiz.ajustes.vuRapida; onToggled: raiz.ajustes.vuRapida = checked }
+        }
+        Fila {
             titulo: Tema.t("autoNative")
             descripcion: Tema.t("autoNativeDesc")
             Interruptor { checked: raiz.ajustes.autoNative; onToggled: raiz.ajustes.autoNative = checked }
