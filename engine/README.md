@@ -56,3 +56,4 @@
 | 40-gs-early-finish | FINISH raised when the frame's VIF1 packet is queued; CSR without worker wait, display writes in drawing order; +20% in VU1-bound combat | this project |
 | 41-register-functions-o1 | Generated register_functions.cpp built alone at -O1 without unity/PCH: 331 s -> 9.8 s | this project |
 | 42-shallow-dependency-clones | raylib, toml11, fmt, rabbitizer cloned at their tag only; toml11 without its test/docs submodules (345 MB) | this project |
+| 43-leaner-vu1-native-code | Generated VU1 blocks: cheaper exact operand normalisation, no redundant clamps under round-toward-zero, operands/ACC in locals; bit-identical, VU1 -8.6%, +11% FPS (combat +8%) | this project |

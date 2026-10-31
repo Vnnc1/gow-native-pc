@@ -1,0 +1,183 @@
+Leaner generated VU1 blocks (tools/vu1/vu1n_gen.py, ps2_vu1_native.h), bit-identical results:
+- operand normalisation (Inf/NaN -> +-FLT_MAX) as an unsigned minimum of the magnitude with FLT_MAX plus the sign:
+  4 operations instead of 6 (blendv);
+- no clamp after ADD / SUB / MUL of VF operands: blocks run with round-toward-zero and FTZ/DAZ, where finite operands
+  saturate at FLT_MAX; maddc clamps only its rare wide path (macVal counts FLT_MAX as overflow like an infinity, so
+  the MAC flags are unchanged);
+- VF operands read once per block into locals (normalised once) and ACC kept in a local until written; every write
+  still goes to the VU1 state.
+Measured on 4000 recorded combat programs (replay, 4 alternating rounds): 157.3 -> 143.8 ms (-8.6%), 0 differ.
+Save route, full screen, 4 alternating pairs: 51.0 -> 56.9 FPS mean, combat 50.9 -> 55.1 FPS, 4 of 4 pairs.
+
+diff --git a/tools/vu1/vu1n_gen.py b/tools/vu1/vu1n_gen.py
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -238,7 +238,8 @@
+     return [end_pc]
+ 
+ 
+-def emit_upper(u, pc, idx, mac_var, clip_var, prev_clip, st=0, from_entry=0, used=None):
++def emit_upper(u, pc, idx, mac_var, clip_var, prev_clip, st=0, from_entry=0, used=None, cache=None):
++    """cache (gow-native-pc, patch 43): VF operands and ACC already in locals in this block, see gen_block."""
+     kind, src, toacc, bc = classify(u)
+     dest = (u >> 21) & 0xF
+     ft, fs, fd = (u >> 16) & 31, (u >> 11) & 31, (u >> 6) & 31
+@@ -258,16 +259,26 @@
+         return [f"vu1n::absOp<{m}>(s, {fs}, {ft});"] if ft else L
+     if kind in ('opmsub', 'opmula', 'other'):
+         return [f"VU1NativeAccess::callUpper(n, {pc}u, 0x{u:08x}u);"]
++    pre = []
++
+     def opnd(r, need):
+         # need: the lanes of r the result depends on (DEST lanes, or the broadcast lane)
+         want = lanes(r, need)
+         if r == 0:
+             return f"vu1n::ld(s, {r})"
+-        if st & want == want:
+-            if used is not None:
+-                used[0] |= want & from_entry
+-            return f"vu1n::ld(s, {r})"
+-        return f"vu1n::ldn(s, {r})"
++        clean = st & want == want
++        if clean and used is not None:
++            used[0] |= want & from_entry
++        if cache is None:
++            return f"vu1n::ld(s, {r})" if clean else f"vu1n::ldn(s, {r})"
++        # a normalised local serves every read; a raw one only reads of lanes known clean (where both are equal)
++        hit = cache.get(r)
++        if hit and (hit[1] or clean):
++            return hit[0]
++        var = f"v{r}_{idx}"
++        pre.append(f"const __m128 {var} = vu1n::{'ld' if clean else 'ldn'}(s, {r});")
++        cache[r] = (var, not clean)
++        return var
+     a = opnd(fs, m)
+     if src == 'bc':
+         b = f"vu1n::bc<{bc}>({opnd(ft, 1 << bc)})"
+@@ -277,7 +288,7 @@
+         b = "_mm_set1_ps(s.i)"
+     else:
+         b = opnd(ft, m)
+-    acc = "vu1n::ldAcc(s)"
++    acc = cache['acc'][0] if cache is not None and 'acc' in cache else "vu1n::ldAcc(s)"
+     if kind == 'add':
+         r = f"_mm_add_ps({a}, {b})"
+     elif kind == 'sub':
+@@ -285,9 +296,9 @@
+     elif kind == 'mul':
+         r = f"_mm_mul_ps({a}, {b})"
+     elif kind == 'madd':
+-        r = f"vu1n::madd<false>({acc}, {a}, {b})"
++        r = f"vu1n::maddc<false>({acc}, {a}, {b})"
+     elif kind == 'msub':
+-        r = f"vu1n::madd<true>({acc}, {a}, {b})"
++        r = f"vu1n::maddc<true>({acc}, {a}, {b})"
+     elif kind == 'max':
+         r = f"_mm_max_ps({a}, {b})"
+     else:
+@@ -297,11 +308,18 @@
+     if kind in ('add', 'sub', 'mul', 'madd', 'msub') and mac_var:
+         out.append(f"const uint32_t {mac_var} = vu1n::macVal<{m}>(r{idx});")
+         out.append(f"const __m128 q{idx} = r{idx};  // unclamped: flags computed later if it outlives the block")
+-    if kind not in ('max', 'min', 'mini'):
++    # gow-native-pc (patch 43): blocks run with round-toward-zero and FTZ/DAZ (runNative), where a sum or product of finite
++    # operands saturates at FLT_MAX instead of overflowing: with VF operands (normalised or known clean) ADD / SUB / MUL
++    # results are finite already, and maddc clamps its own rare wide path. Q / I operands keep the clamp.
++    finite = kind in ('madd', 'msub') or (kind in ('add', 'sub', 'mul') and src in ('bc', 'v'))
++    if kind not in ('max', 'min', 'mini') and not finite:
+         out.append(f"r{idx} = vu1n::clampv(r{idx});")
+     if toacc or fd:
+         out.append(f"vu1n::stf<{m}>({target}, r{idx});")
+-    return out
++        # a whole register written by a clamped result: that local is its value (clean, so also its normalised view)
++        if cache is not None and m == 15 and kind not in ('max', 'min', 'mini'):
++            cache['next'] = ('acc' if toacc else fd, (f"r{idx}", True))
++    return pre + out
+ 
+ 
+ # ---------------------------------------------------------------------------------------------------------------------
+@@ -631,6 +649,22 @@
+         return out
+ 
+     lines = []
++    # gow-native-pc (patch 43): VF operands (normalised once) and ACC kept in locals until written; every write still goes
++    # to the state, so the code after the block, call-outs and the exact engine see the same registers
++    cache = {}
++
++    def after_pair(code, li, uw, upper):
++        nxt = cache.pop('next', None)
++        if any('callUpper' in ln or 'callLower' in ln for ln in code):
++            cache.clear()
++            return
++        for r in set(li['vfw']) | set(uw):
++            cache.pop(r, None)
++        kind, _, toacc, _ = classify(upper)
++        if toacc or kind in ('opmula', 'other'):
++            cache.pop('acc', None)
++        if nxt and nxt[0] not in li['vfw']:
++            cache[nxt[0]] = nxt[1]
+     st = entry | VF0_LANES      # VF lanes known clean (see pair_effect)
+     from_entry = st             # of those, the ones that come from the entry assumption (not written by this block)
+     used = [0]                  # entry lanes the code relies on (-> req_out)
+@@ -696,13 +730,16 @@
+                 lines.append(f"bool taken = {cond};")
+                 lines.append(f"uint32_t target = {tgt}u;")
+             # upper still executes in the branch pair
+-            lines.extend(emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used))
++            up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used, cache)
++            lines.extend(up)
++            after_pair(up, li, uw, u)
+             st = apply_pair(st, effect)
+             from_entry &= ~(effect[0] | effect[1] | effect[2])
+             continue
+         # ordinary pair
+-        up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used)
++        up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used, cache)
+         lo = [] if iBit else emit_lower(l, pc, u, None, mac_src(i), clip_src(i), f"c{i}", uw)
++        after_pair(up + lo, li, uw, u)
+         if iBit:
+             lines.extend(up)
+             lines.append(f"s.i = vu1n::qnorm(*(const float *)&(const uint32_t &)(0x{l:08x}u)); // I register")
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -418,13 +418,13 @@
+     VU1N_INLINE __m128 ld(const VU1State &s, int r) { return _mm_loadu_ps(s.vf[r]); }
+     // Operand view of a register: Inf/NaN (exponent 255) act as +-FLT_MAX, as in the exact engine's normalizeOperand. The register
+     // itself keeps its raw bits (integer data travels through VF registers).
++    // gow-native-pc (patch 43): |x| with exponent 255 is above 0x7F7FFFFF (FLT_MAX) and every other |x| is at most that, so an
++    // unsigned minimum of the magnitude with FLT_MAX plus the sign is the same mapping in 4 operations instead of 6
+     VU1N_INLINE __m128 nrm(__m128 v)
+     {
+         const __m128i b = _mm_castps_si128(v);
+-        const __m128i expMask = _mm_set1_epi32(0x7F800000);
+-        const __m128i bad = _mm_cmpeq_epi32(_mm_and_si128(b, expMask), expMask);
+-        const __m128i fixed = _mm_or_si128(_mm_and_si128(b, _mm_set1_epi32(static_cast<int>(0x80000000u))), _mm_set1_epi32(0x7F7FFFFF));
+-        return _mm_castsi128_ps(_mm_blendv_epi8(b, fixed, bad));
++        const __m128i mag = _mm_min_epu32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F7FFFFF));
++        return _mm_castsi128_ps(_mm_or_si128(mag, _mm_and_si128(b, _mm_set1_epi32(static_cast<int>(0x80000000u)))));
+     }
+     VU1N_INLINE __m128 ldn(const VU1State &s, int r) { return nrm(_mm_loadu_ps(s.vf[r])); }
+     // gow-native-pc: true when none of the VF lanes in need (bit r*4 + lane, see VU1NativeLanes) has exponent 255
+@@ -504,6 +504,21 @@
+             return r;
+         return maddWide<Sub>(acc, a, b);
+     }
++    // gow-native-pc (patch 43): madd with the clamp applied. The fast path returns only lanes below FLT_MAX (no clamp needed);
++    // the wide one is clamped here. The flags of a clamped wide result are those of the unclamped one (macVal counts
++    // FLT_MAX as overflow like an infinity), so generated blocks keep it as their unclamped value too.
++    template <bool Sub>
++    VU1N_INLINE __m128 maddc(__m128 acc, __m128 a, __m128 b)
++    {
++        const __m128 p = _mm_mul_ps(a, b);
++        __m128 r = Sub ? _mm_sub_ps(acc, p) : _mm_add_ps(acc, p);
++        const __m128i lim = _mm_set1_epi32(0x7F7FFFFE);
++        const __m128i hot = _mm_or_si128(_mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(p), _mm_set1_epi32(0x7FFFFFFF)), lim),
++                                         _mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x7FFFFFFF)), lim));
++        if (_mm_movemask_epi8(hot) == 0) [[likely]]
++            return r;
++        return clampv(maddWide<Sub>(acc, a, b));
++    }
+     // macVal with the DEST mask (SSE order) at run time: flags of a MAC writer read after its block ended
+     inline uint32_t macValRt(__m128 r, uint32_t m)
+     {
