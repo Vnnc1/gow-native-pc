@@ -12,3 +12,5 @@ launcher/build-clang/
 __pycache__/
 # shortcut made by the launcher stage
 *.lnk
+# profile-guided data packaged into a release (tools/pipeline: package), never committed
+games/*/pgo/

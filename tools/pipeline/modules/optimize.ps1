@@ -7,10 +7,14 @@
 # A launcher update that changed the runtime patches marks the profile stale (data\pgo-stale.txt, tools/pipeline/update.ps1;
 # the launcher then recommends this step again). A new profile clears it when it was trained on the current runtime: this
 # run fetched it, or no rebuild after an update is pending.
+# The same condition says what the new profile was trained on: the current runtime gets a manifest (Write-ProfileManifest,
+# game.ps1: what lets a configure, and the release package, recognise it), an older one none.
 function Clear-StaleProfile {
     if (($Stages -contains 'fetch') -or -not (Test-Path (Join-Path $root 'data\needs-rebuild.txt'))) {
         Remove-Item (Join-Path $root 'data\pgo-stale.txt') -ErrorAction SilentlyContinue
+        Write-ProfileManifest 'trained'
     }
+    else { Remove-Item "$pgoProfile.json" -ErrorAction SilentlyContinue }
 }
 if ($Stages -contains 'pgo') {
     $genBld = "$bld-pgogen"
@@ -44,7 +48,17 @@ if ($Stages -contains 'pgo') {
 # again and rebuilt once more: four builds and two recorded runs. Here one instrumented build plays the game once,
 # recording the VU1 micro-memories and IOP modules (as optimize) and the profile (as pgo) together; one final build
 # uses both. VU1 blocks first met in this run are not in the profile (they are compiled from it afterwards).
-if ($Stages -contains 'tune') {
+# With a profile that already fits this runtime and game code (the release's one, games/<id>/pgo/shipped.profdata, or an
+# earlier training: Use-ReleaseProfile in game.ps1) there is nothing to train: the game is built once with it and the
+# optimize stage below records the VU1 / IOP code on that build (the install then compiles the game once, not twice).
+$tuneWithProfile = $false
+if ($Stages -contains 'tune' -and (Use-ReleaseProfile)) {
+    Step "rebuild with the profile ($Config, clang): the profile fits this runtime and game code, no training run"
+    Configure -MaySkip
+    Build-Game
+    $tuneWithProfile = $true
+}
+if ($Stages -contains 'tune' -and -not $tuneWithProfile) {
     $genBld = "$bld-pgogen"
     Step 'profile-guided optimisation: instrumented build (also records VU1 code)'
     Configure $genBld 'generate' -MaySkip
@@ -78,7 +92,7 @@ if ($Stages -contains 'tune') {
 }
 
 # --- optimize / native ----------------------------------------------------------------------------------------------
-if ($Stages -contains 'optimize') {
+if ($Stages -contains 'optimize' -or $tuneWithProfile) {
     $secs = if ($Seconds -gt 0) { $Seconds } else { [int]$prof.optimize.seconds }
     Step "record: the game plays itself for $secs s (hidden, in the background)"
     Need $runnerExe 'built game (run the build stage)'
@@ -92,7 +106,7 @@ if ($Stages -contains 'optimize') {
     Invoke-GameRecording $runnerExe $elf $secs $vars
 
 }
-if ($Stages -contains 'optimize' -or $Stages -contains 'native') {
+if ($Stages -contains 'optimize' -or $Stages -contains 'native' -or $tuneWithProfile) {
     Step 'native VU1 and IOP code'
     $nVu1 = @(Get-ChildItem $vu1 -Filter *.bin -ErrorAction SilentlyContinue).Count
     $nIop = @(Get-ChildItem $iopMods -Filter *.bin -ErrorAction SilentlyContinue).Count

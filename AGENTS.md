@@ -201,6 +201,16 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   LoadingScreen.qml and InstallPage.qml match by prefix.
 - Small CPUs (`installer.cpuThreads() <= 4`) install with `build,optimize` instead of `tune`: no PGO, so one full -O3
   build fewer. Build jobs reserve 1 thread (not 2) on such CPUs (context.ps1). PGO stays available via the `pgo` stage.
+- Release profile (game.ps1 `Use-ReleaseProfile`): the package ships this checkout's PGO profile as
+  `games/<id>/pgo/shipped.profdata` + `.json` (never committed: `.gitignore`). Its manifest is the identity the generated
+  code depends on: `engine/runtime.toml`, the patch set (ordinal order, `Get-RuntimePatches`), the `games/<id>` files
+  outside `pgo/`, and the SHA-256 of the recompiled ELF's `.text` (a fan translation changes data, not code: the PT-BR
+  `.text` is byte-identical to the USA one). A configure of the main build folder without a fitting local profile takes
+  the shipped one; `tune` with a fitting profile skips the instrumented build and the training run (one build, then the
+  optimize recording), and small CPUs' `build,optimize` get it too. A trained profile gets the same manifest
+  (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
+  without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
+  holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
 - CPUs without SSE4.2/POPCNT (x86-64-v2) cannot run the build: the Install page blocks the install
   (`installer.cpuSupported()`) instead of compiling a game that would not start.
 - Update markers: `data/needs-rebuild.txt` is removed by a successful final build only in a run that also fetched the

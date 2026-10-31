@@ -59,6 +59,19 @@ if ($Stages -contains 'package' -or $Stages -contains 'installer') {
     foreach ($item in @('README.md', 'README.pt-BR.md', 'CREDITS.md', 'LICENSE', 'AGENTS.md', 'CLAUDE.md', 'build.cmd', 'docs', 'games', 'tools')) {
         Copy-Item (Join-Path $root $item) $stage -Recurse -Force
     }
+    # The release's profile-guided data (Use-ReleaseProfile, game.ps1): this checkout's profile, and only one trained on
+    # exactly this runtime, patch set, game profile and game code (its manifest). -NoReleaseProfile packages without one
+    # (installs then train their own, as before).
+    if (-not $NoReleaseProfile) {
+        if (-not ((Test-Path $pgoProfile) -and (Test-ProfileManifest "$pgoProfile.json"))) {
+            throw "no profile trained on this runtime and patch set ($pgoProfile + .json): run build.cmd -Stages fetch,configure,recomp,sync,pgo first, or package with -NoReleaseProfile"
+        }
+        $shippedDir = Join-Path $stage "games\$Game\pgo"
+        New-Item -ItemType Directory -Force $shippedDir | Out-Null
+        Copy-Item $pgoProfile (Join-Path $shippedDir 'shipped.profdata')
+        Copy-Item "$pgoProfile.json" (Join-Path $shippedDir 'shipped.profdata.json')
+        Write-Host ("release profile: {0} ({1:N0} MB)" -f $pgoProfile, ((Get-Item $pgoProfile).Length / 1MB))
+    }
     New-Item -ItemType Directory -Force (Join-Path $stage 'engine') | Out-Null
     Copy-Item (Join-Path $root 'engine\runtime.toml'), (Join-Path $root 'engine\README.md') (Join-Path $stage 'engine')
     Copy-Item (Join-Path $root 'engine\patches') (Join-Path $stage 'engine') -Recurse

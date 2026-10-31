@@ -1,3 +1,68 @@
+# --- profile-guided data shipped with the release -------------------------------------------------------------------
+# The generated game code depends only on the runtime (engine/runtime.toml, engine/patches), the game profile
+# (games/<id>, without its pgo folder) and the code of the recompiled executable: its .text section (a fan translation
+# changes text and data, not code: the PT-BR translation's .text is byte-identical to the USA one). A profile trained on
+# one installation therefore fits every installation with the same identity. A trained profile gets a manifest
+# (<profile>.json) with that identity; the release package ships one (games/<id>/pgo/shipped.profdata + .json) and a
+# configure without a fitting local profile takes it: the install then needs no instrumented build and no training run.
+function Get-ElfTextHash([string]$elf) {
+    $d = [IO.File]::ReadAllBytes($elf)
+    $shoff = [BitConverter]::ToUInt32($d, 0x20)
+    $entsize = [BitConverter]::ToUInt16($d, 0x2E); $count = [BitConverter]::ToUInt16($d, 0x30); $strndx = [BitConverter]::ToUInt16($d, 0x32)
+    $strings = [BitConverter]::ToUInt32($d, $shoff + $strndx * $entsize + 16)
+    for ($i = 0; $i -lt $count; $i++) {
+        $h = $shoff + $i * $entsize
+        $at = $strings + [BitConverter]::ToUInt32($d, $h)
+        $name = [Text.Encoding]::ASCII.GetString($d, $at, [Array]::IndexOf($d, [byte]0, $at) - $at)
+        if ($name -eq '.text') {
+            $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($d, [BitConverter]::ToUInt32($d, $h + 16), [BitConverter]::ToUInt32($d, $h + 20))
+            return [BitConverter]::ToString($hash).Replace('-', '')
+        }
+    }
+    throw "no .text section in $elf"
+}
+function Get-ProfileIdentity {
+    $sha = { param($text) [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($text))).Replace('-', '') }
+    # ordinal order on every host (Sort-Object follows the system culture: another Windows language would hash differently)
+    $patches = (Get-RuntimePatches | ForEach-Object { "$($_.Name):$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)" }) -join ';'
+    $gameDir = Join-Path $root "games\$Game"
+    [string[]]$files = @(Get-ChildItem $gameDir -Recurse -File | Where-Object { $_.FullName -notlike (Join-Path $gameDir 'pgo\*') } |
+        ForEach-Object { $_.FullName.Substring($gameDir.Length + 1) })
+    [Array]::Sort($files, [StringComparer]::Ordinal)
+    $profileFiles = ($files | ForEach-Object { "${_}:$((Get-FileHash (Join-Path $gameDir $_) -Algorithm SHA256).Hash)" }) -join ';'
+    return [ordered]@{
+        runtime = (Get-FileHash (Join-Path $root 'engine\runtime.toml') -Algorithm SHA256).Hash
+        patches = & $sha $patches
+        game = & $sha $profileFiles
+        code = Get-ElfTextHash (Languages).recompile_elf
+    }
+}
+# $true when the manifest's identity is this installation's (no prepared disc yet: $false)
+function Test-ProfileManifest([string]$manifest) {
+    if (-not (Test-Path $manifest)) { return $false }
+    try { $id = Get-ProfileIdentity } catch { return $false }
+    $m = Get-Content $manifest -Raw | ConvertFrom-Json
+    return ($m.runtime -eq $id.runtime) -and ($m.patches -eq $id.patches) -and ($m.game -eq $id.game) -and ($m.code -eq $id.code)
+}
+function Write-ProfileManifest([string]$source) {
+    $m = Get-ProfileIdentity
+    $m.source = $source
+    $m.created_utc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    [IO.File]::WriteAllText("$pgoProfile.json", ($m | ConvertTo-Json))
+}
+# $true when the local profile fits this installation, after taking the release's one if the local one did not
+function Use-ReleaseProfile {
+    if ((Test-Path $pgoProfile) -and (Test-ProfileManifest "$pgoProfile.json")) { return $true }
+    $shipped = Join-Path $root "games\$Game\pgo\shipped.profdata"
+    if (-not ((Test-Path $shipped) -and (Test-ProfileManifest "$shipped.json"))) { return $false }
+    New-Item -ItemType Directory -Force $pgoDir | Out-Null
+    Copy-Item $shipped $pgoProfile -Force
+    Copy-Item "$shipped.json" "$pgoProfile.json" -Force
+    Remove-Item (Join-Path $root 'data\pgo-stale.txt') -ErrorAction SilentlyContinue
+    Write-Host "profile-guided: the release's profile fits this runtime and game code ($pgoProfile)"
+    return $true
+}
+
 # --- configure ------------------------------------------------------------------------------------------------------
 # -MaySkip: when the cmake arguments and the configure-time inputs are those of the last configure of $dir (signature in
 # $dir\gow-configure.sig), the configure is skipped: Ninja itself re-runs CMake when a CMakeLists.txt or a CONFIGURE_DEPENDS
@@ -6,6 +71,7 @@
 function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip) {
     Use-Toolchain
     Need (Join-Path $rec 'CMakeLists.txt') 'runtime (run the fetch stage)'
+    if ($dir -eq $bld -and $pgo -eq 'auto') { [void](Use-ReleaseProfile) }
     $ltcgValue = if ($Ltcg) { 'ON' } else { 'OFF' }
     $pdbValue = if ($Pdb) { 'ON' } else { 'OFF' }
     $extra = @()

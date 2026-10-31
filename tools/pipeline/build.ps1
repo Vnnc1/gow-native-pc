@@ -35,6 +35,8 @@
 # All components use pinned llvm-mingw. -Toolchain msvc is accepted only to migrate old scripts to clang.
 # -CompilerCache none disables the local object cache; -ForceRecomp regenerates EE code even on a content match.
 # -Stages verify runs pipeline and runtime/codegen regression tests without an ISO.
+# -NoReleaseProfile: package / installer without the profile-guided data (games/<id>/pgo/shipped.profdata); by default
+#        the package requires this checkout's profile, trained on the current runtime and patch set (see game.ps1).
 param(
     [string]$Game = 'gow1',
     [string[]]$Stages = @('fetch', 'discs', 'configure', 'recomp', 'sync', 'build'),
@@ -48,6 +50,7 @@ param(
     [ValidateSet('', 'msvc', 'clang')][string]$Toolchain = '', # msvc is a migration alias
     [ValidateSet('sccache', 'none')][string]$CompilerCache = 'sccache',
     [switch]$ForceRecomp,
+    [switch]$NoReleaseProfile,
     [int]$Seconds = 0
 )
 if ($PSVersionTable.PSVersion.Major -lt 6) { $env:PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules" }

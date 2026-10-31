@@ -57,7 +57,24 @@ não viu, porque o perfil cobre só o navio inicial e as fases seguintes ficaria
 
 Propostas, da maior para a menor:
 
-1. **Distribuir o perfil do PGO com cada release** (decisão do projeto). O código recompilado é o mesmo para todos (mesmo
+1. **Distribuir o perfil do PGO com cada release** — **implementado** (`Use-ReleaseProfile` em `tools/pipeline/modules/game.ps1`,
+   estágio `package`, regras no `AGENTS.md`). O pacote leva `games/<id>/pgo/shipped.profdata` (+7 MB no zip) com um
+   manifesto de identidade: `engine/runtime.toml`, conjunto de patches em ordem ordinal, arquivos de `games/<id>` e o
+   SHA-256 do `.text` do ELF recompilado (o `.text` da tradução PT-BR é idêntico byte a byte ao americano; só `.data` e
+   `.rodata` mudam). O `package` recusa um perfil sem manifesto correspondente (`-NoReleaseProfile` para empacotar sem).
+   **Medido** (instalação do zero a partir do pacote, ISO PT-BR, mesmas etapas do launcher): **24,6 min contra 30,1 min**.
+   O perfil foi reconhecido, a build saiu com `-fprofile-instr-use`, e o jogo chega ao gameplay.
+
+   | Etapa | Antes | Com o perfil da release |
+   |---|---|---|
+   | build instrumentada + treino de 4 min | 12,6 min | — |
+   | build com o perfil | 11,1 min | 8,1 min |
+   | gravação da VU1 (o jogo roda sozinho) | (junto do treino) | 4,1 min |
+   | código nativo da VU1/IOP + rebuild | — | 4,8 min |
+
+   Próximo ganho possível: gravar o microcódigo da VU1 a partir do disco (etapa `vu1disc`) antes da build, em vez de
+   rodar o jogo depois dela, eliminaria a gravação e o segundo rebuild (~9 min), se a varredura do disco cobrir o mesmo
+   microcódigo. Proposta original: O código recompilado é o mesmo para todos (mesmo
    ELF americano, mesma versão do recompilador e dos patches), então o perfil treinado por nós vale para todo mundo.
    A instalação faria **uma** build com o perfil e não a instrumentada nem o treino: ~30 → ~17–22 min aqui, e as CPUs de
    até 4 threads ganham o PGO sem a hora extra. O microcódigo da VU1 continua vindo da máquina do jogador (o jogo rodando
