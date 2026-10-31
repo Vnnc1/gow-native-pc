@@ -37,10 +37,23 @@ function Get-RuntimePatches {
     [Array]::Sort($paths, [StringComparer]::Ordinal)
     foreach ($path in $paths) { Get-Item -LiteralPath $path }
 }
+# Windows PowerShell 5.1 (and PowerShell 7 before 7.3, or in Legacy mode) wraps an argument that contains whitespace
+# in double quotes but passes its inner double quotes unescaped, so they end the quoting early: with the install in
+# "E:\God of War", -DCMAKE_CXX_FLAGS=... -fprofile-instr-use="E:/God of War/..." reached CMake cut at "E:/God" and every
+# compile failed. For such arguments, escape the inner quotes (and the backslashes before them, and trailing ones before
+# the closing quote PowerShell adds) the way the C runtime parses a command line. An argument that already starts
+# with a quote is passed unwrapped and left alone.
+function ConvertTo-NativeArgument([string]$s) {
+    $legacy = $PSVersionTable.PSVersion -lt [version]'7.3' -or $PSNativeCommandArgumentPassing -eq 'Legacy'
+    if (-not $legacy -or $s -notmatch '\s' -or $s.StartsWith('"')) { return $s }
+    $s = [regex]::Replace($s, '(\\*)"', { param($m) $m.Groups[1].Value * 2 + '\"' })
+    return [regex]::Replace($s, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+}
 # native tools print progress on stderr; under 'Stop' PowerShell 5.1 may turn that into an exception
 function Native($exe, [string[]]$a, $what) {
     $null = Get-Command $exe -ErrorAction Stop
     $ErrorActionPreference = 'Continue'
+    [string[]]$a = @($a | ForEach-Object { ConvertTo-NativeArgument $_ })
     # Native processes update the global automatic variable. A local assignment shadows that result on PS 5.1.
     $global:LASTEXITCODE = 0
     & $exe @a 2>&1 | ForEach-Object { $s = "$_"; if ($s -ne 'System.Management.Automation.RemoteException') { Write-Host $s } }

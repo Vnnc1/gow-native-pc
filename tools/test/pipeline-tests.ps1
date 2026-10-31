@@ -17,6 +17,21 @@ try { Native (Join-Path $root 'data/nonexistent-native-probe.exe') @() 'missing 
 catch { $missingFailed = $true }
 if (-not $missingFailed) { throw 'Native must reject a missing executable' }
 Write-Host 'PASS: native process failure, success after failure and missing executable'
+# The process must receive each argument whole: a quoted path with spaces inside a flag list (the PGO profile of an
+# install in "E:\God of War") once reached CMake cut at the first space.
+$argvFile = Join-Path ([IO.Path]::GetTempPath()) ('gow-argv-' + [guid]::NewGuid().ToString('N') + '.json')
+$sent = @('-DCMAKE_CXX_FLAGS=-O3 -fprofile-instr-use="E:/God of War/data/gow1/pgo/gow.profdata" -DX=1',
+          'C:\dir with space\', 'plain', '-I"C:/no-space"', 'a "b c" \"d\" e\\')
+Native $python (@('-I', '-c', "import json, sys; open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps(sys.argv[2:]))", $argvFile) + $sent) 'argument passing probe'
+# not piped: Windows PowerShell 5.1 emits a piped JSON array as one item
+$received = ConvertFrom-Json ([IO.File]::ReadAllText($argvFile))
+Remove-Item -LiteralPath $argvFile
+$expected = @($sent[0], $sent[1], $sent[2], '-IC:/no-space', $sent[4])
+if ($received.Count -ne $expected.Count) { throw "Native must pass each argument whole: got $($received.Count) arguments" }
+for ($i = 0; $i -lt $expected.Count; ++$i) {
+    if ($received[$i] -cne $expected[$i]) { throw "Native argument $i arrived as [$($received[$i])], expected [$($expected[$i])]" }
+}
+Write-Host 'PASS: native arguments with spaces, inner quotes and trailing backslashes arrive whole'
 $patchNames = @((Get-RuntimePatches).Name)
 if ([array]::IndexOf($patchNames, '29-recomp-dispatch-trim.patch') -ge [array]::IndexOf($patchNames, '29a-call-diagnostics-init.patch')) {
     throw 'Dependent runtime patches must follow their base patch on Windows PowerShell 5.1'
