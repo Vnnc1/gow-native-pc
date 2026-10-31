@@ -1,0 +1,44 @@
+Dependency clones: raylib, toml11, fmt and rabbitizer are fetched at their tag only (GIT_SHALLOW), like the
+runtime's other dependencies, and toml11 without its submodules (doctest and nlohmann/json for its own tests, a Hugo
+theme for its docs: 345 MB the build never reads). A full raylib clone is ~500 MB of history (52 s vs 9 s on a fast
+link); on a slow connection the first install's configure spent many minutes on the network, on one core.
+
+diff --git a/PS2Recomp/ps2xRecomp/CMakeLists.txt b/PS2Recomp/ps2xRecomp/CMakeLists.txt
+--- a/PS2Recomp/ps2xRecomp/CMakeLists.txt
++++ b/PS2Recomp/ps2xRecomp/CMakeLists.txt
+@@ -21,6 +21,8 @@
+     toml11
+     GIT_REPOSITORY https://github.com/ToruNiina/toml11.git
+     GIT_TAG v4.4.0
++    GIT_SHALLOW TRUE
++    GIT_SUBMODULES ""
+ )
+ FetchContent_MakeAvailable(toml11)
+ 
+@@ -28,6 +30,7 @@
+     fmt
+     GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+     GIT_TAG 12.1.0
++    GIT_SHALLOW TRUE
+ )
+ FetchContent_MakeAvailable(fmt)
+  
+@@ -53,6 +56,7 @@
+     rabbitizer
+     GIT_REPOSITORY https://github.com/Decompollaborate/rabbitizer.git
+     GIT_TAG 1.14.3
++    GIT_SHALLOW TRUE
+ )
+ FetchContent_MakeAvailable(rabbitizer)
+ 
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -79,6 +79,7 @@
+         raylib
+         GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
+         GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
++        GIT_SHALLOW TRUE
+         GIT_PROGRESS TRUE
+     )
+     FetchContent_MakeAvailable(raylib)

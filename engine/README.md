@@ -55,3 +55,4 @@
 | 39-game-menu-live-graphics | F1 game menu (graphics live, cheats, save), FXAA no longer disables the sharp scaler, borderless window, debugger on Ctrl+F1 | this project |
 | 40-gs-early-finish | FINISH raised when the frame's VIF1 packet is queued; CSR without worker wait, display writes in drawing order; +20% in VU1-bound combat | this project |
 | 41-register-functions-o1 | Generated register_functions.cpp built alone at -O1 without unity/PCH: 331 s -> 9.8 s | this project |
+| 42-shallow-dependency-clones | raylib, toml11, fmt, rabbitizer cloned at their tag only; toml11 without its test/docs submodules (345 MB) | this project |

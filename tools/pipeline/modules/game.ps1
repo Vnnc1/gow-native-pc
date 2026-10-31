@@ -63,6 +63,13 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
     # Initial dependency downloads still work with UPDATES_DISCONNECTED (unlike FULLY_DISCONNECTED).
     $dependencyUpdates = if ($Stages -contains 'fetch') { 'OFF' } else { 'ON' }
     $extra += "-DFETCHCONTENT_UPDATES_DISCONNECTED=$dependencyUpdates"
+    # Another build folder (the instrumented one) reads the dependencies the main folder already cloned: a fresh folder
+    # otherwise clones them again (raylib and toml11 are full clones, ~1 GB), on one core and the network
+    if ($dir -ne $bld) {
+        foreach ($src in @(Get-ChildItem (Join-Path $bld '_deps') -Directory -Filter '*-src' -ErrorAction SilentlyContinue)) {
+            $extra += "-DFETCHCONTENT_SOURCE_DIR_$($src.Name.Substring(0, $src.Name.Length - 4).ToUpper())=$(Barra $src.FullName)"
+        }
+    }
     $cmakeArgs = @('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
