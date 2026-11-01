@@ -1,0 +1,51 @@
+Movie audio: a new movie starts without the audio the movie before left pending. God of War reuses one sceMpeg for
+every movie. At the end of a movie its audio callback (0x18A8F8) refuses packets while its ring is full, and the demux
+stub keeps them to deliver first on the next demux call. The next movie's open (0x189BD0) resets the ring and the
+0x28-byte header count, then the stale packets went in: their first 40 bytes became the "header", the new movie's real
+SShd/SSbd header was stored as samples, and every 512-byte L/R block pair was shifted. PT-BR A01MP02 after the intro:
+7 packets, 26,768 + 40 bytes = 184 bytes into each pair, the left output taking the right channel for 92 of every 256
+samples: a 187.5 Hz buzz, heard as crackling/blown voices in the cutscenes (the USA disc's packing left a whole number
+of pairs by chance). The fix: when the game registers its stream callbacks and no input of the movie was demuxed yet,
+pending audio is dropped (libmpeg keeps no input between demux calls); a state that already served pictures is reset.
+GOW_MPEG_DIAG also logs the state at each registration ([MPEG:diag] AddStrCallback state ...).
+Checked with tools/test/movie-smoke.ps1 (A01MP02, warp ATHN01D) and tools/test/movie-audio-compare.py on the raw mix:
+PT-BR gain 0.7415 / residual 2245 / 16,813 samples left=source right -> gain 0.9997 / residual 1.18 / 0;
+USA unchanged (0.9998 / 1.17 / 0). A player session (PT-BR, a02mp02 and mewintro after other movies): 6 and 5 stale
+packets dropped, the movie track mixed at gain 1.00, the crackling gone. Remaining, separate: one 4,096-frame ring
+repeat per PT-BR movie (refill timing), and the level music some movies leave playing by design.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -2170,7 +2170,30 @@
+             std::fprintf(stderr, "[MPEG:diag] AddStrCallback type=%u ch=%u func=%08x data=%08x\n", streamType, streamId, callbackFunc, callbackData);
+         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+         g_mpeg_stub_state.initialized = true;
+-        (void)getPlaybackState(mpegAddr);
++        if (std::getenv("GOW_MPEG_DIAG"))
++        {
++            const MpegPlaybackState &state = getPlaybackState(mpegAddr);
++            std::fprintf(stderr, "[MPEG:diag] AddStrCallback state pictures=%u sawInput=%d ended=%d pss=%zu pendingAudio=%zu callbacks=%zu\n",
++                         state.picturesServed, state.sawInput ? 1 : 0, state.streamEnded ? 1 : 0, state.pssBuffer.size(),
++                         g_pendingAudio.count(mpegAddr) ? g_pendingAudio[mpegAddr].size() : size_t{0},
++                         g_mpeg_stub_state.callbacksByMpeg.count(mpegAddr) ? g_mpeg_stub_state.callbacksByMpeg[mpegAddr].size() : size_t{0});
++        }
++        // gow-native-pc (patch 54): God of War reuses one sceMpeg for every movie and registers its stream callbacks
++        // before the first demux of each one, after its movie open reset the audio ring and header count (0x189BD0).
++        // Audio packets its callback refused at the end of the movie before (ring full) still waited here and went
++        // first into the new ring: the new movie's 0x28-byte header was then stored as samples and every 512-byte
++        // L/R block pair was shifted (PT-BR A01MP02 after the intro: 7 packets, 26,768 + 40 bytes, 184 bytes into
++        // each pair: a 187.5 Hz buzz with the channels swapped). No input of this movie was demuxed yet, so anything
++        // pending belongs to the one before; libmpeg keeps no input between demux calls. A state that already served
++        // pictures is the movie before as well.
++        MpegPlaybackState &state = getPlaybackState(mpegAddr);
++        if (state.picturesServed != 0u)
++        {
++            state = makeFreshPlaybackState();
++            g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
++        }
++        if (!state.sawInput)
++            g_pendingAudio.erase(mpegAddr);
+         const uint32_t handle = g_mpeg_stub_state.nextCallbackHandle++;
+         g_mpeg_stub_state.callbacksByMpeg[mpegAddr].push_back(
+             MpegRegisteredCallback{streamType, streamId, callbackFunc, callbackData, handle, true});

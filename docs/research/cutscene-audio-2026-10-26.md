@@ -77,3 +77,20 @@ Source extraction is under `data/gow1/logs/movie-source/`, also ignored by Git.
 The upstream `engine/runtime/docs/waffle/fmv.md` Open section independently describes an earlier intermittent
 A01MP02 channel/interleave failure. The measurements above are new local evidence, not a claim that its suspected
 refused-packet cause has been proven.
+
+## Resolved: patch 54 (2026-11-01)
+
+The misalignment was traced with a dump of every audio packet the game's callback accepted (identical to the PSW
+track byte for byte), a dump of each 1 KB L/R pair as the SPU2 input stream read it, and the game's own ring state
+(movie struct +0x100/+0x104/+0x108/+0x138) per delivered packet. The movie open (0x189BD0) resets the ring and the
+0x28-byte header count; then 7 audio packets the callback had refused at the end of the intro (its ring full), still
+queued in the demux stub, went in first. Their first 40 bytes were taken as the header, the rest (26,768 bytes) as
+samples, and A01MP02's real SShd/SSbd header followed as samples: (26,768 + 40) mod 1024 = 184 bytes into every pair,
+92 samples, the source-sample phase 164 measured above. The game's IOP writes (0x188688) are whole 1 KB pairs, so the
+shift stayed for the whole movie. `engine/patches/54-movie-audio-stale-packets.patch` drops pending audio when the game
+registers a movie's stream callbacks before its first demux. A01MP02 PT-BR now matches its track (gain 0.9997,
+residual 1.18, no channel matches across), USA unchanged; confirmed by the player in natural play (a02mp02, mewintro).
+
+Still open, separate: one 4,096-frame repeat of the IOP stream ring per PT-BR movie (A01MP02 at about 15 s, also
+about 12,288 frames at the start), the game not refilling the 16 KB ring in time; and the level music some movies
+keep playing by design under the track (989snd group mask, upstream docs/waffle/fmv.md), which can clip on peaks.
