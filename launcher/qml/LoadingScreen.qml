@@ -29,6 +29,8 @@ Item {
         optimize: [{ id: "record", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
         // tune (install with first-play preparation): instrumented build, one recorded run, final build with the profile
         tune: [{ id: "pgoBuild", w: 10 }, { id: "pgoPlay", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "pgoRebuild", w: 9 }],
+        // tune when the release's profile fits (optimize.ps1 says "no training run"): build with it, then record as optimize
+        tuneConPerfil: [{ id: "pgoRebuild", w: 9 }, { id: "record", w: 4, fixed: true }, { id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
         native: [{ id: "native", w: 0.5 }, { id: "rebuild", w: 2 }],
         vu1disc: [{ id: "vu1disc", w: 3 }]
     })
@@ -164,8 +166,22 @@ Item {
         function onStepChanged(s) {
             if (raiz.estado !== "running") return
             raiz.addLog("— " + s)
+            raiz.estadoTexto = ""   // the previous step's @@status line ("linking the executable") is over
             var id = raiz.pasoDe(s)
             if (!id) return
+            // The tune plan assumes training. With the release's profile the pipeline builds once and then records:
+            // put that sequence in place of the tune steps still ahead, or the bar jumped to 99% and stayed on PGO.
+            if (id === "pgoRebuild" && s.indexOf("no training run") >= 0) {
+                var inicioTune = -1
+                for (var t = Math.max(0, raiz.actual + 1); t < raiz.plan.length; ++t)
+                    if (raiz.plan[t].id === "pgoBuild") { inicioTune = t; break }
+                if (inicioTune >= 0) {
+                    var conPerfil = raiz.etapas.tuneConPerfil.map(function (e) { return { id: e.id, w: e.w, fixed: !!e.fixed, real: -1 } })
+                    var nuevo = raiz.plan.slice()
+                    nuevo.splice.apply(nuevo, [inicioTune, raiz.etapas.tune.length].concat(conPerfil))
+                    raiz.plan = nuevo
+                }
+            }
             // the next step of the plan with this id (a step not in the plan, e.g. a stage's own configure, stays in the current one)
             for (var i = Math.max(0, raiz.actual + 1); i < raiz.plan.length; ++i)
                 if (raiz.plan[i].id === id) {
