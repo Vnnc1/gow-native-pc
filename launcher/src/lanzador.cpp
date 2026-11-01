@@ -434,6 +434,12 @@ bool Lanzador::iniciar(const QVariantMap &a)
     entorno.insert(QStringLiteral("GOW_GS_EARLY_FINISH"), a.value(QStringLiteral("finAnticipado"), true).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
     // Runtime patch 51: fast VU mode, the VU1 blocks built without operand normalisation and the MADD overflow check (about
     // 12% less VU1 time in combat, measured); off (the exact build) unless the player turns it on
+    // Runtime patch 52: texture pack in PCSX2's format (PNG images named by the texture's hashes), loaded while playing
+    const QString pacote = a.value(QStringLiteral("pacoteTexturas")).toString();
+    if (!pacote.isEmpty() && QFileInfo(pacote).isDir())
+        entorno.insert(QStringLiteral("GOW_TEXTURE_PACK"), QDir::toNativeSeparators(pacote));
+    else
+        entorno.remove(QStringLiteral("GOW_TEXTURE_PACK"));
     entorno.insert(QStringLiteral("GOW_VU1_FAST"), a.value(QStringLiteral("vuRapida"), false).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
     // gow-native-pc: VU1 code the build did not compile (areas the first-play recording never reached) is compiled while
     // playing by the in-process x86-64 JIT (engine/patches/18, GOW_VU1N_X64: no compiler or files needed, any toolchain).

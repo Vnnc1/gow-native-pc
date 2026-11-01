@@ -53,6 +53,28 @@ if ($Stages -contains 'fetch') {
     }
 }
 
+# --- xdelta: an ISO mod distributed as an xdelta / VCDIFF patch -------------------------------------------------------
+# -Xdelta <patch> -Discs <base ISO>: tools/disc/vcdiff.py applies it (every window's adler32 is checked, so a patch made
+# for another ISO fails at its first window) into data\mods\isos\<patch name>.iso, written as .partial and renamed only
+# when complete. The launcher then adds that ISO to its list; whether the pipeline can build it is the discs stage's call.
+if ($Stages -contains 'xdelta') {
+    Step 'apply the ISO patch (xdelta)'
+    $base = @($Discs -split '\|' | Where-Object { $_ })
+    if (-not $Xdelta -or -not (Test-Path -LiteralPath $Xdelta)) { throw 'no patch given (-Xdelta "<file>.xdelta")' }
+    if ($base.Count -ne 1 -or -not (Test-Path -LiteralPath $base[0])) { throw 'give the ISO the patch applies to (-Discs "<iso>")' }
+    $outDir = Join-Path $root 'data\mods\isos'
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+    $out = Join-Path $outDir ([IO.Path]::GetFileNameWithoutExtension($Xdelta) + '.iso')
+    $partial = "$out.partial"
+    try { Native $python @('-I', (Join-Path $root 'tools\disc\vcdiff.py'), 'apply', $Xdelta, $base[0], $partial) 'xdelta' }
+    catch {
+        Remove-Item -LiteralPath $partial -ErrorAction SilentlyContinue
+        throw
+    }
+    Move-Item -LiteralPath $partial -Destination $out -Force
+    Write-Host "patched ISO: $out"
+}
+
 # --- discs ----------------------------------------------------------------------------------------------------------
 if ($Stages -contains 'discs') {
     Step 'discs'

@@ -111,7 +111,7 @@ def apply(patch, source, out):
                                 tgt.append(sseg[p] if p < slen else tgt[p - slen])
             if len(tgt) != w['tlen']: raise ValueError(f'window {nwin}: {len(tgt)} != {w["tlen"]}')
             if w['cksum'] is not None and (zlib.adler32(bytes(tgt)) & 0xFFFFFFFF) != w['cksum']:
-                raise ValueError(f'window {nwin}: adler32 mismatch')
+                raise ValueError(f'window {nwin}: checksum mismatch' + (': the patch was made for a different ISO' if nwin == 1 else ''))
             o.write(tgt); written += len(tgt)
             if nwin % 200 == 0: print(f'{nwin} windows, {written / 2**20:.0f} MB', flush=True)
         print(f'done: {nwin} windows, {written} bytes')

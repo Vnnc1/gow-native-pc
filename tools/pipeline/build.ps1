@@ -35,6 +35,7 @@
 # All components use pinned llvm-mingw. -Toolchain msvc is accepted only to migrate old scripts to clang.
 # -CompilerCache none disables the local object cache; -ForceRecomp regenerates EE code even on a content match.
 # -Stages verify runs pipeline and runtime/codegen regression tests without an ISO.
+# -Xdelta <patch> with -Stages xdelta -Discs <base ISO>: applies an ISO mod (xdelta / VCDIFF) into data\mods\isos.
 # -NoReleaseProfile: package / installer without the profile-guided data (games/<id>/pgo/shipped.profdata); by default
 #        the package requires this checkout's profile, trained on the current runtime and patch set (see game.ps1).
 param(
@@ -51,6 +52,7 @@ param(
     [ValidateSet('sccache', 'none')][string]$CompilerCache = 'sccache',
     [switch]$ForceRecomp,
     [switch]$NoReleaseProfile,
+    [string]$Xdelta = '',
     [int]$Seconds = 0
 )
 if ($PSVersionTable.PSVersion.Major -lt 6) { $env:PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules" }
@@ -59,7 +61,7 @@ trap { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red; exit 1 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Stages = @(($Stages -join ',') -split ',' | Where-Object { $_ })
 . (Join-Path $PSScriptRoot 'modules/common.ps1')
-$allowedStages = @('tools','fetch','discs','vu1disc','configure','recomp','sync','build','pgo','tune','optimize','native','verify','launcher','package','installer')
+$allowedStages = @('tools','fetch','xdelta','discs','vu1disc','configure','recomp','sync','build','pgo','tune','optimize','native','verify','launcher','package','installer')
 foreach ($stage in $Stages) { if ($stage -notin $allowedStages) { throw "Unknown stage '$stage'" } }
 # One writer per checkout: caches and generated outputs must never be updated concurrently.
 New-Item -ItemType Directory -Force (Join-Path $root 'data') | Out-Null

@@ -1,0 +1,486 @@
+GS: texture packs in PCSX2's format (GOW_TEXTURE_PACK=<folder>, GOW_TEXTURE_PACK_MB, the launcher's texture pack option). Each uploaded texture a draw samples gets the name PCSX2 gives its replacement (XXH3-64 of its GS memory blocks or unswizzled rows, XXH3-64 of the 32-bit palette, PSM/TW/TH/TEXA bits; xxHash v0.8.3 header through FetchContent); a PNG of that name in the pack replaces it, sampled as a direct-colour texture at its own resolution with mipmaps. PNGs are decoded on a worker thread (the game's texture is drawn until one is ready), uploaded by the render thread, and kept within a GPU memory budget (least recently used out first). GOW_TEX_PCSX2_NAMES=<file> lists the names of the textures drawn (to make or check packs). Combat on the ship with a PCSX2 pack: 81 images applied, 73 MB, no visible hitch; FPS within run-to-run noise.
+
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -560,6 +560,18 @@
+     ${CMAKE_CURRENT_SOURCE_DIR}/include
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
+ )
++# gow-native-pc (patch 52): xxHash (BSD-2, header only) for PCSX2-compatible texture-pack names (gs_hw_backend.cpp). Only
++# the header is used: SOURCE_SUBDIR points at no CMake project, so nothing of it is built.
++include(FetchContent)
++FetchContent_Declare(
++    xxhash
++    GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
++    GIT_TAG v0.8.3
++    GIT_SHALLOW TRUE
++    SOURCE_SUBDIR gow-header-only
++)
++FetchContent_MakeAvailable(xxhash)
++target_include_directories(ps2_runtime PRIVATE ${xxhash_SOURCE_DIR})
+ # GOW-Port (Linux): ee_ref/common/BitUtils.h incluye "common/Pcsx2Defs.h" relativo a ee_ref/; MSVC lo encuentra por
+ # la carpeta del archivo que lo incluye, GCC/Clang no. Solo para los fuentes de ee_ref (su R5900.h y Common.h
+ # no deben tapar los de vu_pcsx2).
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h
+@@ -134,6 +134,7 @@
+         void (*TexParameteri)(GLenum, GLenum, GLint) = nullptr;
+         void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = nullptr;
+         void (*TexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *) = nullptr;
++        void (*GenerateMipmap)(GLenum) = nullptr; // gow-native-pc (patch 52): texture-pack images
+         void (*GenFramebuffers)(GLsizei, GLuint *) = nullptr;
+         void (*DeleteFramebuffers)(GLsizei, const GLuint *) = nullptr;
+         void (*BindFramebuffer)(GLenum, GLuint) = nullptr;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+@@ -163,6 +163,7 @@
+         load(a.TexParameteri, "glTexParameteri", missing);
+         load(a.TexImage2D, "glTexImage2D", missing);
+         load(a.TexSubImage2D, "glTexSubImage2D", missing);
++        load(a.GenerateMipmap, "glGenerateMipmap", missing);
+ 
+         std::string graphicsMissing;
+         load(a.GenFramebuffers, "glGenFramebuffers", graphicsMissing);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -5,11 +5,29 @@
+ #include "runtime/gs/gs_swizzle.h"
+ #include "gs_gl.h"
+ #include "../gs_gpu_helpers.h"
++// gow-native-pc (patch 52): texture packs (PCSX2 names: XXH3-64, dependency xxhash; PNGs decoded by raylib's loader, declared
++// here instead of including raylib.h, which clashes with the Win32 headers: LoadImage is also a Win32 macro)
++#define XXH_INLINE_ALL
++#include "xxhash.h"
++#undef LoadImage
++extern "C"
++{
++    struct RlImage { void *data; int width, height, mipmaps, format; };
++    RlImage LoadImage(const char *fileName);
++    void UnloadImage(RlImage image);
++    void ImageFormat(RlImage *image, int newFormat);
++}
+ #include "runtime/gs/gs_shared_present.h"
+ 
+ #include <map>
+ #include <algorithm>
++#include <cctype>
+ #include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <filesystem>
++#include <mutex>
++#include <thread>
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -508,6 +526,8 @@
+         uint32_t blockLo = 0, blockHi = 0;
+         bool valid = false;
+         uint64_t lastUse = 0;
++        uint64_t pcsx2Hash = 0;   // gow-native-pc (patch 52): the texture's PCSX2 hash (texture packs), while pcsx2Hashed
++        bool pcsx2Hashed = false;
+     };
+ 
+     struct RenderTarget
+@@ -904,6 +924,334 @@
+         return psm == GS_PSM_T8 || psm == GS_PSM_T8H || psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
+     }
+ 
++    // ---- texture packs (gow-native-pc, patch 52) -------------------------------------------------------------------
++    // A texture's name as PCSX2 names its dumps and replacements (GSTextureCache::HashCacheKey + GSTextureReplacements),
++    // so existing PCSX2 packs work unchanged: "<texture hash>-<palette hash>-<bits>" (paletted formats) or
++    // "<texture hash>-<bits>". texture hash = XXH3-64 of the texture's memory: whole GS blocks in block-row order where the
++    // texture covers at least one block in each axis and its format uses whole words (CT32, CT16, T8, T4), otherwise its
++    // rows unswizzled (tw indices of 1 byte for paletted formats, tw RGBA words expanded with TEXA for colour formats).
++    // palette hash = XXH3-64 of the 16 / 256 32-bit palette entries in index order. bits = PSM | TW << 6 | TH << 10, plus
++    // TEXA (TA0 << 15, AEM << 23, TA1 << 24) for 24/16-bit colour. Base level only (PCSX2 adds the mip levels to the hash
++    // only while it draws with hardware mipmapping); no regions.
++    // The texture hash is kept in `tex` until the texture is decoded again; the palette hash per CLUT state.
++    std::unordered_map<uint64_t, uint64_t> pcsx2PaletteHashes; // (CLUT content hash, CSA, CPSM, PSM, TEXA) -> XXH3
++    bool pcsx2TextureHash(const GSDrawState &s, Texture &tex)
++    {
++        if (tex.pcsx2Hashed)
++            return true;
++        const GSTex0Reg &t = s.context.tex0;
++        uint32_t bx = 8, by = 8;
++        bool wholeWords = false;
++        switch (t.psm)
++        {
++        case GS_PSM_CT32: wholeWords = true; break;
++        case GS_PSM_CT16: case GS_PSM_CT16S: bx = 16; wholeWords = true; break;
++        case GS_PSM_T8: bx = 16; by = 16; wholeWords = true; break;
++        case GS_PSM_T4: bx = 32; by = 16; wholeWords = true; break;
++        case GS_PSM_CT24: case GS_PSM_T8H: case GS_PSM_T4HL: case GS_PSM_T4HH: break;
++        default: return false; // depth formats and the rest: never replaced
++        }
++        const uint32_t tw = 1u << std::min<uint32_t>(t.tw, 10u), th = 1u << std::min<uint32_t>(t.th, 10u);
++        XXH3_state_t state;
++        XXH3_64bits_reset(&state);
++        if (wholeWords && tw >= bx && th >= by)
++        {
++            const GSSwizzle::Format &f = GSSwizzle::GetFormat(t.psm);
++            for (uint32_t y = 0; y < th; y += by)
++                for (uint32_t x = 0; x < tw; x += bx)
++                {
++                    const uint32_t block = GSSwizzle::Locate(f, t.tbp0, t.tbw, x, y).byte >> 8u;
++                    XXH3_64bits_update(&state, vram + static_cast<size_t>(block & 0x3FFFu) * 256u, 256u);
++                }
++        }
++        else if (isIndexed(t.psm))
++        {
++            std::vector<uint8_t> row(tw);
++            for (uint32_t y = 0; y < th; ++y)
++            {
++                GSMem::ReadIndexRun(vram, t.psm, t.tbp0, t.tbw, 0u, y, tw, row.data());
++                XXH3_64bits_update(&state, row.data(), tw);
++            }
++        }
++        else
++        {
++            const GSSwizzle::Format &f = GSSwizzle::GetFormat(t.psm);
++            const bool sixteen = t.psm == GS_PSM_CT16 || t.psm == GS_PSM_CT16S;
++            std::vector<uint32_t> row(tw);
++            for (uint32_t y = 0; y < th; ++y)
++            {
++                const GSSwizzle::AxisPart part = GSSwizzle::RowPart(f, t.tbp0, t.tbw, y);
++                for (uint32_t x = 0; x < tw; ++x)
++                {
++                    const GSSwizzle::Location at = GSSwizzle::Combine(f, part, GSSwizzle::ColumnPart(f, x));
++                    const uint32_t raw = GSSwizzle::LoadAt(f, vram + at.byte, at.shift);
++                    row[x] = GSCpuInternal::applyTexa(s.texa, t.psm, sixteen ? GSCpuInternal::Rgba5551ToRgba8888(static_cast<uint16_t>(raw)) : raw);
++                }
++                XXH3_64bits_update(&state, row.data(), tw * 4u);
++            }
++        }
++        tex.pcsx2Hash = XXH3_64bits_digest(&state);
++        tex.pcsx2Hashed = true;
++        return true;
++    }
++    uint64_t pcsx2PaletteHash(const GSDrawState &s)
++    {
++        const GSTex0Reg &t = s.context.tex0;
++        uint64_t key = clutHash;
++        for (const uint64_t v : {static_cast<uint64_t>(t.csa), static_cast<uint64_t>(t.cpsm), static_cast<uint64_t>(t.psm),
++                                 static_cast<uint64_t>(s.texa.ta0), static_cast<uint64_t>(s.texa.ta1), static_cast<uint64_t>(s.texa.aem)})
++            key = (key ^ v) * 1099511628211ull;
++        const auto it = pcsx2PaletteHashes.find(key);
++        if (it != pcsx2PaletteHashes.end())
++            return it->second;
++        uint32_t pal[256];
++        store.BuildPalette(s, pal); // index order, 32-bit (16-bit CLUTs expanded with TEXA, as PCSX2's GSClut)
++        const uint64_t hash = XXH3_64bits(pal, (t.psm == GS_PSM_T8 || t.psm == GS_PSM_T8H ? 256u : 16u) * 4u);
++        if (pcsx2PaletteHashes.size() > 4096u)
++            pcsx2PaletteHashes.clear();
++        pcsx2PaletteHashes.emplace(key, hash);
++        return hash;
++    }
++    // the bits field of the name (the TCC bit 0x4000 of older PCSX2 dumps is ignored, as PCSX2 does when it loads them)
++    static uint32_t pcsx2Bits(const GSDrawState &s)
++    {
++        const GSTex0Reg &t = s.context.tex0;
++        uint32_t bits = (t.psm & 0x3Fu) | ((t.tw & 0xFu) << 6u) | ((t.th & 0xFu) << 10u);
++        if (t.psm == GS_PSM_CT24 || t.psm == GS_PSM_CT16 || t.psm == GS_PSM_CT16S)
++            bits |= (static_cast<uint32_t>(s.texa.ta0) << 15u) | (static_cast<uint32_t>(s.texa.aem ? 1u : 0u) << 23u) |
++                    (static_cast<uint32_t>(s.texa.ta1) << 24u);
++        return bits;
++    }
++    struct PackKey
++    {
++        uint64_t tex = 0, pal = 0;
++        uint32_t bits = 0;
++        bool operator==(const PackKey &) const = default;
++    };
++    struct PackKeyHash
++    {
++        size_t operator()(const PackKey &k) const { return static_cast<size_t>((k.tex * 1099511628211ull ^ k.pal) * 1099511628211ull ^ k.bits); }
++    };
++    static bool parsePackName(const std::string &stem, PackKey &key)
++    {
++        unsigned long long a = 0, b = 0;
++        unsigned bits = 0;
++        int n = 0;
++        if (std::sscanf(stem.c_str(), "%llx-%llx-%x%n", &a, &b, &bits, &n) == 3 && stem[static_cast<size_t>(n)] == '\0')
++            key = {a, b, bits & ~0x4000u};
++        else if (std::sscanf(stem.c_str(), "%llx-%x%n", &a, &bits, &n) == 2 && stem[static_cast<size_t>(n)] == '\0')
++            key = {a, 0u, bits & ~0x4000u};
++        else
++            return false;
++        return true;
++    }
++    bool pcsx2Key(const GSDrawState &s, Texture &tex, PackKey &key)
++    {
++        if (!pcsx2TextureHash(s, tex))
++            return false;
++        key = {tex.pcsx2Hash, isIndexed(s.context.tex0.psm) ? pcsx2PaletteHash(s) : 0u, pcsx2Bits(s) & ~0x4000u};
++        return true;
++    }
++    // GOW_TEX_PCSX2_NAMES=<file>: every uploaded texture a draw samples, by its PCSX2 name, each once (to make or check packs)
++    std::FILE *pcsx2Names = [] { const char *p = std::getenv("GOW_TEX_PCSX2_NAMES"); return p ? std::fopen(p, "w") : nullptr; }();
++    std::unordered_map<PackKey, bool, PackKeyHash> pcsx2Seen;
++    void notePcsx2Name(const GSDrawState &s, Texture &tex)
++    {
++        PackKey key;
++        if (!pcsx2Key(s, tex, key) || !pcsx2Seen.emplace(key, true).second)
++            return;
++        const GSTex0Reg &t = s.context.tex0;
++        if (isIndexed(t.psm))
++            std::fprintf(pcsx2Names, "%llx-%llx-%08x", static_cast<unsigned long long>(key.tex), static_cast<unsigned long long>(key.pal), key.bits);
++        else
++            std::fprintf(pcsx2Names, "%llx-%08x", static_cast<unsigned long long>(key.tex), key.bits);
++        std::fprintf(pcsx2Names, " %ux%u tbp=%x tbw=%u psm=%x cpsm=%x csa=%u%s\n", s.textureWidth, s.textureHeight, t.tbp0, t.tbw, t.psm,
++                     t.cpsm, t.csa, texPack.enabled() && texPack.has(key) ? " in-pack" : "");
++        std::fflush(pcsx2Names);
++    }
++
++    // The pack: GOW_TEXTURE_PACK=<folder> (PNG files named as above, in any subfolder; their pixels are the texture's
++    // colours in GS units, alpha 128 = opaque, as PCSX2 writes and reads them), GOW_TEXTURE_PACK_MB = GPU memory for its
++    // images (default 1024). Images are decoded on a worker thread: until one is ready the draw uses the game's texture.
++    // Uploaded here (the render thread owns the GL context) with mipmaps, kept while used, least recently used out first.
++    class TexturePack
++    {
++    public:
++        struct Entry
++        {
++            std::string path;
++            GLuint id = 0;
++            uint32_t width = 0, height = 0;
++            uint64_t bytes = 0, lastUse = 0;
++            enum class State : uint8_t { Idle, Queued, Ready, Failed } state = State::Idle;
++        };
++        ~TexturePack()
++        {
++            {
++                std::lock_guard<std::mutex> lock(m_mutex);
++                m_stop = true;
++            }
++            m_wake.notify_all();
++            if (m_worker.joinable())
++                m_worker.join();
++        }
++        void open()
++        {
++            const char *dir = std::getenv("GOW_TEXTURE_PACK");
++            if (!dir || !*dir)
++                return;
++            if (const char *mb = std::getenv("GOW_TEXTURE_PACK_MB"))
++                m_budget = std::max<uint64_t>(64u, std::strtoull(mb, nullptr, 10)) << 20u;
++            std::error_code error;
++            for (auto it = std::filesystem::recursive_directory_iterator(std::filesystem::path(dir), error);
++                 !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error))
++            {
++                if (!it->is_regular_file(error))
++                    continue;
++                std::string ext = it->path().extension().string();
++                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
++                PackKey key;
++                if (ext == ".png" && parsePackName(it->path().stem().string(), key))
++                    m_entries[key].path = it->path().string();
++            }
++            std::fprintf(stderr, "[gs-texpack] %zu images in %s, %llu MB for them\n", m_entries.size(), dir,
++                         static_cast<unsigned long long>(m_budget >> 20u));
++            if (!m_entries.empty())
++                m_worker = std::thread([this] { work(); });
++        }
++        bool enabled() const { return !m_entries.empty(); }
++        bool has(const PackKey &key) const { return m_entries.count(key) != 0u; }
++        // the image's texture when it is ready (0 meanwhile, or when the pack has none)
++        GLuint lookup(const Api &g, const PackKey &key, uint64_t now)
++        {
++            const auto it = m_entries.find(key);
++            if (it == m_entries.end())
++                return 0u;
++            Entry &e = it->second;
++            e.lastUse = now;
++            if (e.state == Entry::State::Ready)
++            {
++                ++m_hits;
++                return e.id;
++            }
++            if (e.state == Entry::State::Idle)
++            {
++                e.state = Entry::State::Queued;
++                std::lock_guard<std::mutex> lock(m_mutex);
++                m_queue.push_back(&e);
++                m_wake.notify_one();
++            }
++            return 0u;
++        }
++        // once per frame on the render thread: upload what the worker decoded, then keep the images within the budget
++        void service(const Api &g, uint64_t now)
++        {
++            std::vector<Decoded> done;
++            {
++                std::lock_guard<std::mutex> lock(m_mutex);
++                done.swap(m_done);
++            }
++            for (Decoded &d : done)
++            {
++                Entry &e = *d.entry;
++                if (d.pixels.empty())
++                {
++                    e.state = Entry::State::Failed;
++                    std::fprintf(stderr, "[gs-texpack] cannot read %s\n", e.path.c_str());
++                    continue;
++                }
++                g.GenTextures(1, &e.id);
++                g.ActiveTexture(kTexture0);
++                g.BindTexture(kTexture2D, e.id);
++                g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), static_cast<GLsizei>(d.width), static_cast<GLsizei>(d.height), 0, kRgba,
++                             kUnsignedByte, d.pixels.data());
++                g.GenerateMipmap(kTexture2D);
++                e.width = d.width;
++                e.height = d.height;
++                e.bytes = static_cast<uint64_t>(d.width) * d.height * 4u * 4u / 3u;
++                e.state = Entry::State::Ready;
++                m_resident += e.bytes;
++                ++m_loads;
++            }
++            while (m_resident > m_budget)
++            {
++                Entry *oldest = nullptr;
++                for (auto &kv : m_entries)
++                    if (kv.second.state == Entry::State::Ready && kv.second.lastUse < now && (!oldest || kv.second.lastUse < oldest->lastUse))
++                        oldest = &kv.second;
++                if (!oldest)
++                    break;
++                g.DeleteTextures(1, &oldest->id);
++                oldest->id = 0;
++                oldest->state = Entry::State::Idle;
++                m_resident -= oldest->bytes;
++                ++m_evictions;
++            }
++            static const bool stats = std::getenv("GOW_TEXTURE_PACK_STATS") != nullptr;
++            if (stats && ++m_frames % 300u == 0u)
++                std::fprintf(stderr, "[gs-texpack] hits=%llu loads=%llu evictions=%llu resident=%llu MB\n",
++                             static_cast<unsigned long long>(m_hits), static_cast<unsigned long long>(m_loads),
++                             static_cast<unsigned long long>(m_evictions), static_cast<unsigned long long>(m_resident >> 20u));
++        }
++
++    private:
++        struct Decoded
++        {
++            Entry *entry = nullptr;
++            uint32_t width = 0, height = 0;
++            std::vector<uint8_t> pixels;
++        };
++        void work()
++        {
++            for (;;)
++            {
++                Entry *e = nullptr;
++                {
++                    std::unique_lock<std::mutex> lock(m_mutex);
++                    m_wake.wait(lock, [this] { return m_stop || !m_queue.empty(); });
++                    if (m_stop)
++                        return;
++                    e = m_queue.front();
++                    m_queue.pop_front();
++                }
++                Decoded d;
++                d.entry = e;
++                RlImage img = LoadImage(e->path.c_str());
++                if (img.data)
++                {
++                    ImageFormat(&img, 7 /* PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 */);
++                    d.width = static_cast<uint32_t>(img.width);
++                    d.height = static_cast<uint32_t>(img.height);
++                    const uint8_t *p = static_cast<const uint8_t *>(img.data);
++                    d.pixels.assign(p, p + static_cast<size_t>(d.width) * d.height * 4u);
++                    UnloadImage(img);
++                }
++                std::lock_guard<std::mutex> lock(m_mutex);
++                m_done.push_back(std::move(d));
++            }
++        }
++        std::unordered_map<PackKey, Entry, PackKeyHash> m_entries; // filled before the worker starts, then fixed
++        uint64_t m_budget = 1024ull << 20u, m_resident = 0;
++        uint64_t m_hits = 0, m_loads = 0, m_evictions = 0, m_frames = 0;
++        std::mutex m_mutex;
++        std::condition_variable m_wake;
++        std::deque<Entry *> m_queue;
++        std::vector<Decoded> m_done;
++        bool m_stop = false;
++        std::thread m_worker;
++    };
++    TexturePack texPack;
++    bool texPackOpened = false;
++    // this draw's texture-pack image (0 when the pack has none or it is still loading); the name is computed once per
++    // texture decode and palette
++    GLuint replacementFor(const GSDrawState &s, Texture &tex)
++    {
++        PackKey key;
++        if (!pcsx2Key(s, tex, key))
++            return 0u;
++        return texPack.lookup(gl(), key, useCounter);
++    }
++
+     Texture &textureFor(const GSDrawState &s)
+     {
+         const GSTex0Reg &t = s.context.tex0;
+@@ -923,6 +1271,7 @@
+             return tex;
+         }
+         ++stats.texDecodes;
++        tex.pcsx2Hashed = false;
+         classifyTexture(s);
+         const Api &g = gl();
+         std::vector<uint32_t> pixels;
+@@ -1026,6 +1375,7 @@
+             return tex;
+         }
+         ++stats.texDecodes;
++        tex.pcsx2Hashed = false;
+         classifyTexture(s);
+         tex.width = std::max<uint32_t>(1u, s.textureWidth);
+         tex.height = std::max<uint32_t>(1u, s.textureHeight);
+@@ -2251,8 +2601,17 @@
+                 rsrc = findReinterpretSource(c.tex0.tbp0, c.tex0.psm);
+             if (rsrc == &rt)
+                 g.TextureBarrier();
+-            const bool indexed = !(src || rsrc || zsrc) && isIndexed(c.tex0.psm) && vram != nullptr;
+-            Texture &tex = (src || rsrc || zsrc) ? dummy : indexed ? indexTextureFor(s) : textureFor(s);
++            const bool uploaded = !(src || rsrc || zsrc) && vram != nullptr;
++            const bool indexedSource = uploaded && isIndexed(c.tex0.psm);
++            Texture &tex = (src || rsrc || zsrc) ? dummy : indexedSource ? indexTextureFor(s) : textureFor(s);
++            // gow-native-pc (patch 52): a texture-pack image replaces the game's texture, sampled as a direct-colour texture
++            // at its own resolution (the shader's scaled-texture path, as for render targets drawn at a larger scale)
++            if (!texPackOpened)
++                texPackOpened = true, texPack.open();
++            if (pcsx2Names && uploaded)
++                notePcsx2Name(s, tex);
++            const GLuint replacement = texPack.enabled() && uploaded ? replacementFor(s, tex) : 0u;
++            const bool indexed = indexedSource && replacement == 0u;
+             g.Uniform1i(locIndexed, indexed ? 1 : 0);
+             g.Uniform1i(locLinear, s.linearFilter ? 1 : 0);
+             if (indexed)
+@@ -2263,7 +2622,7 @@
+                 g.Uniform4i(locWrap, (c.clamp & 3u) == 0u ? 0 : 1, ((c.clamp >> 2) & 3u) == 0u ? 0 : 1, 0, 0);
+             }
+             g.ActiveTexture(kTexture0);
+-            g.BindTexture(kTexture2D, zsrc ? zsrc->depth : src ? src->color : rsrc ? rsrc->color : tex.id);
++            g.BindTexture(kTexture2D, zsrc ? zsrc->depth : src ? src->color : rsrc ? rsrc->color : replacement ? replacement : tex.id);
+             g.Uniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
+             g.Uniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
+             g.Uniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
+@@ -2281,7 +2640,7 @@
+             g.Uniform1f(locTa1, static_cast<float>(s.texa.ta1));
+             g.Uniform1i(locAem, s.texa.aem ? 1 : 0);
+             const GLint filter = s.linearFilter ? kLinear : kNearest;
+-            g.TexParameteri(kTexture2D, kTextureMinFilter, filter);
++            g.TexParameteri(kTexture2D, kTextureMinFilter, replacement && s.linearFilter ? 0x2703 /* LINEAR_MIPMAP_LINEAR */ : filter);
+             g.TexParameteri(kTexture2D, kTextureMagFilter, filter);
+             const uint64_t clamp = c.clamp;
+             const GLint wu = (clamp & 3u) == 0u ? kRepeat : kClampToEdge, wv = ((clamp >> 2) & 3u) == 0u ? kRepeat : kClampToEdge;
+@@ -2706,6 +3065,8 @@
+     d.dumpAfterSkip = false;
+     d.frameBatch = 0;
+     d.reportStats();
++    if (d.texPack.enabled())
++        d.texPack.service(d.gl(), d.useCounter); // gow-native-pc (patch 52): upload decoded texture-pack images
+     const bool enable1 = (request.pmode & 1ull) != 0ull, enable2 = (request.pmode & 2ull) != 0ull;
+     const auto decode = [&](bool enabled, uint64_t dispfb, uint64_t display, uint32_t &fbp, uint32_t &fbw, uint32_t &dbx, uint32_t &dby,
+                             uint32_t &w, uint32_t &h)

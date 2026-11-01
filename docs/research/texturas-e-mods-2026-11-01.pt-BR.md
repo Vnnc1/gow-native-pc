@@ -68,3 +68,33 @@ As 15 restantes: texturas que o pack não cobre ou caminhos do PCSX2 ainda não 
   distribuído assim.
 
 Regra que continua valendo: não distribuir packs, ISOs nem patches de terceiros; o jogador traz os seus.
+
+## 3. O que virou recurso (mesmo dia)
+
+- **Patch 52 (`52-gs-texture-packs`)**:
+  - nomes PCSX2 pelos dois caminhos, o direto (blocos) e o desembaralhado (texturas menores que um bloco, T8H, T4HL,
+    T4HH e CT24);
+  - PNGs lidos numa thread própria: até cada imagem ficar pronta, o jogo desenha a textura original;
+  - memória de GPU limitada (`GOW_TEXTURE_PACK_MB`, padrão 1024), descartando primeiro o que foi usado há mais tempo,
+    e mipmaps gerados na GPU;
+  - xxHash v0.8.3 via FetchContent.
+  - **Medido** no combate do navio: **81** imagens aplicadas (69 no protótipo), 73 MB, nenhum descarte, FPS dentro
+    do ruído. `verify` passa com a cadeia 01–52.
+- **Launcher → Gráficos → "Pacote de texturas (formato PCSX2)"**: escolher a pasta e ligar/desligar; passa
+  `GOW_TEXTURE_PACK` ao jogo, sem recompilar. O liga/desliga entra nos relatórios de sessão (a pasta não, por ser
+  pessoal).
+- **Etapa `xdelta`** (`build.cmd -Stages xdelta -Xdelta <patch> -Discs <ISO base>`) e **Launcher → Instalação → Mais
+  opções → "Aplicar patch de ISO (.xdelta)"**:
+  - aplica o patch em `data/mods/isos/<nome>.iso`, publicada só quando completa;
+  - com a ISO base errada, falha na primeira janela ("the patch was made for a different ISO"), sem deixar arquivo;
+  - a ISO gerada entra na lista de ISOs, e a etapa `discs` decide se dá para compilar.
+
+## 4. Definitive Edition: o que falta (próximo trabalho)
+
+- **Identificação**: um tipo de edição "mod", aceito quando o código original (nos endereços originais) é idêntico salvo
+  poucos ganchos.
+- **Funções novas**: o recompilador usa `config/funcmap.csv`, que só tem o código americano. O código do mod
+  (`0xd0000`–`0xd1f0c`) precisa ter as funções descobertas (prólogos, alvos de `jal`) e acrescentadas para a recompilação.
+- **`host0:`**: o runtime já tem o dispositivo `host0` (`g_ps2_cwd_device`, `ps2_path.cpp`). Falta conferir para onde
+  ele aponta e onde o mod espera os `.wad` (`host0:/mod/`).
+- Cada tentativa é uma recompilação completa (~25 min).

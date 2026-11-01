@@ -263,7 +263,7 @@ QString SessionDiagnostics::create(const QString &base, const QVariantMap &setti
     // Explicit settings allowlist excludes ISO/save paths, key bindings and other personal fields.
     for (const QString &key : {"diagnostics", "framePc", "gpu", "modoPantalla", "ancho", "alto", "escala",
                                "aspecto", "fxaa", "vsync", "fpsLimite", "filtro", "anisotropico",
-                               "jitInline", "finAnticipado", "vuRapida", "idioma", "saltarVideos", "arranqueRapido",
+                               "jitInline", "finAnticipado", "vuRapida", "usarPacoteTexturas", "idioma", "saltarVideos", "arranqueRapido",
                                "qteHold", "qteHoldButtons", "qteHoldRate"})
         if (settings.contains(key)) selected[key] = QJsonValue::fromVariant(settings.value(key));
     if (!saveJson(dir + "/session.json", {{"schema", 1}, {"id", id}, {"created_utc", utc()}, {"state", "prepared"}, {"settings", selected}})) return {};

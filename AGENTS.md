@@ -218,6 +218,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
   without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
   holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
+- Texture packs (runtime patch 52): PCSX2's replacement names, so PCSX2 packs work unchanged; the name code mirrors
+  `GSTextureCache::HashCacheKey` (blocks or unswizzled rows, 32-bit palette, PSM/TW/TH/TEXA bits). Never commit or ship
+  packs, dumps or screenshots of them. `GOW_TEX_PCSX2_NAMES=<file>` lists the names a session draws.
+- Stage `xdelta` (`-Xdelta <patch> -Discs <base ISO>`, tools/disc/vcdiff.py): writes `data/mods/isos/<name>.iso` only when
+  every window's checksum matched; a wrong base fails at the first window. Never ship third-party patches or ISOs.
 - CPUs without SSE4.2/POPCNT (x86-64-v2) cannot run the build: the Install page blocks the install
   (`installer.cpuSupported()`) instead of compiling a game that would not start.
 - Update markers: `data/needs-rebuild.txt` is removed by a successful final build only in a run that also fetched the

@@ -271,6 +271,9 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
     const QStringList isos = options.value(QStringLiteral("isos")).toStringList();
     if (!isos.isEmpty())
         args << QStringLiteral("-Discs") << isos.join(QLatin1Char('|'));
+    const QString xdelta = options.value(QStringLiteral("xdelta")).toString(); // stage xdelta: the ISO patch to apply
+    if (!xdelta.isEmpty())
+        args << QStringLiteral("-Xdelta") << xdelta;
     const QString config = options.value(QStringLiteral("config"), QStringLiteral("Release")).toString();
     args << QStringLiteral("-Config") << config;
     args << QStringLiteral("-Toolchain") << QStringLiteral("clang");

@@ -68,6 +68,8 @@ ApplicationWindow {
         property bool compilarAreas: true // in-process x64 JIT; existing saved choices are preserved
         property bool autoNative: false // optional AOT build after a successful play session
         property bool finAnticipado: true // GOW_GS_EARLY_FINISH (runtime patch 40): the EE prepares the next frame while VU1 draws
+        property string pacoteTexturas: "" // texture pack folder (PCSX2 format, GOW_TEXTURE_PACK, runtime patch 52)
+        property bool usarPacoteTexturas: false
         property bool vuRapida: false // GOW_VU1_FAST (runtime patch 51): VU1 blocks without operand normalisation / MADD overflow check
         property bool jitInline: true
         property bool diagnostics: false
@@ -240,6 +242,7 @@ ApplicationWindow {
             jitInline: true,
             finAnticipado: ajustes.finAnticipado,
             vuRapida: ajustes.vuRapida,
+            pacoteTexturas: ajustes.usarPacoteTexturas ? ajustes.pacoteTexturas : "",
             diagnostics: ajustes.diagnostics,
             framePc: installer.diagnosticsFramePc(),
             // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)

@@ -15,6 +15,7 @@ ScrollView {
     property var env: installer.environment()
     property var discs: []          // identified ISOs: [{path, label, language, kind, compatible, problems}]
     property var languages: installer.languages()
+    property string xdeltaFile: ""  // the ISO patch chosen in "More options", while its base ISO is asked
     property var pendingIsos: []    // chosen before the tools existed: identified once they are downloaded
     property string step: ""
     property string status: ""
@@ -72,7 +73,7 @@ ScrollView {
         var map = [["verify runtime", "instStepVerify"], ["build tools", "instStepTools"], ["runtime", "instStepRuntime"], ["discs", "instStepDiscs"],
                    ["configure", "instStepConfigure"], ["recompile", "instStepRecomp"], ["generated code", "instStepSync"],
                    ["build the game", "instStepBuild"], ["record", "instStepRecord"], ["native VU1", "instStepNative"],
-                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"], ["VU1 microcode from the disc", "instStepVu1Disc"]]
+                   ["rebuild", "instStepBuild"], ["profile-guided", "instStepPgo"], ["VU1 microcode from the disc", "instStepVu1Disc"], ["apply the ISO patch", "instStepXdelta"]]
         for (var i = 0; i < map.length; ++i)
             if (s.indexOf(map[i][0]) === 0 || s.indexOf(map[i][0]) > 0) return Tema.t(map[i][1])
         return s
@@ -438,6 +439,30 @@ ScrollView {
                 titulo: Tema.t("instQuick")
                 descripcion: Tema.t("instQuickDesc")
                 BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.game; onClicked: root.maintenance("sync,build") }
+            }
+            // an ISO mod shipped as an .xdelta patch: applied to the chosen base ISO into data/mods/isos, then listed
+            Fila {
+                titulo: Tema.t("instXdelta")
+                descripcion: Tema.t("instXdeltaDesc")
+                BotonSecundario { text: Tema.t("instRun"); enabled: !installer.running && root.env.tools; onClicked: dialogoXdelta.open() }
+                FileDialog {
+                    id: dialogoXdelta
+                    title: Tema.t("instXdelta")
+                    nameFilters: ["xdelta / VCDIFF (*.xdelta *.vcdiff)"]
+                    onAccepted: { root.xdeltaFile = lanzador.rutaDesdeUrl(selectedFile); dialogoXdeltaBase.open() }
+                }
+                FileDialog {
+                    id: dialogoXdeltaBase
+                    title: Tema.t("instXdeltaBase")
+                    nameFilters: ["ISO (*.iso)"]
+                    onAccepted: {
+                        var file = root.xdeltaFile.replace(/\\/g, "/")
+                        var name = file.substring(file.lastIndexOf("/") + 1).replace(/\.[^.]*$/, "")
+                        root.begin()
+                        root.pendingIsos = [installer.repoRoot + "/data/mods/isos/" + name + ".iso"]
+                        installer.run("xdelta", { isos: [lanzador.rutaDesdeUrl(selectedFile)], xdelta: root.xdeltaFile, config: "Release" })
+                    }
+                }
             }
             Fila {
                 titulo: Tema.t("instVu1Disc")
