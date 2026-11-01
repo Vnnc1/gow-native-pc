@@ -28,7 +28,6 @@ Changes since v0.3.1 on the development branch.
 ### Added
 - **Fast VU mode** (off by default; Launcher → Performance): VU1 code without the exact float clean-ups, like PCSX2's
   default settings. About 12% less VU1 work in combat; rare small differences from the exact mode (patch 51).
-- **Texture dump and replacement**: PCSX2-style texture packs with higher-resolution images.
 - **Hold instead of mashing** (accessibility, off by default; Launcher → Controls): in the minigames that ask for
   repeated presses, holding the button presses it for you; a short press stays a single press. By
   [ThisIsAkill](https://github.com/ThisIsAkill) (PR #10, patch 53).

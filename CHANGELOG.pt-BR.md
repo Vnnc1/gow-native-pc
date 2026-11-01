@@ -31,7 +31,6 @@ Mudanças desde a v0.3.1 na branch de desenvolvimento.
 - **Modo VU rápida** (desligado por padrão; Launcher → Desempenho): código da VU1 sem as limpezas exatas de ponto
   flutuante, como as configurações padrão do PCSX2. Cerca de 12% menos trabalho da VU1 no combate; diferenças pequenas e
   raras em relação ao modo exato (patch 51).
-- **Extração e substituição de texturas**: pacotes de texturas no estilo do PCSX2, com imagens em resolução maior.
 - **Segurar em vez de apertar sem parar** (acessibilidade, desligado por padrão; Launcher → Controles): nos minijogos
   que pedem apertos repetidos, segurar o botão aperta por você; um toque curto continua sendo um só. Por
   [ThisIsAkill](https://github.com/ThisIsAkill) (PR #10, patch 53).
