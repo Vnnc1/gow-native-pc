@@ -1,0 +1,237 @@
+diff --git a/C:/Users/dzvini/AppData/Local/Temp/claude/C--Users-dzvini-Documents-gow-gow-native-pc/bcf745fe-b7da-4429-9573-7441eedb1bea/scratchpad/base-tex/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 4a82ae0..beef9e0 100644
+--- a/C:/Users/dzvini/AppData/Local/Temp/claude/C--Users-dzvini-Documents-gow-gow-native-pc/bcf745fe-b7da-4429-9573-7441eedb1bea/scratchpad/base-tex/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -5,6 +5,20 @@
+ #include "runtime/gs/gs_swizzle.h"
+ #include "gs_gl.h"
+ #include "../gs_gpu_helpers.h"
++#define XXH_INLINE_ALL // TEXSTUDY
++#include "xxhash.h"
++#include <cctype>
++#include <filesystem>
++// TEXSTUDY: raylib's PNG loader (linked into the runner), declared here instead of including raylib.h (it clashes with the
++// Win32 headers: LoadImage is also a Win32 macro)
++#undef LoadImage
++extern "C"
++{
++    struct RlImage { void *data; int width, height, mipmaps, format; };
++    RlImage LoadImage(const char *fileName);
++    void UnloadImage(RlImage image);
++    void ImageFormat(RlImage *image, int newFormat);
++}
+ #include "runtime/gs/gs_shared_present.h"
+ 
+ #include <map>
+@@ -508,6 +522,8 @@ void main()
+         uint32_t blockLo = 0, blockHi = 0;
+         bool valid = false;
+         uint64_t lastUse = 0;
++        uint64_t pcsx2Hash = 0;    // TEXSTUDY: PCSX2's texture hash of the decoded memory (valid while pcsx2Hashed)
++        bool pcsx2Hashed = false;
+     };
+ 
+     struct RenderTarget
+@@ -904,6 +920,157 @@ struct GSHwBackend::Impl
+         return psm == GS_PSM_T8 || psm == GS_PSM_T8H || psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
+     }
+ 
++    // TEXSTUDY (temporary): PCSX2-format texture names and replacements.
++    // The name PCSX2 gives a texture's dump / replacement (GSTextureCache::HashCacheKey + GSTextureReplacements):
++    // "<tex hash>-<palette hash>-<bits>" (paletted) or "<tex hash>-<bits>", where tex hash = XXH3-64 of the texture's GS
++    // memory blocks in block-row order, palette hash = XXH3-64 of its 16 / 256 32-bit entries, bits = PSM | TW << 6 |
++    // TH << 10 (| TEXA for 16/24-bit colour). Only PCSX2's direct path (at least one block in each axis, no partial-format
++    // mask, no region); false for the others. The texture hash is kept in `tex` until the texture is decoded again.
++    bool pcsx2Key(const GSDrawState &s, Texture &tex, char (&name)[64])
++    {
++        const GSTex0Reg &t = s.context.tex0;
++        uint32_t bx = 0, by = 0;
++        bool fullMask = true;
++        switch (t.psm)
++        {
++        case 0x00: case 0x30: bx = 8; by = 8; break;                               // CT32, Z32
++        case 0x01: case 0x31: bx = 8; by = 8; fullMask = false; break;              // CT24, Z24
++        case 0x02: case 0x0A: case 0x32: case 0x3A: bx = 16; by = 8; break;         // CT16, CT16S, Z16, Z16S
++        case GS_PSM_T8: bx = 16; by = 16; break;
++        case GS_PSM_T4: bx = 32; by = 16; break;
++        default: bx = 8; by = 8; fullMask = false; break;                          // T8H, T4HL, T4HH
++        }
++        const uint32_t tw = 1u << std::min<uint32_t>(t.tw, 10u), th = 1u << std::min<uint32_t>(t.th, 10u);
++        if (!fullMask || tw < bx || th < by)
++            return false;
++        if (!tex.pcsx2Hashed)
++        {
++            const GSSwizzle::Format &f = GSSwizzle::GetFormat(t.psm);
++            XXH3_state_t state;
++            XXH3_64bits_reset(&state);
++            for (uint32_t y = 0; y < th; y += by)
++                for (uint32_t x = 0; x < tw; x += bx)
++                {
++                    const uint32_t block = GSSwizzle::Locate(f, t.tbp0, t.tbw, x, y).byte >> 8u;
++                    XXH3_64bits_update(&state, vram + static_cast<size_t>(block & 0x3FFFu) * 256u, 256u);
++                }
++            tex.pcsx2Hash = XXH3_64bits_digest(&state);
++            tex.pcsx2Hashed = true;
++        }
++        uint32_t bits = (t.psm & 0x3Fu) | ((t.tw & 0xFu) << 6u) | ((t.th & 0xFu) << 10u);
++        if (t.psm == 0x01 || t.psm == 0x02 || t.psm == 0x0A) // the non-palette formats PCSX2 keeps TEXA for
++            bits |= (static_cast<uint32_t>(s.texa.ta0) << 15u) | (static_cast<uint32_t>(s.texa.aem ? 1u : 0u) << 23u) |
++                    (static_cast<uint32_t>(s.texa.ta1) << 24u);
++        if (isIndexed(t.psm))
++        {
++            uint32_t pal[256];
++            store.BuildPalette(s, pal); // index order, 32-bit (16-bit CLUTs expanded with TEXA, as PCSX2's GSClut)
++            std::snprintf(name, sizeof(name), "%llx-%llx-%08x", static_cast<unsigned long long>(tex.pcsx2Hash),
++                          static_cast<unsigned long long>(XXH3_64bits(pal, (t.psm == GS_PSM_T8 ? 256u : 16u) * 4u)), bits);
++        }
++        else
++            std::snprintf(name, sizeof(name), "%llx-%08x", static_cast<unsigned long long>(tex.pcsx2Hash), bits);
++        return true;
++    }
++    // GOW_TEX_PCSX2_NAMES=<file>: every uploaded texture a draw samples, by its PCSX2 name, each once
++    std::FILE *pcsx2Names = [] { const char *p = std::getenv("GOW_TEX_PCSX2_NAMES"); return p ? std::fopen(p, "w") : nullptr; }();
++    std::unordered_map<std::string, uint32_t> pcsx2Seen;
++    void notePcsx2Name(const GSDrawState &s, Texture &tex)
++    {
++        char name[64];
++        if (!pcsx2Key(s, tex, name))
++            std::snprintf(name, sizeof(name), "unsupported-psm%x-%ux%u", s.context.tex0.psm, s.textureWidth, s.textureHeight);
++        if (pcsx2Seen.emplace(name, 1u).second)
++        {
++            const GSTex0Reg &t = s.context.tex0;
++            std::fprintf(pcsx2Names, "%s %ux%u tbp=%x tbw=%u psm=%x cpsm=%x csa=%u\n", name, s.textureWidth, s.textureHeight, t.tbp0,
++                         t.tbw, t.psm, t.cpsm, t.csa);
++            std::fflush(pcsx2Names);
++        }
++    }
++    // GOW_TEXTURE_PACK=<folder>: replacement images named as PCSX2 names them (any subfolder; the old TCC bit 0x4000 of the
++    // bits is ignored, as PCSX2 does). Their pixels are the texture's colours in GS units (alpha 128 = opaque), uploaded as
++    // they are and sampled through the direct-colour path at their own resolution. Loaded on first use (not yet in the
++    // background).
++    struct PackEntry
++    {
++        std::string path;
++        GLuint id = 0;
++        bool tried = false;
++    };
++    std::unordered_map<std::string, PackEntry> texPack;
++    bool texPackOn = false;
++    uint64_t texPackHits = 0, texPackLoads = 0;
++    static std::string packKey(const char *name)
++    {
++        // "<hex>-<hex>-<bits>" or "<hex>-<bits>": hashes without leading zeros, bits without the TCC bit
++        unsigned long long a = 0, b = 0;
++        unsigned bits = 0;
++        char out[64];
++        int n = 0;
++        if (std::sscanf(name, "%llx-%llx-%x%n", &a, &b, &bits, &n) == 3 && name[n] == '\0')
++            std::snprintf(out, sizeof(out), "%llx-%llx-%08x", a, b, bits & ~0x4000u);
++        else if (std::sscanf(name, "%llx-%x%n", &a, &bits, &n) == 2 && name[n] == '\0')
++            std::snprintf(out, sizeof(out), "%llx-%08x", a, bits & ~0x4000u);
++        else
++            return {};
++        return out;
++    }
++    void loadTexturePack()
++    {
++        const char *dir = std::getenv("GOW_TEXTURE_PACK");
++        if (!dir || !*dir)
++            return;
++        std::error_code error;
++        for (auto it = std::filesystem::recursive_directory_iterator(dir, error);
++             !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error))
++        {
++            if (!it->is_regular_file(error))
++                continue;
++            std::string ext = it->path().extension().string();
++            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
++            if (ext != ".png")
++                continue;
++            const std::string key = packKey(it->path().stem().string().c_str());
++            if (!key.empty())
++                texPack[key].path = it->path().string();
++        }
++        texPackOn = !texPack.empty();
++        std::fprintf(stderr, "[gs-texpack] %zu replacements in %s\n", texPack.size(), dir);
++    }
++    // the replacement's GL texture for this draw's texture, or 0
++    GLuint replacementFor(const GSDrawState &s, Texture &tex)
++    {
++        char name[64];
++        if (!pcsx2Key(s, tex, name))
++            return 0;
++        const auto it = texPack.find(packKey(name));
++        if (it == texPack.end())
++            return 0;
++        PackEntry &e = it->second;
++        if (!e.tried)
++        {
++            e.tried = true;
++            RlImage img = LoadImage(e.path.c_str());
++            if (img.data)
++            {
++                ImageFormat(&img, 7 /* PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 */);
++                const Api &g = gl();
++                g.GenTextures(1, &e.id);
++                g.ActiveTexture(kTexture0);
++                g.BindTexture(kTexture2D, e.id);
++                g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), img.width, img.height, 0, kRgba, kUnsignedByte, img.data);
++                ++texPackLoads;
++                UnloadImage(img);
++            }
++            else
++                std::fprintf(stderr, "[gs-texpack] cannot read %s\n", e.path.c_str());
++        }
++        if (e.id)
++            ++texPackHits;
++        return e.id;
++    }
++
+     Texture &textureFor(const GSDrawState &s)
+     {
+         const GSTex0Reg &t = s.context.tex0;
+@@ -923,6 +1090,7 @@ struct GSHwBackend::Impl
+             return tex;
+         }
+         ++stats.texDecodes;
++        tex.pcsx2Hashed = false; // TEXSTUDY
+         classifyTexture(s);
+         const Api &g = gl();
+         std::vector<uint32_t> pixels;
+@@ -1026,6 +1194,7 @@ struct GSHwBackend::Impl
+             return tex;
+         }
+         ++stats.texDecodes;
++        tex.pcsx2Hashed = false; // TEXSTUDY
+         classifyTexture(s);
+         tex.width = std::max<uint32_t>(1u, s.textureWidth);
+         tex.height = std::max<uint32_t>(1u, s.textureHeight);
+@@ -2251,8 +2420,17 @@ struct GSHwBackend::Impl
+                 rsrc = findReinterpretSource(c.tex0.tbp0, c.tex0.psm);
+             if (rsrc == &rt)
+                 g.TextureBarrier();
+-            const bool indexed = !(src || rsrc || zsrc) && isIndexed(c.tex0.psm) && vram != nullptr;
+-            Texture &tex = (src || rsrc || zsrc) ? dummy : indexed ? indexTextureFor(s) : textureFor(s);
++            const bool uploaded = !(src || rsrc || zsrc) && vram != nullptr;
++            const bool indexedSource = uploaded && isIndexed(c.tex0.psm);
++            Texture &tex = (src || rsrc || zsrc) ? dummy : indexedSource ? indexTextureFor(s) : textureFor(s);
++            if (pcsx2Names && uploaded) // TEXSTUDY
++                notePcsx2Name(s, tex);
++            static bool texPackChecked = false; // TEXSTUDY
++            if (!texPackChecked)
++                texPackChecked = true, loadTexturePack();
++            // a texture-pack image replaces the texture: sampled as a direct-colour texture at its own resolution
++            const GLuint replacement = texPackOn && uploaded ? replacementFor(s, tex) : 0u;
++            const bool indexed = indexedSource && replacement == 0u;
+             g.Uniform1i(locIndexed, indexed ? 1 : 0);
+             g.Uniform1i(locLinear, s.linearFilter ? 1 : 0);
+             if (indexed)
+@@ -2263,7 +2441,7 @@ struct GSHwBackend::Impl
+                 g.Uniform4i(locWrap, (c.clamp & 3u) == 0u ? 0 : 1, ((c.clamp >> 2) & 3u) == 0u ? 0 : 1, 0, 0);
+             }
+             g.ActiveTexture(kTexture0);
+-            g.BindTexture(kTexture2D, zsrc ? zsrc->depth : src ? src->color : rsrc ? rsrc->color : tex.id);
++            g.BindTexture(kTexture2D, zsrc ? zsrc->depth : src ? src->color : rsrc ? rsrc->color : replacement ? replacement : tex.id);
+             g.Uniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
+             g.Uniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
+             g.Uniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
