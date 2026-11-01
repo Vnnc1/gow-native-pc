@@ -11,7 +11,7 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-0.3.1-crimson)
+![version](https://img.shields.io/badge/version-0.4.0-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
@@ -32,8 +32,8 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ## Contents
 
 - [What is this?](#what-is-this)
+- [What's new in 0.4.0](#whats-new-in-040)
 - [What's new in 0.3.1](#whats-new-in-031)
-- [What's new in 0.3.0](#whats-new-in-030)
 - [Required: the PS2Recomp runtime](#required-the-ps2recomp-runtime)
 - [Requirements](#requirements)
 - [Getting started](#getting-started)
@@ -61,20 +61,39 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
   downloaded automatically; a loading screen shows overall progress, estimated time remaining and tips.
 - **One ISO is enough**: the original (USA) or a recognised fan translation. With several ISOs (e.g. the original and
   a translation) every language becomes playable and the launcher **asks which language you want to play in**.
-- **Built for speed**: the first-play preparation records the game's VU1/IOP code and a performance profile in one
-  run and builds the final game with both (profile-guided optimisation, PGO).
+- **Built for speed**: each release ships a profile-guided optimisation (PGO) profile trained on exactly its runtime,
+  so every install is built with it, on any CPU and without a training build. The first-play preparation records the
+  game's VU1/IOP code in one run and builds it in as native code.
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
   ("Hold instead of mashing" in the Controls tab).
 - **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
+- **Launcher in nine languages**: English, Portuguese, Spanish, Turkish, French, German, Italian, Russian and
+  Simplified Chinese.
 
-## What's new in 0.3.1
+## What's new in 0.4.0
 
 > [!NOTE]
-> **Releases were renumbered on 2026-10-31**: v1.0.0, v2.0.0, v3.0.0 and v3.0.1 are now v0.1.0, v0.2.0, v0.3.0 and
-> v0.3.1 (same files). Every release and the meaning of the numbers: [`CHANGELOG.md`](CHANGELOG.md). A launcher from
-> before the renumbering does not see the new numbers as an update: install the next release (v0.4.0) once from its
-> setup, over your installation; your game build, discs and saves are kept.
+> **Coming from v0.3.1 or earlier? Run the 0.4.0 setup once over your installation.** Releases were renumbered on
+> 2026-10-31 (v1.0.0, v2.0.0, v3.0.0 and v3.0.1 are now v0.1.0, v0.2.0, v0.3.0 and v0.3.1, same files), and a launcher
+> from before the renumbering does not see 0.4.0 as an update. Your game build, discs and saves are kept; automatic
+> updates work again from 0.4.0 on. Every release: [`CHANGELOG.md`](CHANGELOG.md).
+
+- **PGO profile in the release**: the install uses the release's profile directly — no instrumented build and no
+  training run — and CPUs with 4 threads or fewer, which skipped PGO before, now get it too.
+- **Fast VU mode** (off by default; Launcher → Performance): VU1 code without the exact float clean-ups, like PCSX2's
+  default settings. About 12% less VU1 work in a recorded combat replay (runtime patch 51). Most useful on slower
+  CPUs, where VU1 is the limit.
+- **Hold instead of mashing** (accessibility, Launcher → Controls), by
+  [ThisIsAkill](https://github.com/ThisIsAkill) (PR #10, patch 53).
+- **Launcher in French, German, Italian, Russian and Simplified Chinese**; the system's language is picked on first
+  start.
+- **Fixes**: sound effects going silent after about 35 s of combat (patch 48); a frozen pink screen when the GPU
+  renderer cannot start now explains why (no OpenGL 4.3, generic driver, Remote Desktop; patch 52); an install script
+  quarantined by an antivirus is reported as such instead of "Failed (code 1)"; installs in a folder with a space in
+  its name no longer fail.
+
+## What's new in 0.3.1
 
 Measured on the test PC (Xeon E5-2666 v3 + RX 580, save route, full screen, alternating pairs); details in
 [`docs/research/roteiro-60fps.pt-BR.md`](docs/research/roteiro-60fps.pt-BR.md):
@@ -87,44 +106,28 @@ Measured on the test PC (Xeon E5-2666 v3 + RX 580, save route, full screen, alte
 - **Install**: dependencies are downloaded once and shallow (the profile-guided step no longer re-downloads ~1 GB);
   CPUs with 4 threads or fewer skip the profile-guided pass and use one more compiler; CPUs without SSE4.2 are told
   before the install instead of after it.
-- **Older GPUs**: GPUs whose drivers stop at OpenGL 4.3-4.5 (such as Intel HD 4000-4600) now use the GPU renderer
-  instead of falling back to the much slower software one (patch 47).
+- **Older GPUs**: GPUs whose drivers stop at OpenGL 4.3-4.5 (such as Intel HD 4000-4600) now get an OpenGL context
+  for the GPU renderer instead of failing to start it (patch 47).
 - **Updates**: the "rebuild" notice clears only after a rebuild with the new runtime, and the launcher recommends
   retraining the profile-guided optimisation after an update.
 
-## What's new in 0.3.0
-
-Compared with 0.2.0 (details: [`docs/tested-hardware.md`](docs/tested-hardware.md) and the
-[review of this release](docs/research/revisao-2026-10-30.pt-BR.md)):
-
-| Area | Change |
-|---|---|
-| Performance | **Early FINISH**: the game prepares the next frame while VU1 draws the current one — about **+20% in heavy combat** (measured). On by default, switchable in Launcher → Performance. |
-| Performance | **PGO included in the install**: the first-play preparation now builds with profile-guided optimisation (about +5% average, +13% in combat, measured). |
-| Build | First-play preparation + PGO takes about **24 minutes** instead of about 63; more parallel compilers on machines with less RAM per core; the largest generated file builds in 10 s instead of 331 s. |
-| Build | Single pinned clang (llvm-mingw) toolchain, cached code generation, `build.cmd -Stages verify` regression tests. |
-| In game | **F1 game menu** with Graphics (filter, sharpness, FXAA, anisotropic filtering, FPS limit, VSync, FPS counter, stretch — all live), Cheats and Save tabs. The runtime debugger moved to Ctrl+F1. |
-| Image | FXAA no longer turns off the sharp scaler; borderless full screen mode. |
-| Launcher | Quick graphics profiles (Performance / Balanced / Quality), honest Upscaling and tools section, a keyboard shortcut on the Controls page, settings that did nothing removed, PGO status and recommendation. |
-| Launcher | Saves page, session reports for bug reports, Portuguese texts for the in-game menu. |
-| VU1 | In-process x86-64 JIT, block chaining and self-loop fast paths, capture of missing code for later compilation. |
-| Fixes | Memory/DMA correctness fixes, SPU2 mix overflow, standalone launch profile, many smaller fixes listed per patch in [`engine/README.md`](engine/README.md). |
+Earlier releases (0.3.0: Early FINISH, PGO in the install, the F1 menu, the VU1 JIT): [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Required: the PS2Recomp runtime
 
 Without the runtime nothing can be recompiled or run. It is **not part of this repository**: **Install and build**
 in the launcher or the `fetch` stage of `build.cmd` clones it into `engine/runtime/` as pinned in
 [`engine/runtime.toml`](engine/runtime.toml) (Tobiichi-Port, which bundles ran-j's PS2Recomp with Waffle565's and
-KIexster's extensions) and applies [`engine/patches`](engine/patches) (01–41 in this release).
+KIexster's extensions) and applies [`engine/patches`](engine/patches) (01–53 in this release).
 
 ## Requirements
 
 | | |
 |---|---|
 | OS | Windows 10/11 64-bit |
-| CPU | x86-64 with SSE4.2 (x86-64-v2); AVX/AVX2 are used by the VU1 JIT when present. 4 cores or more recommended |
+| CPU | x86-64 with SSE4.2 (x86-64-v2); AVX/AVX2 are used by the VU1 JIT when present. 4 cores or more recommended: 2-core/4-thread laptop CPUs run the game slowly (see [Performance](#performance)) |
 | RAM | 8 GB (16 GB recommended while building) |
-| GPU | OpenGL 4.3+ (4.3 needs `NV_texture_barrier` or `ARB_texture_barrier`, as Intel HD 4000-4600 drivers have; otherwise the slower software renderer is used) |
+| GPU | OpenGL 4.3+ (4.3 needs `NV_texture_barrier` or `ARB_texture_barrier`, as Intel HD 4000-4600 drivers have), with the GPU maker's driver installed. The GPU renderer is the only renderer: without OpenGL 4.3 (or with Windows' generic display driver, or over Remote Desktop) the game window says so instead of showing the game |
 | Storage | **Under 10 GB as an estimate** for the prepared game files + one Release build, depending on the ISO edition. See the storage notes below. |
 | Tools | Git, Python, CMake, Ninja and clang (llvm-mingw) are downloaded automatically into `data/_tools`. Visual Studio is not required. |
 | Internet | Required to download the runtime, build tools, dependencies and updates |
@@ -148,14 +151,16 @@ The base path is recorded in `data/build-root.txt`; the launcher reads it automa
 2. In the launcher → **Install** tab:
    1. **Download tools** — portable copies are downloaded once, with SHA-256 verification, without changing your PATH;
    2. **Add ISO…** — select one or more compatible ISOs; the launcher identifies the game and language;
-   3. **Install and build** — downloads the runtime, prepares the disc and compiles the game. Leave
-      **Prepare the first play (recommended)** enabled: a training copy plays itself for four minutes, **hidden and
-      muted**, recording the VU1/IOP code and a performance profile, and the final game is built with both.
+   3. **Install and build** — downloads the runtime, prepares the disc and compiles the game with the release's PGO
+      profile. Leave **Prepare the first play (recommended)** enabled: a copy of the game plays itself for four
+      minutes, **hidden and muted**, recording the VU1/IOP code it uses, and that code is compiled in.
 3. Pick a **graphics profile** (Graphics page), check **Controls** if you play on the keyboard, then **PLAY**.
 
-Build time depends on the CPU, RAM, storage and downloads. On the test PC (Xeon E5-2666 v3, 20 threads, 16 GB) the
-whole installation with first-play preparation and PGO takes **about 30 minutes**; this is a reference, not a deadline.
-A game installed with an older version shows **"FPS optimisation recommended (PGO)"** on the Home page.
+Build time depends on the CPU, RAM, storage and downloads; the game's ~6,400 recompiled functions are compiled on your
+PC. On the test PC (Xeon E5-2666 v3, 20 threads, 16 GB) the whole installation took **about 30 minutes** when it still
+trained its own PGO profile (0.3.x); with the release's profile it no longer needs the instrumented build and the
+training run. On a 2-core/4-thread laptop CPU (i3-10110U) an install took **about 75 minutes**. These are references,
+not deadlines. A game installed with an older version shows **"FPS optimisation recommended (PGO)"** on the Home page.
 
 ### From a terminal
 
@@ -165,8 +170,8 @@ Run these commands from the repository folder (PowerShell: prefix `build.cmd` wi
 build.cmd -Discs "D:\God of War (USA).iso" -Stages tools,fetch,discs,configure,recomp,sync,tune
 ```
 
-This is what the launcher does: tools, runtime, disc preparation, recompilation and the `tune` stage (training run +
-final PGO build). Without first-play preparation, use the default `build.cmd -Discs "D:\God of War (USA).iso"`.
+This is what the launcher does: tools, runtime, disc preparation, recompilation and the `tune` stage (recording run +
+final build with the release's PGO profile; without a fitting profile it also trains one). Without first-play preparation, use the default `build.cmd -Discs "D:\God of War (USA).iso"`.
 For multiple languages, pass `-Discs "D:\usa.iso|D:\ptbr.iso"`. More examples: [`build.cmd`](build.cmd).
 `build.cmd -Stages verify` runs the regression tests without a disc.
 
@@ -222,8 +227,13 @@ On the project's **Xeon E5-2666 v3 / 16 GB / Radeon RX 580 2048SP** test PC (ful
 PGO, Early FINISH), the opening ship averages **about 55 fps**, with heavy-combat windows around **50–53 fps**; a
 30-minute session from a later save averaged 48 fps with stable memory. **A locked 60 fps is not reached yet**: the
 remaining limit is the VU1 work on the CPU (about 19 ms per frame in the heaviest combat, 16.7 ms are needed). Lowering
-the internal resolution helps only when the GPU is the limit. Weaker CPUs (e.g. laptop i5) have not been re-measured
-with this release; reports are welcome.
+the internal resolution helps only when the GPU is the limit.
+
+On a **2-core/4-thread laptop CPU (Core i3-10110U, Intel UHD Graphics)** the image is correct but the game is slow:
+menus at 40–48 fps and **about 20 fps in combat** on the ship (internal resolution 1×, no PGO, 0.4.0 test build). The
+diagnostics report shows the VU1 thread busy over 90% of the time there, so the CPU is the limit, not the GPU. Fast VU
+mode gave about 10% there; AVX2 builds (`-CpuTarget x86-64-v3`) were measured and do not speed up the VU1 code. Reports
+from other machines are welcome: turn on **Audio and compilation diagnostics** first.
 
 ## Upscaling and external tools
 
@@ -250,6 +260,9 @@ is detected from menu text. Translations that modify code and other regions with
 The launcher asks which language to use when multiple languages are available. See [`docs/translations.md`](docs/translations.md)
 for compatibility and disc preparation details.
 
+The launcher itself is in English, Portuguese, Spanish, Turkish, French, German, Italian, Russian and Simplified
+Chinese (chosen on the Other page; the system's language on first start); the in-game F1 menu has English, Portuguese, Spanish and Turkish texts.
+
 ## Reporting problems
 
 The launcher records a bounded report for each session. Use **Other → Mark a problem during play** when an issue
@@ -263,7 +276,9 @@ diagnostics are optional and can reduce FPS. See [`docs/reporting-bugs.md`](docs
 - Only the opening areas (the ship) have been measured in depth; later areas may behave differently.
 - Short hitches with audio gaps can occur at area transitions; the PT-BR cutscene audio has a known channel-alignment
   issue ([`docs/research/cutscene-audio-2026-10-26.md`](docs/research/cutscene-audio-2026-10-26.md)).
-- If you see image glitches, turn off **Finish frames early** in Launcher → Performance and report it.
+- 2-core/4-thread laptop CPUs run the game at about 20 fps in combat (see [Performance](#performance)).
+- If you see image glitches, turn off **Finish frames early** (and **Fast VU**, if you turned it on) in Launcher →
+  Performance and report it.
 - Windows only for now.
 
 ## Roadmap
@@ -275,7 +290,7 @@ The full plan, with measurement gates for each item: [`docs/research/roadmap-202
 | 1 | Build and recompilation quality | Largely done in 0.3.0 (pinned toolchain, caching, verify, faster install with PGO); a sub-20-minute install is next |
 | 2 | Stable 60 fps | Early FINISH and PGO done; next: static VU1 timing (the remaining ~14% in heavy combat), native VU1 ops still interpreted |
 | 3 | Audio | PT-BR cutscene alignment and transition gaps |
-| 4 | Mods and texture packs | ISO patches, file overrides and texture replacement ([`docs/research/audio-standalone-mods-2026-10-26.md`](docs/research/audio-standalone-mods-2026-10-26.md)) |
+| 4 | Mods and texture packs | ISO patches, file overrides ([`docs/research/audio-standalone-mods-2026-10-26.md`](docs/research/audio-standalone-mods-2026-10-26.md)); texture dump and replacement is designed, not implemented ([`docs/research/texture-replacement.md`](docs/research/texture-replacement.md)) |
 | 5 | Linux port | The runtime and launcher already have Linux code paths; the build pipeline needs porting and testing on real hardware |
 | 6 | Image quality | Spatial upscaling, widescreen HUD fixes |
 | 7 | God of War II foundation | Game-specific code isolated per profile ([`games/gow2/README.md`](games/gow2/README.md)) |
