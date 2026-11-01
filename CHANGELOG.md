@@ -21,7 +21,7 @@ said v0.0.x. They are now v0.1.0, v0.2.0, v0.3.0 and v0.3.1, with the same files
 releases (it reports 1.0.0 to 3.0.1) does not see 0.x releases as newer: **install v0.4.0 once from its setup over the
 existing installation**; automatic updates work again from there on. Your game build, discs and saves are kept.
 
-## [Unreleased] — v0.4.0
+## [v0.4.0] — 2026-10-31
 
 Changes since v0.3.1 on the development branch.
 
@@ -134,7 +134,7 @@ Formerly v1.0.0. 12 commits: the first release.
 - Image fixes at higher internal resolutions from the God of War II native port; MOVZ/MOVN translation; runtime memory
   out of the game's heap; FMV audio streams; faster memory card saves; runtime patches keep their line endings.
 
-[Unreleased]: https://github.com/Vnnc1/gow-native-pc/compare/v0.3.1...HEAD
+[v0.4.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.4.0
 [v0.3.1]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.1
 [v0.3.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.0
 [v0.2.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.2.0

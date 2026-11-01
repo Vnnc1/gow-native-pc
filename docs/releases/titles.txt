@@ -2,3 +2,4 @@ v0.1.0	v0.1.0 — First release: build pipeline, launcher and one-file setup
 v0.2.0	v0.2.0 — clang builds, three-step install, controller remapping and automatic updates
 v0.3.0	v0.3.0 — VU1 JIT, Early FINISH, PGO in the install and the F1 menu
 v0.3.1	v0.3.1 — 57 fps average: leaner VU1, lock-free GS hand-off, OpenGL 4.3 and a CPU check
+v0.4.0	v0.4.0 — Shipped PGO profile, Fast VU mode, hold instead of mashing and clear install/GPU errors

@@ -23,7 +23,7 @@ diziam v0.0.x. Agora são v0.1.0, v0.2.0, v0.3.0 e v0.3.1, com os mesmos arquivo
 cima da instalação atual**; daí em diante as atualizações automáticas voltam a funcionar. A compilação do jogo, os
 discos e os saves são mantidos.
 
-## [Não lançado] — v0.4.0
+## [v0.4.0] — 2026-10-31
 
 Mudanças desde a v0.3.1 na branch de desenvolvimento.
 
@@ -146,7 +146,7 @@ Antes v1.0.0. 12 commits: a primeira versão.
   do runtime fora do heap do jogo; áudio dos vídeos; saves no memory card mais rápidos; os patches do runtime mantêm as
   quebras de linha.
 
-[Não lançado]: https://github.com/Vnnc1/gow-native-pc/compare/v0.3.1...HEAD
+[v0.4.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.4.0
 [v0.3.1]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.1
 [v0.3.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.0
 [v0.2.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.2.0
