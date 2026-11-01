@@ -89,7 +89,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
-  GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16).
+  GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16),
+  GOW_QTE_HOLD / _HZ (accessibility: a held button becomes the presses the minigames ask for, engine/patches/53; the
+  logic is tested without the game by tools/test/qte_hold_test.cpp in verify).
   GOW_VU1N_X64=1 (in-process x86-64 VU1 JIT, engine/patches/18, experimental: the Performance tab's "Compile new areas
   while playing"; docs/research/vu1-x64-jit.md). GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (patch 17's background
   clang compiler, by hand: data/<id>/vu1_jit.json, which clang builds write, names the values).
@@ -130,7 +132,8 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 - Code comments, docs, commit messages, patch headers and lines added by patches: **English**. User-facing docs may
   have translations next to them (`README.pt-BR.md`, linked from the language bar at the top of `README.md`).
-- Launcher interface texts: `launcher/qml/Textos.js` (tr, en, es, pt).
+- Launcher interface texts: `launcher/qml/Textos.js` (tr, en, es, pt inline) and `launcher/qml/idiomas/<code>.js` (fr, de,
+  it, ru, zh: one file per language, the keys of Textos.js).
 - Identifiers inherited from the Tobiichi Launcher stay Spanish (`lanzador`, `ajustes`, `Pagina*`...) to keep its code
   diffable with upstream; their comments are English. New code uses English names.
 - The downloaded runtime keeps its authors' comments (some Spanish). Patch context lines are upstream code: never
@@ -151,7 +154,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **New game**: see `docs/adding-a-game.md`.
 - **New translation / edition**: add an `[[editions]]` entry (elf_crc from `identify.py`); if it changes code (.text
   differs) it is not supported.
-- **Launcher texts**: `launcher/qml/Textos.js`, keys with tr/en/es/pt (missing languages fall back to en).
+- **Launcher texts**: a new key goes in `launcher/qml/Textos.js` with tr/en/es/pt; the languages in `launcher/qml/idiomas/`
+  fall back to en until the key is added there. A new language: `idiomas/<code>.js` (copy one), its `.import` and
+  `archivos` entry and the `idiomas` list in Textos.js, and the file in launcher/CMakeLists.txt. `python -I
+  tools/test/launcher-languages.py` (also in verify) checks keys and %1/%2 placeholders. The in-game F1 menu
+  (patch 39, TOBIICHI_IDIOMA) has tr/en/es/pt only and shows English for the others.
 
 ## How to test
 

@@ -29,6 +29,11 @@ set(ARCHIVOS_QML
     qml/Main.qml
     qml/Tema.qml
     qml/Textos.js
+    qml/idiomas/fr.js
+    qml/idiomas/de.js
+    qml/idiomas/it.js
+    qml/idiomas/ru.js
+    qml/idiomas/zh.js
     qml/Ascuas.qml
     qml/NavItem.qml
     qml/Fila.qml
@@ -53,7 +58,7 @@ set(ARCHIVOS_QML
 # The QML files sit at the module root (no "qml/"), so their folder's implicit import is the module itself and
 # Tema (the theme) loads as a singleton.
 foreach(archivo IN LISTS ARCHIVOS_QML)
-    get_filename_component(nombre "${archivo}" NAME)
+    string(REGEX REPLACE "^qml/" "" nombre "${archivo}") # path under qml/: idiomas/fr.js keeps its folder
     set_source_files_properties(${archivo} PROPERTIES QT_RESOURCE_ALIAS ${nombre})
 endforeach()
 set_source_files_properties(qml/Tema.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)

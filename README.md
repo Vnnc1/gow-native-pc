@@ -64,6 +64,8 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
 - **Built for speed**: the first-play preparation records the game's VU1/IOP code and a performance profile in one
   run and builds the final game with both (profile-guided optimisation, PGO).
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
+- **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
+  ("Hold instead of mashing" in the Controls tab).
 - **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
 
 ## What's new in 0.3.1

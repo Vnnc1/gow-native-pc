@@ -5,6 +5,7 @@ import QtQuick.Effects
 import QtQuick.Layouts
 import QtQuick.Shapes
 import "Teclas.js" as Teclas
+import "Textos.js" as Textos
 
 // Main launcher window: a sidebar with the pages on the left; Home (title, Play, language, summary) and the settings
 // pages on the right.
@@ -53,6 +54,10 @@ ApplicationWindow {
         property int versionAjustes: 0
         property bool controlesDmc5: true
         property bool cancelarAnimaciones: true // snappier evade and input buffer (GOW_CANCELAR)
+        // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
+        property bool qteHold: false
+        property string qteHoldButtons: "circle" // "circle" or "face" (the four face buttons)
+        property int qteHoldRate: 10 // presses per second the assist makes (GOW_QTE_HOLD_HZ)
         property bool escSalir: false
         property bool minimizarAlJugar: true
         property int segundosJugados: 0
@@ -72,7 +77,7 @@ ApplicationWindow {
         property real portadaBrillo: 0.85
     }
 
-    Binding { target: Tema; property: "idioma"; value: ajustes.idioma || "en" }
+    Binding { target: Tema; property: "idioma"; value: idiomaCaptura || ajustes.idioma || "en" }
     Binding { target: Tema; property: "fuenteTitulo"; value: fuenteTitulo }
 
     readonly property var pantalla: lanzador.pantalla()
@@ -181,6 +186,9 @@ ApplicationWindow {
         ajustes.controlesDmc5 = true
         ajustes.mando = ""
         ajustes.cancelarAnimaciones = true
+        ajustes.qteHold = false
+        ajustes.qteHoldButtons = "circle"
+        ajustes.qteHoldRate = 10
         ajustes.escSalir = false
         ajustes.minimizarAlJugar = true
         ajustes.trucos = ""
@@ -239,6 +247,7 @@ ApplicationWindow {
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
+            qteHold: ajustes.qteHold, qteHoldButtons: ajustes.qteHoldButtons, qteHoldRate: ajustes.qteHoldRate,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
             mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",
             trucos: ajustes.trucos, idioma: Tema.idioma, textoJuego: ajustes.textoJuego
@@ -340,9 +349,7 @@ ApplicationWindow {
             ajustes.versionAjustes = 7
         }
         if (ajustes.idioma.length === 0) {
-            var loc = Qt.locale().name
-            ajustes.idioma = loc.indexOf("tr") === 0 ? "tr" : (loc.indexOf("es") === 0 ? "es"
-                           : (loc.indexOf("pt") === 0 ? "pt" : "en"))
+            ajustes.idioma = Textos.idiomaDeLocale(Qt.locale().name) // the system's language when the launcher has it
         }
         if (ajustes.aspecto.length === 0) ajustes.aspecto = aspectoPorDefecto()
         if (!listo) ventana.pagina = 1  // nothing installed yet: open on the Install tab

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import "Textos.js" as Textos
 
 // "Other" tab: language, game options, shortcuts, log and defaults.
 ScrollView {
@@ -22,8 +23,7 @@ ScrollView {
         Fila {
             titulo: Tema.t("idioma")
             Selector {
-                opciones: [{ texto: "Türkçe", valor: "tr" }, { texto: "English", valor: "en" }, { texto: "Español", valor: "es" },
-                           { texto: "Português (Brasil)", valor: "pt" }]
+                opciones: Textos.idiomas.map((i) => ({ texto: i.nombre, valor: i.codigo }))
                 valor: raiz.ajustes.idioma
                 onElegido: (v) => raiz.ajustes.idioma = v
             }

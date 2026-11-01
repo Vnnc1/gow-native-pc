@@ -29,6 +29,11 @@ Changes since v0.3.1 on the development branch.
 - **Fast VU mode** (off by default; Launcher → Performance): VU1 code without the exact float clean-ups, like PCSX2's
   default settings. About 12% less VU1 work in combat; rare small differences from the exact mode (patch 51).
 - **Texture dump and replacement**: PCSX2-style texture packs with higher-resolution images.
+- **Hold instead of mashing** (accessibility, off by default; Launcher → Controls): in the minigames that ask for
+  repeated presses, holding the button presses it for you; a short press stays a single press. By
+  [ThisIsAkill](https://github.com/ThisIsAkill) (PR #10, patch 53).
+- **Launcher in French, German, Italian, Russian and Simplified Chinese**, besides English, Portuguese, Spanish and
+  Turkish; the system's language is picked on first start. The in-game F1 menu stays in English for these.
 - Releases can ship a profile-guided optimisation (PGO) profile trained on exactly their runtime and patch set.
 - `tools/pipeline/patches.ps1`: the runtime patch stack as git commits, to move it to a newer runtime commit.
 

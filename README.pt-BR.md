@@ -65,6 +65,8 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
   única execução e compila o jogo final com os dois (otimização guiada por perfil, PGO).
 - **Controles configuráveis**: teclado e mouse totalmente configuráveis, layouts clássico ou moderno de controle e
   mapeamento botão a botão.
+- **Acessibilidade**: os minijogos que pedem apertos repetidos podem ser jogados segurando o botão
+  ("Segurar em vez de apertar sem parar" na aba Controles).
 - **Menu no jogo (F1)**: ajustes gráficos ao vivo, truques e cópias do cartão de memória.
 
 ## Novidades da 0.3.1

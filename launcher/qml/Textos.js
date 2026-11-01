@@ -1,6 +1,13 @@
 .pragma library
+.import "idiomas/fr.js" as Fr
+.import "idiomas/de.js" as De
+.import "idiomas/it.js" as It
+.import "idiomas/ru.js" as Ru
+.import "idiomas/zh.js" as Zh
 
-// Interface texts: Turkish (tr), English (en), Spanish (es) and Brazilian Portuguese (pt).
+// Interface texts: Turkish (tr), English (en), Spanish (es) and Brazilian Portuguese (pt) here, one entry per key;
+// French, German, Italian, Russian and Simplified Chinese in idiomas/<code>.js, one file per language (checked
+// against this table by tools/test/launcher-languages.py). A text missing in a language falls back to English.
 var tabla = {
     subtitulo: { tr: "NATIVE PC", en: "NATIVE PC", es: "NATIVE PC", pt: "NATIVE PC" },
     lema: { tr: "PlayStation 2 klasiği, yerel PC portu olarak.", en: "The PlayStation 2 classic, as a native PC port.", es: "El clásico de PlayStation 2, como port nativo de PC.", pt: "O clássico do PlayStation 2, como port nativo para PC." },
@@ -134,6 +141,14 @@ var tabla = {
 
     cancelarAnimaciones: { tr: "Çevik dövüş (animasyon iptali)", en: "Agile combat (animation cancelling)", es: "Combate ágil (cancelar animaciones)", pt: "Combate ágil (cancelar animações)" },
     cancelarAnimacionesDesc: { tr: "Yuvarlanmanın sonunu saldırı veya blokla keser ve kaçırılan saldırı tuşlarını kısa süre hatırlar. Saldırıları blok ve kaçınmayla kesmek oyunda zaten vardır.", en: "Cuts the end of a roll short with an attack or block and briefly remembers missed attack presses. Cancelling attacks with block and evade is already in the game.", es: "Corta el final de la voltereta con un ataque o el bloqueo y recuerda un momento las pulsaciones de ataque perdidas. Cortar ataques con el bloqueo y la evasión ya está en el juego.", pt: "Encurta o fim de um rolamento com um ataque ou defesa e lembra por um instante os ataques apertados fora de hora. Cancelar ataques com defesa e esquiva já faz parte do jogo." },
+    qteHold: { tr: "Hızlı basma yerine basılı tut", en: "Hold instead of mashing", es: "Mantener en vez de machacar", pt: "Segurar em vez de apertar sem parar" },
+    qteHoldDesc: { tr: "Üst üste basmak isteyen mini oyunlarda (bir tutuşta ya da bitiriş vuruşunda çıkan «Tap O») tuşu basılı tutmak senin yerine basar. Kısa basış yine tek basıştır: yakalamak ya da sandık açmak değişmez. Aynı tuşla çıkan bir «Hold» uyarısı dolmazsa bunu kapat.", en: "In the minigames that ask for repeated presses (the \"Tap O\" of a grapple or a context kill), keeping the button down presses it for you. A short press is still a single press, so grabbing an enemy or opening a chest does not change. If a \"Hold\" prompt on the same button stops filling, turn this off.", es: "En los minijuegos que piden pulsar repetidamente (el «Tap O» de un agarre o un remate), mantener el botón lo pulsa por ti. Una pulsación corta sigue siendo una sola, así que agarrar a un enemigo o abrir un cofre no cambia. Si un aviso de «Hold» con el mismo botón deja de llenarse, apaga esto.", pt: "Nos minijogos que pedem apertos repetidos (o «Tap O» de um agarrão ou de um golpe final), segurar o botão aperta por você. Um toque curto continua sendo um só, então agarrar um inimigo ou abrir um baú não muda. Se um aviso de «Hold» no mesmo botão parar de encher, desligue isto." },
+    qteHoldButtons: { tr: "Hangi tuşlarda", en: "Buttons it works on", es: "Botones a los que se aplica", pt: "Botões em que funciona" },
+    qteHoldButtonsDesc: { tr: "God of War'un mini oyunları yakalama tuşunu ister. Diğerleri yalnızca bir uyarı onları isterse işe yarar. L1, R1, L2 ve R2 listede yok: onlar basılı tutulan tuşlar, tekrarlanınca blok düşer.", en: "God of War's minigames ask for the grab button. The others only matter if a prompt asks for them. L1, R1, L2 and R2 are left out: they are held in normal play, and repeating them would drop a block.", es: "Los minijuegos de God of War piden el botón de agarrar. Los demás solo importan si algún aviso los pide. L1, R1, L2 y R2 se quedan fuera: se mantienen pulsados al jugar y repetirlos tiraría el bloqueo.", pt: "Os minijogos de God of War pedem o botão de agarrar. Os outros só importam se algum aviso pedir. L1, R1, L2 e R2 ficam de fora: são segurados no jogo normal e repeti-los derrubaria a defesa." },
+    qteHoldCircle: { tr: "Yalnızca ○ (yakala)", en: "○ only (grab)", es: "Solo ○ (agarrar)", pt: "Só ○ (agarrar)" },
+    qteHoldFace: { tr: "○ ✕ □ △", en: "○ ✕ □ △", es: "○ ✕ □ △", pt: "○ ✕ □ △" },
+    qteHoldRate: { tr: "Saniyedeki basış", en: "Presses per second", es: "Pulsaciones por segundo", pt: "Apertos por segundo" },
+    qteHoldRateDesc: { tr: "Basılı tutulan tuşun ne hızla basıldığı. Elle hızlı basan biri saniyede altıya yakın yapar.", en: "How fast the held button is pressed. Someone mashing by hand manages about six a second.", es: "A qué velocidad se pulsa el botón mantenido. Machacando a mano se llega a unas seis por segundo.", pt: "A que velocidade o botão segurado é apertado. Apertando à mão dá uns seis por segundo." },
     escSalir: { tr: "ESC tuşu oyunu kapatsın", en: "ESC closes the game", es: "ESC cierra el juego", pt: "ESC fecha o jogo" },
     escSalirDesc: { tr: "Kapalıyken oyundan pencereyi kapatarak çıkılır.", en: "When off, quit by closing the window.", es: "Si está apagado, se sale cerrando la ventana.", pt: "Desligado, saia fechando a janela." },
     tPantalla: { tr: "Tam ekran aç/kapat", en: "Toggle fullscreen", es: "Pantalla completa", pt: "Alternar tela cheia" },
@@ -439,9 +454,34 @@ var tabla = {
     entendido: { tr: "Tamam", en: "OK", es: "Vale", pt: "OK" }
 }
 
+// The languages of the selector (PaginaOtros.qml) and of the first-run detection (Main.qml), in display order.
+var idiomas = [
+    { codigo: "en", nombre: "English" },
+    { codigo: "pt", nombre: "Português (Brasil)" },
+    { codigo: "es", nombre: "Español" },
+    { codigo: "fr", nombre: "Français" },
+    { codigo: "de", nombre: "Deutsch" },
+    { codigo: "it", nombre: "Italiano" },
+    { codigo: "ru", nombre: "Русский" },
+    { codigo: "zh", nombre: "简体中文" },
+    { codigo: "tr", nombre: "Türkçe" }
+]
+
+var archivos = { fr: Fr.textos, de: De.textos, it: It.textos, ru: Ru.textos, zh: Zh.textos }
+
+// The language of a system locale name ("pt_BR", "zh_CN"...), or English.
+function idiomaDeLocale(nombre) {
+    var codigo = String(nombre).substring(0, 2)
+    for (var i = 0; i < idiomas.length; ++i)
+        if (idiomas[i].codigo === codigo)
+            return codigo
+    return "en"
+}
+
 function texto(clave, idioma) {
     var entrada = tabla[clave]
     if (!entrada)
         return clave
-    return entrada[idioma] || entrada.en || clave
+    var archivo = archivos[idioma]
+    return (archivo && archivo[clave]) || entrada[idioma] || entrada.en || clave
 }

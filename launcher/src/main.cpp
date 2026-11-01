@@ -91,9 +91,12 @@ int main(int argc, char *argv[])
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
                      Qt::QueuedConnection);
     // For documentation and tests: TOBIICHI_CAPTURA=<png> saves the window and quits;
-    // TOBIICHI_CAPTURA_PESTANA picks the tab and TOBIICHI_CAPTURA_ALTO the window height.
+    // TOBIICHI_CAPTURA_PESTANA picks the tab and TOBIICHI_CAPTURA_ALTO the window height; TOBIICHI_CAPTURA_IDIOMA shows
+    // another interface language for the capture only (the saved setting is not changed).
     const QByteArray captura = qgetenv("TOBIICHI_CAPTURA");
     engine.rootContext()->setContextProperty(QStringLiteral("pestanaInicial"), qEnvironmentVariableIntValue("TOBIICHI_CAPTURA_PESTANA"));
+    engine.rootContext()->setContextProperty(QStringLiteral("idiomaCaptura"),
+                                             captura.isEmpty() ? QString() : qEnvironmentVariable("TOBIICHI_CAPTURA_IDIOMA"));
     engine.loadFromModule(QStringLiteral("Tobiichi"), QStringLiteral("Main"));
     if (!captura.isEmpty() && qEnvironmentVariableIntValue("TOBIICHI_CAPTURA_ALTO") > 0 && !engine.rootObjects().isEmpty())
         engine.rootObjects().first()->setProperty("height", qEnvironmentVariableIntValue("TOBIICHI_CAPTURA_ALTO"));

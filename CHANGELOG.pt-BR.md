@@ -32,6 +32,11 @@ Mudanças desde a v0.3.1 na branch de desenvolvimento.
   flutuante, como as configurações padrão do PCSX2. Cerca de 12% menos trabalho da VU1 no combate; diferenças pequenas e
   raras em relação ao modo exato (patch 51).
 - **Extração e substituição de texturas**: pacotes de texturas no estilo do PCSX2, com imagens em resolução maior.
+- **Segurar em vez de apertar sem parar** (acessibilidade, desligado por padrão; Launcher → Controles): nos minijogos
+  que pedem apertos repetidos, segurar o botão aperta por você; um toque curto continua sendo um só. Por
+  [ThisIsAkill](https://github.com/ThisIsAkill) (PR #10, patch 53).
+- **Launcher em francês, alemão, italiano, russo e chinês simplificado**, além de inglês, português, espanhol e
+  turco; o idioma do sistema é escolhido na primeira abertura. O menu F1 do jogo fica em inglês nesses idiomas.
 - As versões podem trazer um perfil da otimização guiada por perfil (PGO) treinado exatamente no runtime e nos patches
   delas.
 - `tools/pipeline/patches.ps1`: a pilha de patches do runtime como commits do git, para movê-la para um commit mais novo
