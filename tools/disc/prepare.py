@@ -31,6 +31,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'pipeline'))
 import discfs  # noqa: E402
 import identify  # noqa: E402
+import chd  # noqa: E402
 import profile as profiles  # noqa: E402
 
 SECTOR = discfs.SECTOR
@@ -63,13 +64,17 @@ def extract(src, dst):
         return os.path.abspath(src)
     stamp = f'{os.path.getsize(src)} {int(os.path.getmtime(src))}'
     marker = os.path.join(dst, '.source')
-    if os.path.isfile(marker) and open(marker).read().split('\n')[0] == stamp:
-        say(f'  already extracted: {dst}')
-        return dst
+    if os.path.isfile(marker):
+        with open(marker, encoding='utf-8', errors='replace') as saved:
+            previous = saved.read().splitlines()
+        if previous[:2] == [stamp, os.path.abspath(src)]:
+            say(f'  already extracted: {dst}')
+            return dst
     os.makedirs(dst, exist_ok=True)
     say(f'  extracting {os.path.basename(src)} -> {dst}')
     subprocess.run([sys.executable, '-I', os.path.join(HERE, 'iso_extract.py'), src, dst, '--layout'], check=True)
-    open(marker, 'w').write(stamp + '\n' + os.path.abspath(src) + '\n')
+    with open(marker, 'w', encoding='utf-8') as saved:
+        saved.write(stamp + '\n' + os.path.abspath(src) + '\n')
     return dst
 
 
@@ -217,7 +222,8 @@ def main():
     card = os.path.join(base, 'mc0')
     found = []
     for src in a.discs:
-        info = identify.identify(src)
+        resolved = chd.resolve(src, os.path.join(a.data, 'imports', 'chd'))
+        info = identify.identify(resolved)
         if info.get('game') != a.game:
             say(f'skipped {src}: {"; ".join(info["problems"]) or "another game"}')
             continue
@@ -225,7 +231,7 @@ def main():
             say(f'skipped {src}: {"; ".join(info["problems"])}')
             continue
         say(f'{info["label"]} [{info["kind"]}] <- {src}')
-        folder = extract(src, os.path.join(base, 'discs', info['edition']))
+        folder = extract(resolved, os.path.join(base, 'discs', info['edition']))
         for note in normalise(folder, prof):
             say(f'  {note}')
         junction(os.path.join(folder, 'mc0'), card)
@@ -258,4 +264,5 @@ def main():
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     main()

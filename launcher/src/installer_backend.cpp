@@ -266,21 +266,49 @@ QString InstallerBackend::recompileElf() const
 
 void InstallerBackend::identify(const QStringList &paths)
 {
+    if (running() || identifying() || paths.isEmpty())
+        return;
     auto *p = new QProcess(this);
+    m_identifying = p;
+    emit identifyingChanged();
     p->setProgram(python());
     p->setArguments(QStringList{QStringLiteral("-I"), m_root + QStringLiteral("/tools/disc/identify.py")} + paths);
-    connect(p, &QProcess::finished, this, [this, p](int, QProcess::ExitStatus)
+    connect(p, &QProcess::readyReadStandardError, this, [this, p]()
     {
+        emit logLine(QString::fromUtf8(p->readAllStandardError()).trimmed());
+    });
+    const auto complete = [this, p, paths](bool failed)
+    {
+        if (m_identifying != p) return;
         const QJsonArray list = QJsonDocument::fromJson(p->readAllStandardOutput()).array();
-        emit identified(list.toVariantList());
+        QVariantList results = list.toVariantList();
+        if (failed || results.isEmpty())
+        {
+            results.clear();
+            for (const QString &path : paths)
+                results.append(QVariantMap{{QStringLiteral("path"), path}, {QStringLiteral("compatible"), false},
+                    {QStringLiteral("reason_code"), QStringLiteral("import_failed")},
+                    {QStringLiteral("problems"), QStringList{p->errorString()}}});
+        }
+        m_identifying = nullptr;
+        emit identifyingChanged();
+        emit identified(results);
         p->deleteLater();
+    };
+    connect(p, &QProcess::finished, this, [complete](int code, QProcess::ExitStatus status)
+    {
+        complete(code != 0 || status != QProcess::NormalExit);
+    });
+    connect(p, &QProcess::errorOccurred, this, [complete](QProcess::ProcessError error)
+    {
+        if (error == QProcess::FailedToStart) complete(true);
     });
     p->start();
 }
 
 bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
 {
-    if (m_process)
+    if (m_process || m_identifying)
         return false;
 #ifdef Q_OS_WIN
     const QString script = m_root + QStringLiteral("/tools/pipeline/build.ps1");

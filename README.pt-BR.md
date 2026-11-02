@@ -157,11 +157,16 @@ O caminho fica registrado em `data/build-root.txt`; o launcher o lê automaticam
      *Aplicativos* do Windows para desinstalar.
 2. No launcher → aba **Instalação**:
    1. **Baixar ferramentas** — cópias portáteis são baixadas uma vez, com verificação SHA-256, sem alterar seu PATH;
-   2. **Adicionar ISO…** — escolha uma ou mais ISOs compatíveis; o launcher identifica o jogo e o idioma;
+   2. **Adicionar ISO / CHD…** — escolha uma ou mais imagens compatíveis; o launcher identifica o jogo e o idioma;
    3. **Instalar e compilar** — baixa o runtime, prepara o disco e compila o jogo com o perfil PGO da versão. Deixe
       **Preparar a primeira jogatina (recomendado)** ligado: uma cópia do jogo se joga sozinha por quatro minutos,
       **escondida e sem som**, gravando o código de VU1/IOP que usa, e esse código é compilado no jogo.
 3. Escolha um **perfil gráfico** (página Gráficos), confira os **Controles** se for jogar no teclado e clique em **JOGAR**.
+
+A importação CHD verifica e extrai a imagem para um cache local de ISO, exigindo espaço adicional.
+A imagem Asia fornecida, com executável idêntico ao USA, foi compilada e testada. Os executáveis Japan e Europe
+ainda precisam de adaptação regional do runtime; demos são excluídas. A compatibilidade depende do conteúdo, não do nome.
+Veja [formatos de disco e compatibilidade regional](docs/disc-import.md).
 
 O tempo depende da CPU, da RAM, do disco e dos downloads; as ~6.400 funções recompiladas do jogo são compiladas no seu
 PC. No PC de testes (Xeon E5-2666 v3, 20 threads, 16 GB) a instalação completa levava **cerca de 30 minutos** quando

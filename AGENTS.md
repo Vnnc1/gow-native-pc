@@ -31,6 +31,8 @@ tools/pipeline/compat/     tested Qt source compatibility adapter; modules/qt.ps
 tools/pipeline/recompile.py content-addressed EE generation, transactional publication, ownership-aware sync
 tools/disc/discfs.py        ISO / extracted folder / TOC / ELF helpers (format notes in its docstring)
 tools/disc/identify.py      ISO -> {game, edition, language, compatible, problems} (JSON)
+tools/disc/chd.py           CHDv5 DVD / single MODE1 track -> verified cached ISO; optional tools pinned in
+                            toolchains.json[disc_import], locked atomic publication under data/imports/chd
 tools/disc/prepare.py       ISOs -> data/<id>/discs/*, languages.json, shared mc0 (see its docstring)
 tools/disc/iso_extract.py   ISO9660 extractor (Waffle565), writes .disc_layout/.disc_meta
 tools/disc/vu1_from_disc.py VU1 microcode (VIF MPG uploads) of the ELF and every TOC file -> micro-memory images for the
@@ -61,6 +63,16 @@ dependencies (git checkouts) exceed MAX_PATH under long paths. One folder per co
 cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` when `C:\gow-build` belongs to another
 copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
 The launcher also checks CMakeCache's source root before accepting a runner, so a fresh copy cannot use another copy's build.
+
+## Isolated regional builds
+
+Europe SCES_531.33 and Japan SLPM_670.10 have separate Windows builds validated
+through initial ship gameplay. `games/gow1/regions` stores conditional runtime
+overlays, baseline source hashes, function ranges and recompiler entry hints.
+Never apply these overlays to the USA runtime or put them in the global ordinal
+patch chain. The normal installer still rejects these different-code ELFs.
+Use separate runtime snapshots, build roots, discs, cards and boot profiles.
+See `docs/research/regional-port-2026-11-02.md` for evidence and limitations.
 
 ## Experimental Linux integration
 
@@ -178,6 +190,18 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   edit them, or the patch stops applying.
 
 ## How to change things
+
+- **Disc formats and regions**: CHD conversion is not regional runtime support. `game.toml`'s `regions` table only
+  recognizes foreign executables and excluded demos; never enable them against the USA function map/overrides.
+  The Japan disc's code differs (see `docs/disc-import.md`). `chdman verify` may return zero on a hash mismatch:
+  require raw and overall success confirmations. Keep source images read-only and converted ISOs out of packages.
+  Run `python -I tools/disc/import_test.py --chdman <exe>` for real synthetic CHD round trips, plus
+  `tools/disc/prepare_test.py` and `tools/test/disc-import-ui.py <Qt bin/qml.exe> <compiler bin>` for import changes.
+  The supplied Asia ISO actually boots the byte-identical USA ELF (SCUS_973.99); its own disc layout was prepared
+  and opening gameplay validated. Do not infer region compatibility from filenames or extend this to SCAJ_300.10.
+  Europe SCES_531.33 has experimental generated C++ only, not a validated runtime port. See
+  `docs/research/regional-port-2026-11-02.md`. `recompile.py` checks the profile ELF name and code signature before
+  generation/publication, including when languages.json was edited. Preserve this gate and translation compatibility.
 
 - **Runtime code**: edit in `engine/runtime/`, then turn the change into a new `engine/patches/NN-name.patch` (git diff
   in engine/runtime, with a header saying what/why/measured result). Patches apply in order; a later patch may depend

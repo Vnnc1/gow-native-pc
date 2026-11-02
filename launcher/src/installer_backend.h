@@ -22,6 +22,7 @@ class InstallerBackend : public QObject
     Q_PROPERTY(QString repoRoot READ repoRoot CONSTANT)
     Q_PROPERTY(QString gameId READ gameId CONSTANT)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(bool identifying READ identifying NOTIFY identifyingChanged)
     // the stages of the current (or last) run, as passed to run(): the loading screen plans its overall bar from them
     Q_PROPERTY(QString stages READ stages NOTIFY runningChanged)
 
@@ -34,6 +35,7 @@ public:
     QString repoRoot() const { return m_root; }
     QString gameId() const { return m_game; }
     bool running() const { return m_process != nullptr; }
+    bool identifying() const { return m_identifying != nullptr; }
     QString stages() const { return m_stages; }
 
     // {tools, runtime, game, discs: bool; runtimeDir, runner, dataDir: string}
@@ -84,6 +86,7 @@ signals:
     void finished(bool ok, int exitCode);
     void updateChecked(const QVariantMap &info);
     void runningChanged();
+    void identifyingChanged();
 
 private:
     QString python() const;
@@ -94,6 +97,7 @@ private:
     QString m_root;
     QString m_game = QStringLiteral("gow1");
     QProcess *m_process = nullptr;
+    QProcess *m_identifying = nullptr;
     QByteArray m_pending;
     QString m_stages;
 };

@@ -154,11 +154,16 @@ The base path is recorded in `data/build-root.txt`; the launcher reads it automa
      your user only). It adds Start menu / desktop shortcuts and an entry in Windows' *Apps* to uninstall it.
 2. In the launcher → **Install** tab:
    1. **Download tools** — portable copies are downloaded once, with SHA-256 verification, without changing your PATH;
-   2. **Add ISO…** — select one or more compatible ISOs; the launcher identifies the game and language;
+   2. **Add ISO / CHD…** — select one or more compatible disc images; the launcher identifies the game and language;
    3. **Install and build** — downloads the runtime, prepares the disc and compiles the game with the release's PGO
       profile. Leave **Prepare the first play (recommended)** enabled: a copy of the game plays itself for four
       minutes, **hidden and muted**, recording the VU1/IOP code it uses, and that code is compiled in.
 3. Pick a **graphics profile** (Graphics page), check **Controls** if you play on the keyboard, then **PLAY**.
+
+CHD import verifies and extracts the image into a local ISO cache. It needs additional disk space.
+The supplied Asia image with the USA-identical executable was built and tested. Japan and Europe executables
+still require a regional runtime port; demos are excluded. Compatibility follows the executable, not the filename.
+See [disc formats and regional compatibility](docs/disc-import.md).
 
 Build time depends on the CPU, RAM, storage and downloads; the game's ~6,400 recompiled functions are compiled on your
 PC. On the test PC (Xeon E5-2666 v3, 20 threads, 16 GB) the whole installation took **about 30 minutes** when it still

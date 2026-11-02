@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'pipeline'))
 import discfs  # noqa: E402
+import chd  # noqa: E402
 import profile as profiles  # noqa: E402
 
 
@@ -40,21 +41,45 @@ def guess_language(disc, prof, toc):
     return best
 
 
-def identify(path):
-    disc = discfs.open_disc(path)
-    out = {'path': os.path.abspath(path), 'game': None, 'problems': []}
+def identify(path, cache=None):
+    original = os.path.abspath(path)
+    resolved = chd.resolve(path, cache)
+    disc = discfs.open_disc(resolved)
+    try:
+        result = identify_disc(disc, original)
+        result['format'] = 'chd' if original.lower().endswith('.chd') else 'iso' if os.path.isfile(original) else 'folder'
+        return result
+    finally:
+        if isinstance(disc, discfs.IsoDisc):
+            disc.f.close()
+
+
+def identify_disc(disc, path):
+    out = {'path': os.path.abspath(path), 'game': None, 'compatible': False, 'problems': []}
     if not disc.has('SYSTEM.CNF'):
         out['problems'].append('no SYSTEM.CNF: not a PS2 game disc')
         return out
     elf_name = discfs.boot_elf_name(disc.read('SYSTEM.CNF'))
     out['elf'] = elf_name
-    prof = next((p for p in profiles.all_profiles() if p['executable']['name'].upper() == elf_name.upper()), None)
+    prof = next((p for p in profiles.all_profiles() if p['executable']['name'].upper() == elf_name.upper()
+                 or any(r['elf'].upper() == elf_name.upper() for r in p.get('regions', []))), None)
     if prof is None:
         out['problems'].append(f'unknown game (boot ELF {elf_name}): no profile in games/')
         return out
     out.update(game=prof['id'], title=prof['title'])
     elf = disc.read(elf_name)
     out['elf_crc'] = discfs.pcsx2_crc(elf)
+    region = next((r for r in prof.get('regions', []) if r['elf'].upper() == elf_name.upper()), None)
+    if region:
+        out.update(edition=region['id'], kind='demo' if region.get('demo') else 'original',
+                   region=region['id'], language=region['language'], label=region['label'])
+        out['text_sha1'] = discfs.text_sha1(elf)
+        out['expected_text_sha1'] = prof['executable']['text_sha1']
+        out['reason_code'] = 'demo_excluded' if region.get('demo') else 'region_not_ported'
+        out['problems'].append('Demo editions are excluded.' if region.get('demo') else
+                               'Recognized regional edition; its executable/runtime mapping is not supported yet. '
+                               'Renaming the ISO or executable does not make it compatible.')
+        return out
     try:
         code_ok = bool(prof['executable']['text_sha1']) and discfs.text_sha1(elf) == prof['executable']['text_sha1']
     except Exception:
@@ -90,7 +115,15 @@ def identify(path):
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    json.dump([identify(p) for p in sys.argv[1:]], sys.stdout, ensure_ascii=False, indent=1)
+    results = []
+    for path in sys.argv[1:]:
+        try:
+            results.append(identify(path))
+        except Exception as error:
+            results.append({'path': os.path.abspath(path), 'game': None, 'compatible': False,
+                            'reason_code': 'import_failed', 'problems': [str(error)]})
+    json.dump(results, sys.stdout, ensure_ascii=False, indent=1)
     print()

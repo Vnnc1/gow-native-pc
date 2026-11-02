@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +17,8 @@ import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools/disc'))
+from discfs import text_sha1  # noqa: E402
 
 
 def digest(path):
@@ -70,6 +73,23 @@ def cache_valid(output, key):
             bool(state.get('outputs')) and state['outputs'] == inventory(output))
 
 
+def validate_report(path):
+    # PS2Recomp can return zero with fatal translation events; exit status alone is insufficient.
+    report = Path(path).read_text(encoding='utf-8', errors='replace')
+    checks = {
+        'decode failures': r'decode failures:\s*(\d+)',
+        'unhandled instructions': r'Unhandled instructions:\s*(\d+)',
+        'guest fallback failures': r'Correctness-critical guest fallbacks:\s*\d+,\s*failures:\s*(\d+)',
+        'errors': r'Warnings:\s*\d+,\s*errors:\s*(\d+)',
+    }
+    for label, pattern in checks.items():
+        values = re.findall(pattern, report)
+        if len(values) != 1 or int(values[0]) != 0:
+            raise RuntimeError(f'Recompiler report has invalid {label}; see {path}. Previous generated code was preserved.')
+    if re.search(r'^\s*\[error\]', report, re.MULTILINE):
+        raise RuntimeError(f'Recompiler reported a translation error; see {path}. Previous generated code was preserved.')
+
+
 def publish(pending, output, key):
     pending, output = Path(pending), Path(output)
     if any(p.is_symlink() or p.is_junction() for p in (pending, output)) or pending.resolve().parent != output.resolve().parent:
@@ -111,6 +131,13 @@ def generate(root, game, build, codegen, force=False):
     folder = data / 'recomp'
     folder.mkdir(parents=True, exist_ok=True)
     elf = Path(read_json(data / 'languages.json')['recompile_elf']).resolve()
+    # A hand-edited or stale language manifest must not reuse another region's map.
+    executable = profile.get('executable', {})
+    if executable:
+        expected = executable.get('text_sha1')
+        if not expected or elf.name != executable['name'] or text_sha1(elf.read_bytes()) != expected:
+            raise ValueError('Executable does not match this game profile; a regional function map and runtime port '
+                             'are required before recompilation. Previous generated code was preserved.')
     compiler = Path(build).resolve() / 'ps2xRecomp' / ('ps2_recomp.exe' if os.name == 'nt' else 'ps2_recomp')
     function_map = runtime / profile['runtime']['function_map']
     template_path = runtime / profile['runtime']['recompiler_template']
@@ -140,6 +167,7 @@ def generate(root, game, build, codegen, force=False):
         with (logs / 'recomp.log').open('w', encoding='utf-8') as log:
             subprocess.run([str(compiler), str(config_path)], env=os.environ | environment, cwd=folder,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
+        validate_report(logs / 'recomp.log')
         publish(pending, output, key)
     finally:
         if pending.exists() and pending.resolve().parent == folder.resolve() and not pending.is_junction() and not pending.is_symlink():

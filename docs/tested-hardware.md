@@ -1,5 +1,54 @@
 # Tested hardware and results
 
+## Supplied Asia disc and Europe code generation (2026-11-02)
+
+The supplied `God of War (Asia).iso` boots `SCUS_973.99` and has the same complete
+ELF SHA-256 as the USA disc: `ec9397d252f14d4412daffaad6be1f1931769e56222b5dbb9b39a947fc8ad71c`.
+Disc SHA-256 and file layout differ, so the actual Asia disc was extracted through
+`discs,recomp,sync,build`, not substituted with USA media. The installed manifest
+now uses that prepared disc. Generation processed 6,414 functions (6,339 translated,
+75 stubs), with zero decoder failures or unhandled instructions; native build passed.
+
+Three 100-second private-card smoke runs reached `state=11 levelReady=1` and passed
+all collector checks: frames, audio/IOP activity, native/JIT metrics, 2,000 VU1 parity
+checks without mismatches, marker and graceful stop. The first desktop capture
+attempt timed out; the final run used `session-game-smoke.py --visible --capture`
+and its 80-second GS image was inspected: Kratos, enemies, ship deck and HUD rendered.
+Audio processing was enabled/observed in metrics, not independently listened to.
+This validates opening gameplay only, not the whole game or a new performance tier.
+Captures stay in ignored data and are excluded from report export.
+
+Europe `SCES_531.33` / `FB0E6D72` was inspected and translated in isolated data.
+Automatic discovery initially decoded data as instructions (1,341 reported errors
+although exit code was zero). A candidate function map bounded to `.text` generated
+6,410 functions with zero unhandled instructions, but lacks verified SDK bindings,
+overrides and globals. It was not linked or run and remains blocked in the launcher.
+The production recompiler now rejects a foreign ELF/name or code signature before
+replacing generated output, including stale/hand-edited language manifests. Sixteen
+pipeline regressions passed; Linux orchestration passed six tests with its POSIX-only
+case skipped on Windows. Details: [regional investigation](research/regional-port-2026-11-02.md).
+
+## CHD import and regional identification (2026-11-02; Windows host)
+
+Fourteen import tests passed, including real CHDs created with pinned MAME 0.289
+from a synthetic ISO: DVD and legacy MODE1/2048 round trips, cache repair/reuse,
+corruption, interrupted extraction, concurrent locks, disk space, Unicode paths,
+source changes and mixed-track rejection. A clean Windows tool bootstrap and
+offline reuse were also exercised. `chdman verify` returning zero on a hash mismatch
+was reproduced; the importer now requires both SHA-1 success confirmations.
+
+The actual Install QML passed retry replacement, region/demo gates, original CHD
+path forwarding, logs and import-busy state. Pipeline tests passed (14 Python,
+7 Linux orchestration with the POSIX-only case skipped on Windows), as did disc
+normalization and launcher languages. The launcher built against the existing
+llvm-mingw Qt SDK; its deployed Portuguese Install page was visually inspected.
+
+The actual Japan ISO was identified as SLPM_670.10 / CA052D22. Its code differs
+from USA; a scratch preparation correctly rejected it before publication. Japan,
+Asia and Europe are recognized but are NOT enabled for gameplay. No real game CHD,
+Asia/Europe ISO, Linux execution or regional gameplay was tested. Analysis and
+remaining requirements: [disc import](disc-import.md).
+
 ## Accessibility conflict review (2026-11-02; synthetic validation)
 
 Patch 58 protects all simultaneous button combinations from repetition, including
@@ -601,6 +650,17 @@ the ship deck), exclusive full screen 1920×1080 with the FPS counter, 3 pairs: 
 window 42.9 vs 35.9; one of the three pairs was reversed (47.5 vs 49.1), route variance. Four in-game window captures in
 heavy combat were correct. Batching the worker's GS-stage pushes (64 KiB) measured slower in 3/3 full-screen pairs
 (53.8 vs 57.1 mean) and was dropped. Stable 60 guest FPS is still not reached in combat.
+
+## Regional gameplay (2026-11-02, Xeon E5-2666 v3 / RX 580 2048SP, 16 GB)
+
+Separate Europe SCES_531.33 and Japan SLPM_670.10 Release builds passed the
+11-check session smoke with private cards: 100 seconds with fast boot and
+150 seconds with normal startup/FMVs for each region. GS captures confirmed
+ship gameplay. VU1 verification reported 2000 checks with zero mismatches;
+audio and IOP metrics were present. Japan requires Circle at its menus.
+Original Asia/USA runner and installation metadata hashes remained unchanged.
+These are functional checks, not a 60 FPS result or whole-campaign validation.
+See [regional evidence and limitations](research/regional-port-2026-11-02.md).
 
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 

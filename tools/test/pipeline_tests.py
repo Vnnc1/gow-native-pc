@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('recompile', ROOT / 'tools/pipeline/recompile.py')
 pipeline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pipeline)
+from import_test import elf as synthetic_elf  # noqa: E402 (disc fixture, no game data)
 
 
 class GenerationTests(unittest.TestCase):
@@ -24,6 +25,9 @@ class GenerationTests(unittest.TestCase):
         self.output = self.root / 'data/demo/recomp/out'
         self.calls = 0
         self.code = 'int function() { return 1; }\n'
+        self.report = ('Functions processed: 1, recompiled: 1, stubs: 0, skipped: 0, decode failures: 0\n'
+                       'Unhandled instructions: 0\n'
+                       'Correctness-critical guest fallbacks: 0, failures: 0\nWarnings: 2, errors: 0\n')
         files = {
             'games/demo/game.toml': '[runtime]\nfunction_map="map.csv"\nrecompiler_template="template.toml"\noverrides=[]\n',
             'engine/runtime/map.csv': 'map',
@@ -46,6 +50,7 @@ class GenerationTests(unittest.TestCase):
         output = Path(Path(args[1]).read_text(encoding='utf-8'))
         (output / 'register_functions.cpp').write_text(self.code, encoding='utf-8')
         (output / 'ps2_recompiled_functions.h').write_text('// declarations\n', encoding='utf-8')
+        kwargs['stdout'].write(self.report)
 
     def generate(self, codegen='locals', force=False):
         return pipeline.generate(self.root, 'demo', self.build, codegen, force)
@@ -56,6 +61,36 @@ class GenerationTests(unittest.TestCase):
         self.assertTrue(self.generate()['cacheHit'])
         self.assertEqual(self.calls, 1)
         self.assertEqual((self.output / 'register_functions.cpp').stat().st_mtime_ns, stamp)
+
+    def test_foreign_region_manifest_preserves_previous_generation(self):
+        self.generate()
+        original = (self.output / 'register_functions.cpp').read_bytes()
+        profile = self.root / 'games/demo/game.toml'
+        profile.write_text(profile.read_text() + '\n[executable]\nname="EXPECTED.ELF"\ntext_sha1="abc"\n')
+        with self.assertRaisesRegex(ValueError, 'regional function map'):
+            self.generate(force=True)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual((self.output / 'register_functions.cpp').read_bytes(), original)
+
+    def test_same_name_requires_matching_code_but_allows_translation_data(self):
+        image = bytearray(synthetic_elf())
+        elf = self.root / 'game.elf'
+        elf.write_bytes(image)
+        profile = self.root / 'games/demo/game.toml'
+        profile.write_text(profile.read_text() + '\n[executable]\nname="game.elf"\ntext_sha1="' +
+                           pipeline.text_sha1(image) + '"\n')
+        self.generate()
+        image[-1] ^= 1  # Data-only translations retain the executable code.
+        elf.write_bytes(image)
+        self.generate()
+        self.assertEqual(self.calls, 2)
+        original = (self.output / 'register_functions.cpp').read_bytes()
+        image[320] ^= 1  # Renaming another region's code must not bypass the gate.
+        elf.write_bytes(image)
+        with self.assertRaisesRegex(ValueError, 'regional function map'):
+            self.generate()
+        self.assertEqual(self.calls, 2)
+        self.assertEqual((self.output / 'register_functions.cpp').read_bytes(), original)
 
     def test_input_content_invalidates_even_with_same_mtime(self):
         self.generate()
@@ -99,10 +134,26 @@ class GenerationTests(unittest.TestCase):
     def test_incomplete_output_is_not_published(self):
         self.generate()
         before = pipeline.inventory(self.output)
-        self.run.side_effect = lambda *a, **k: None
+        self.run.side_effect = lambda *a, **k: k['stdout'].write(self.report)
         with self.assertRaisesRegex(RuntimeError, 'incomplete'):
             self.generate(force=True)
         self.assertEqual(pipeline.inventory(self.output), before)
+
+    def test_zero_exit_with_translation_errors_preserves_previous_output(self):
+        self.generate()
+        before = pipeline.inventory(self.output)
+        valid = self.report
+        for bad in (valid.replace('decode failures: 0', 'decode failures: 1'),
+                    valid.replace('Unhandled instructions: 0', 'Unhandled instructions: 1569'),
+                    valid.replace('fallbacks: 0, failures: 0', 'fallbacks: 0, failures: 1'),
+                    valid.replace('errors: 0', 'errors: 1'),
+                    valid + '  [error] unhandled-instruction\n', '', valid + valid):
+            with self.subTest(report=bad):
+                self.report = bad
+                with self.assertRaisesRegex(RuntimeError, 'Previous generated code was preserved'):
+                    self.generate(force=True)
+                self.assertEqual(pipeline.inventory(self.output), before)
+                self.assertFalse(list(self.output.parent.glob('out.pending-*')))
 
     def test_sync_preserves_mtime_and_removes_owned_stale_files(self):
         self.generate()

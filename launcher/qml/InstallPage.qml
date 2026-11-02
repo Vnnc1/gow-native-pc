@@ -80,7 +80,7 @@ ScrollView {
     }
     // the game is built for x86-64-v2 (SSE4.2): on an older CPU it would not start after the whole install
     readonly property bool cpuOk: installer.cpuSupported()
-    readonly property bool canInstall: cpuOk && !installer.running && (compatibleIsos().length > 0 || languages.length > 0)
+    readonly property bool canInstall: cpuOk && !installer.running && !installer.identifying && (compatibleIsos().length > 0 || languages.length > 0)
 
     Connections {
         target: installer
@@ -88,7 +88,7 @@ ScrollView {
             var merged = root.discs.slice()
             for (var i = 0; i < list.length; ++i) {
                 var dup = false
-                for (var j = 0; j < merged.length; ++j) if (merged[j].path === list[i].path) dup = true
+                for (var j = 0; j < merged.length; ++j) if (merged[j].path === list[i].path) { merged[j] = list[i]; dup = true }
                 if (!dup) merged.push(list[i])
             }
             root.discs = merged
@@ -118,7 +118,7 @@ ScrollView {
         id: isoDialog
         title: Tema.t("instPickIso")
         fileMode: FileDialog.OpenFiles
-        nameFilters: ["ISO (*.iso *.ISO)", "* (*)"]
+        nameFilters: ["ISO / CHD (*.iso *.ISO *.chd *.CHD)", "* (*)"]
         onAccepted: {
             var paths = []
             for (var i = 0; i < selectedFiles.length; ++i) paths.push(lanzador.rutaDesdeUrl(selectedFiles[i]))
@@ -259,10 +259,12 @@ ScrollView {
                         font.pixelSize: 14
                     }
                     Text {
-                        text: modelData.path + (modelData.problems && modelData.problems.length ? " — " + modelData.problems.join("; ") : "")
+                        text: modelData.path + (modelData.reason_code === "region_not_ported" ? " — " + Tema.t("instRegionUnsupported")
+                            : modelData.reason_code === "demo_excluded" ? " — " + Tema.t("instDemoExcluded")
+                            : modelData.problems && modelData.problems.length ? " — " + modelData.problems.join("; ") : "")
                         color: Tema.textoTenue
                         font.pixelSize: 12
-                        elide: Text.ElideMiddle
+                        wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
                     }
                 }
@@ -284,13 +286,20 @@ ScrollView {
             }
             RowLayout {
                 spacing: 10
-                BotonSecundario { text: Tema.t("instAddIso"); enabled: !installer.running; onClicked: isoDialog.open() }
+                BotonSecundario { text: Tema.t("instAddIso"); enabled: !installer.running && !installer.identifying; onClicked: isoDialog.open() }
                 BotonSecundario {
                     text: Tema.t("instClearIso")
                     visible: root.discs.length > 0
-                    enabled: !installer.running
+                    enabled: !installer.running && !installer.identifying
                     onClicked: root.discs = []
                 }
+            }
+            Text {
+                visible: installer.identifying
+                text: Tema.t("instReadingDisc")
+                color: Tema.aviso
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
             }
         }
 
@@ -335,13 +344,13 @@ ScrollView {
 
         // ---------------------------------------------------------------- progress
         ColumnLayout {
-            visible: installer.running || root.step.length > 0
+            visible: installer.running || installer.identifying || root.step.length > 0 || root.log.length > 0
             Layout.fillWidth: true
             spacing: 6
             Text {
                 Layout.fillWidth: true
                 elide: Text.ElideRight
-                text: (installer.running ? root.stepLabel(root.step) : root.step)
+                text: (installer.identifying ? Tema.t("instReadingDisc") : installer.running ? root.stepLabel(root.step) : root.step)
                       + (installer.running && root.total > 0 ? "  —  " + Math.round(100 * root.done / root.total) + "%" : "")
                 color: root.lastOk ? Tema.texto : Tema.mal
                 font.pixelSize: 15
@@ -376,7 +385,7 @@ ScrollView {
                 // a step without a count yet: a block sweeping back and forth
                 Rectangle {
                     id: varredura
-                    visible: installer.running && root.total === 0
+                    visible: installer.identifying || (installer.running && root.total === 0)
                     width: trilho.width * 0.25
                     height: parent.height
                     radius: 4

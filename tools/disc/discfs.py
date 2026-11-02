@@ -70,7 +70,11 @@ class IsoDisc:
     def __init__(self, path):
         self.path = path
         self.f = open(path, 'rb')
-        files, self.layer1 = iso_extract.scan(self.f)
+        try:
+            files, self.layer1 = iso_extract.scan(self.f)
+        except Exception:
+            self.f.close()
+            raise
         self.files = {name: (lba, size) for name, lba, size in files}
 
     def has(self, name):
@@ -98,7 +102,9 @@ class FolderDisc:
     def __init__(self, path):
         self.path = path
         self.head, self.layout = {}, []
-        for line in open(os.path.join(path, '.disc_layout')):
+        with open(os.path.join(path, '.disc_layout')) as layout:
+            lines = layout.readlines()
+        for line in lines:
             f = line.split()
             if f and f[0] == 'file':
                 self.layout.append((int(f[1]), int(f[2]), ' '.join(f[3:])))

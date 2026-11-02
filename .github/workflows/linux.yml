@@ -12,7 +12,7 @@ jobs:
       - name: Native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libasound2-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libasound2-dev mame-tools
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
@@ -23,5 +23,6 @@ jobs:
           python3 -I tools/test/pipeline_tests.py
           python3 -I tools/test/linux_pipeline_tests.py
           python3 -I tools/test/launcher-languages.py
+          python3 -I tools/disc/import_test.py --chdman /usr/bin/chdman
       - name: Launcher and runtime library (no game data)
         run: bash build.sh --stages tools,fetch,launcher,runtime-check --jobs 2

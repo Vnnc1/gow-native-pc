@@ -3,6 +3,7 @@ if ($Stages -contains 'verify') {
     Step 'verify runtime and code generation'
     Use-Clang
     Native $python @('-I', (Join-Path $root 'tools/test/pipeline_tests.py')) 'pipeline regression tests'
+    Native $python @('-I', (Join-Path $root 'tools/disc/import_test.py')) 'disc import regression tests'
     Native $python @('-I', (Join-Path $root 'tools/test/worker-ab-tests.py')) 'worker comparison methodology tests'
     Native (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
         (Join-Path $root 'tools/test/pipeline-tests.ps1')) 'pipeline configure and process tests'

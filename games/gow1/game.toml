@@ -55,6 +55,55 @@ language = "en"
 label = "English (USA)"
 elf_crc = "D6385328"
 
+# Recognition is separate from runtime support. These executables must NOT use the
+# USA function map/overrides. Serials: PCSX2 bin/resources/GameIndex.yaml.
+# Japan identity measured from the user's disc; no disc bytes are stored here.
+[[regions]]
+id = "japan"
+elf = "SLPM_670.10"
+language = "ja"
+label = "Japanese (Japan)"
+known_crc = "CA052D22"
+known_text_sha1 = "8ed48ca88c73e7e340be3a8e7ff16b07825cb96c"
+experimental_frame_pc = "0x183BB8"
+experimental_menu_confirm = "circulo"
+
+[[regions]]
+id = "asia"
+elf = "SCAJ_300.10"
+language = "unknown"
+label = "God of War (Asia)"
+
+[[regions]]
+id = "europe"
+elf = "SCES_531.33"
+known_crc = "FB0E6D72"
+known_text_sha1 = "706831f2064ca73bf83d3cff4e02764fa26bfff1"
+experimental_frame_pc = "0x1838A8"
+experimental_menu_confirm = "x"
+language = "multi"
+label = "God of War (Europe / Australia)"
+
+[[regions]]
+id = "europe-alt"
+elf = "SCES_515.33"
+language = "unknown"
+label = "God of War (Europe, alternate serial)"
+
+[[regions]]
+id = "demo-usa"
+elf = "SCUS_974.67"
+language = "en"
+label = "God of War Demo (USA)"
+demo = true
+
+[[regions]]
+id = "demo-europe"
+elf = "SCED_534.31"
+language = "multi"
+label = "God of War Demo (Europe / Australia)"
+demo = true
+
 # menu sentences that identify a language in R_PERM.WAD / R_SHELL.WAD (text_files) of a translated disc (not single
 # words: names such as "Difficulty" are also internal identifiers, left untranslated)
 [language_hints]

@@ -17,13 +17,32 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--game", default="gow1")
 parser.add_argument("--seconds", type=int, default=100)
 parser.add_argument("--visible", action="store_true", help="Show gameplay with audio enabled")
+parser.add_argument("--capture", action="store_true", help="Keep local GS captures at 10/80 seconds (never exported)")
 parser.add_argument("--detailed", action="store_true", help="Enable intrusive per-call timing; not an FPS benchmark")
+parser.add_argument("--runner", type=Path, help="Isolated regional runner; requires --elf and --frame-pc")
+parser.add_argument("--elf", type=Path, help="Prepared regional ELF; never changes the installed language manifest")
+parser.add_argument("--frame-pc", help="Validated guest frame probe for the explicit regional ELF")
+parser.add_argument("--normal-boot", action="store_true", help="Exercise the original startup and FMV path")
+parser.add_argument("--pad-script", help="Override scripted input for regional menu conventions")
 args = parser.parse_args()
+if any((args.runner, args.elf, args.frame_pc)) and not all((args.runner, args.elf, args.frame_pc)):
+    parser.error("Regional tests require --runner, --elf and --frame-pc together")
+if args.frame_pc:
+    try:
+        frame_pc = int(args.frame_pc, 0)
+        if not 0x100000 <= frame_pc < 0x2000000 or frame_pc % 4:
+            raise ValueError()
+    except ValueError:
+        parser.error("--frame-pc must be an aligned guest code address")
 root = Path(__file__).resolve().parents[2]
 profile = json.loads(subprocess.check_output([sys.executable, "-I", str(root / "tools/pipeline/profile.py"), args.game]))
 data = root / "data" / args.game
-runner = Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe"
-elf = json.loads((data / "languages.json").read_text(encoding="utf-8"))["recompile_elf"]
+runner = (args.runner.resolve() if args.runner else
+          Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe")
+elf = (str(args.elf.resolve()) if args.elf else
+       json.loads((data / "languages.json").read_text(encoding="utf-8"))["recompile_elf"])
+if not runner.is_file() or not Path(elf).is_file():
+    parser.error("Runner and prepared ELF must exist")
 helper = root / "launcher/build-clang/deploy/gow-session.exe"
 output = data / "logs" / time.strftime("session-game-%Y%m%d-%H%M%S")
 output.mkdir()
@@ -31,17 +50,23 @@ session = output / "session"
 session.mkdir()
 (session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
     "test": "scripted input, private card, audio enabled", "visible": args.visible,
+    "normal_boot": args.normal_boot, "elf_name": Path(elf).name,
     "diagnostics": "detailed" if args.detailed else "frames", "seconds": args.seconds}}))
 env = {k: v for k, v in os.environ.items() if not k.startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
 env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HIDDEN="0" if args.visible else "1",
-           GOW_PAD_GUION=profile["optimize"]["pad_script"], GOW_PAD_TEST_NO_CAPTURE="1",
+           GOW_PAD_GUION=args.pad_script if args.pad_script is not None else profile["optimize"]["pad_script"],
+           GOW_PAD_TEST_NO_CAPTURE="0" if args.capture else "1",
+           GOW_PAD_CAPTURAS="10,80" if args.capture else "",
            GOW_MC0=str(output / "card.ps2"), GOW_VU1N_X64="1", GOW_VU1N_VERIFY="2000",
-           GOW_PERF_DIAG="1" if args.detailed else "frames", GOW_FRAME_DIAG="1", GOW_PERF_FRAME_PC=profile["diagnostics"]["frame_pc"],
+           GOW_PERF_DIAG="1" if args.detailed else "frames", GOW_FRAME_DIAG="1", GOW_PERF_FRAME_PC=args.frame_pc or profile["diagnostics"]["frame_pc"],
            GOW_AUDIO_STATS="1", GOW_IOP_DRIFT="1", GOW_VU1N_DIAG="1",
            GOW_VU1_SIN_COMPILAR="1", GOW_VU1_CAPTURE_MISSES="0", PS2X_GS_HW="1", PS2X_GS_WORKER="1",
            GOW_GS_FINISH_ASINCRONO="1", PS2X_GS_HW_SCALE="1", PS2X_GS_ESCALA="1", PS2X_GS_ESCALA_DINAMICA="0",
            TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720")
-process = subprocess.Popen([str(helper), str(session), str(runner), elf, str(root)], cwd=output, env=env)
+if args.normal_boot:
+    env.pop("GOW_FAST_BOOT")
+    env.pop("GOW_SKIP_FMV")
+process = subprocess.Popen([str(helper), str(session), str(runner), elf, str(output if args.capture else root)], cwd=output, env=env)
 try:
     for elapsed in range(args.seconds):
         if process.poll() is not None:

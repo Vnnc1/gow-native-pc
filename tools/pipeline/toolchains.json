@@ -75,5 +75,19 @@
         "sha": "1f03a2b8f5588b4face7da87926e9b2c1372b3a32157c52df07a75067a9db1af"
       }
     ]
+  },
+  "disc_import": {
+    "chdman": {
+      "url": "https://github.com/mamedev/mame/releases/download/mame0289/mame0289b_x64.exe",
+      "sha256": "a1aa7912168c9d1b05e611906bc21b8b9be3935822aead36d12a1da363150b7d",
+      "dir": "chdman-0.289",
+      "exe": "chdman.exe",
+      "exe_sha256": "8a74468e3b0879698835b57c3b58e88e5a51e4de73bee6ef755c28530b5b040f"
+    },
+    "extractor": {
+      "url": "https://www.7-zip.org/a/7zr.exe",
+      "sha256": "256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282",
+      "exe": "7zr.exe"
+    }
   }
 }
