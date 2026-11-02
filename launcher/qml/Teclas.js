@@ -87,7 +87,11 @@ function leer(texto) {
     // Migrate the old shared Ctrl default: R2 must remain held while moving/interacting.
     if (base.ld_mod.length === 1 && normal(base.ld_mod[0]) === 341 &&
             base.r2.some(function (code) { return normal(code) === 341 }))
-        base.ld_mod = [342]
+        base.ld_mod = conflictos(base, "ld_mod", 342).length === 0 ? [342] : []
+    // A newly introduced gesture must not steal a custom gameplay binding.
+    if (typeof guardado === "object" && guardado !== null && !Array.isArray(guardado.qte_stick) &&
+            conflictos(base, "qte_stick", 71).length > 0)
+        base.qte_stick = []
     return base
 }
 

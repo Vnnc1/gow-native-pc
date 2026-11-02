@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
     env("GOW_QTE_STICK", smoke ? "rotate" : mode);
     env("GOW_PAD_TEST", smoke ? "1" : "0");
     env("TOBIICHI_TECLAS", "li_arriba=87;li_abajo=83;li_izq=65;li_der=68;ld_izq=74;ld_mod=341,342;cross=32;qte_stick=71,1003;l1=81;r1=69;l2=90;r2=345;circle=70");
-    env("GOW_QTE_HOLD", "l1,l2,r1,r2");
+    env("GOW_QTE_HOLD", "circle,cross,square,triangle,l1,l2,r1,r2");
     env("GOW_QTE_HOLD_HZ", "10");
     keys[KEY_D] = keys[KEY_J] = true;
     uint8_t sticks[4]{};
@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
         const uint16_t buttons = state[2] | (state[3] << 8);
         preserved &= !(buttons & (0x0200 | 0x4000));
     }
-    check(preserved, "Ctrl + Space keeps both R2 and Cross held even with shoulder repeat enabled");
+    check(preserved, "Ctrl + Space keeps both R2 and Cross held even with all face and shoulder repeats enabled");
     keys[KEY_SPACE] = false;
     clockTime += 1.0;
     backend.readState(0, 0, state, sizeof(state));

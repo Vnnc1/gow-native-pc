@@ -10,7 +10,7 @@ horizontal gesture, or **Circle** for a full rotation. While the game requests
 that gesture, hold **G**, then release it as soon as the prompt ends. Remap
 **Hold for QTE stick gesture** in the keyboard/mouse bindings to another key or
 mouse button if preferred. Existing saved keyboard layouts receive the new G
-binding; the Controls page's binding editor marks conflicts with other actions.
+binding if G is free; otherwise assign a free key manually in Controls. The Controls page's binding editor marks conflicts with other actions.
 
 The gesture replaces the left stick only while held. Releasing it restores
 normal movement immediately. The right stick retains its usual mapping. Focus
@@ -34,8 +34,9 @@ all selected buttons together. Short presses remain single presses.
 
 Leave shoulder switches off unless a prompt needs repeated presses: repetition
 can interrupt blocking, charging, opening a chest or another held interaction.
-Shoulder repetition pauses while moving either stick or pressing multiple
-buttons, so R2 + movement and R2 + Cross stay held. Releasing the other action
+All repetition pauses while pressing multiple buttons (patch 58), including
+face buttons, so R2 + Cross stays held even with the full face group enabled.
+Shoulder repetition also pauses while moving either stick. Releasing the other action
 restarts the repetition delay. The rate selector applies to all selected buttons.
 
 ## Keyboard combinations and crates
@@ -44,7 +45,8 @@ The default **Ctrl** binding is R2. **Ctrl + WASD** keeps R2 held and moves the
 left stick; **Ctrl + Space** keeps R2 and Cross pressed together. **Alt + WASD**
 is now the dedicated evade combination. Existing layouts that used the old
 shared Ctrl default migrate the evade modifier to Alt; other custom evade
-bindings remain unchanged. Controls highlights any newly conflicting binding.
+bindings remain unchanged. If Alt is already used, the migrated evade modifier
+is left unassigned; choose a free key in Controls. Controls highlights conflicts.
 
 Patch 57 gives gameplay buttons priority over a shared evade modifier, including
 left/right Ctrl aliases. The input layer no longer drops the held button or

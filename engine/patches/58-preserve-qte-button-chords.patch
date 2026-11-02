@@ -1,0 +1,22 @@
+Preserve all held buttons during multi-button interactions.
+Face-button repetition could still release Cross during R2 + Cross.
+Validated by the production input test with all face and shoulder repeats enabled.
+
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+@@ -65,11 +65,13 @@
+         double delay = 0.25;    // a button held this long starts the assist
+     };
+ 
+-    // Shoulder actions must stay held during movement or multi-button interactions.
++    // Multi-button interactions stay held; movement also protects shoulder actions.
+     inline Config forInput(Config config, uint16_t buttons, bool moving)
+     {
+         const uint16_t pressed = static_cast<uint16_t>(~buttons);
+-        if (moving || (pressed && (pressed & (pressed - 1u))))
++        if (pressed && (pressed & (pressed - 1u)))
++            config.buttons = 0;
++        else if (moving)
+             config.buttons &= static_cast<uint16_t>(~0x0f00u);
+         return config;
+     }

@@ -2,6 +2,16 @@
 
 This repository is maintained mainly by AI agents. Read this first; keep it current when you change the architecture.
 
+## Ponytail workflow
+
+Use the `ponytail` skill in its default `full` mode for coding tasks, as requested by the maintainer.
+Source: https://github.com/DietrichGebert/ponytail (skill: `skills/ponytail/SKILL.md`).
+If the skill is unavailable, follow these essentials: trace the affected code and callers, reuse existing
+helpers, and make the smallest complete change that solves the request. Avoid speculative abstractions
+and dependencies. Keep searches and output focused on the affected paths. Preserve all contracts and
+required checks below; token savings never justify skipping validation, accessibility or error handling.
+Report actual checks and remaining limitations; do not claim token savings without measurements.
+
 ## What the system is
 
 A PS2 game (God of War, `games/gow1`) is statically recompiled to C++ by **PS2Recomp** and run on a native runtime.
@@ -117,7 +127,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   Patch 57 preserves held button chords: a key shared with an evade modifier belongs to its gameplay button first.
   Default keyboard evade is Alt + WASD; Ctrl stays R2. Teclas.js migrates the former shared Ctrl default and marks
   modifier/button overlaps as conflicts. Shoulder auto-repeat pauses during stick movement or multi-button chords,
-  restarting its delay afterwards. Production-pad tests cover Ctrl + WASD, Ctrl + Space and both Ctrl aliases.
+  restarting its delay afterwards. Patch 58 also pauses face-button repetition during chords, protecting R2 + Cross
+  with the full face group enabled. Migration leaves new Alt/G shortcuts unassigned if those keys are occupied.
+  Production-pad tests cover Ctrl + WASD, Ctrl + Space and both Ctrl aliases.
   GOW_VU1N_X64=1 (in-process x86-64 VU1 JIT, engine/patches/18, experimental: the Performance tab's "Compile new areas
   while playing"; docs/research/vu1-x64-jit.md). GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (patch 17's background
   clang compiler, by hand: data/<id>/vu1_jit.json, which clang builds write, names the values).

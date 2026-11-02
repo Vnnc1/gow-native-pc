@@ -124,6 +124,24 @@ int main()
         check(run.presses >= 15, "20 presses/s gives " + std::to_string(run.presses) + " presses in 2 s (expected >= 15)");
     }
 
+    // Protect every face/shoulder pair, including a face button repeated with R2.
+    {
+        gow_qte::Config all = config;
+        all.buttons = 0xff00u;
+        bool preserved = true;
+        for (int first = 8; first < 16; ++first)
+            for (int second = first + 1; second < 16; ++second)
+            {
+                const uint16_t buttons = static_cast<uint16_t>(~((1u << first) | (1u << second)));
+                preserved &= gow_qte::forInput(all, buttons, false).buttons == 0;
+            }
+        check(preserved, "all face/shoulder combinations disable repetition");
+        check(gow_qte::forInput(all, static_cast<uint16_t>(~kCircle), false).buttons == all.buttons,
+              "a face button held alone still repeats");
+        check(gow_qte::forInput(all, static_cast<uint16_t>(~kCircle), true).buttons == 0xf000u,
+              "movement protects shoulders without disabling single face-button QTEs");
+    }
+
     // Shoulder options use the same active-low bits as the game, independently.
     for (uint16_t shoulder : {0x0100u, 0x0200u, 0x0400u, 0x0800u})
     {

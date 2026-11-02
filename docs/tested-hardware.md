@@ -1,5 +1,18 @@
 # Tested hardware and results
 
+## Accessibility conflict review (2026-11-02; synthetic validation)
+
+Patch 58 protects all simultaneous button combinations from repetition, including
+R2 + Cross when face-button repetition is enabled. The production-input regression
+passes with all face and shoulder buttons selected; the isolated suite checks all
+28 face/shoulder pairs and preserves single-button repetition. All 10 CTest tests
+passed. The real QML test also confirms conflict-free defaults and that legacy
+migration does not assign Alt/G over existing custom bindings. Occupied new
+shortcuts remain unassigned for the user to configure in Controls.
+
+No crate-scene completion, Medusa escape, controller hardware or Linux gameplay
+was tested in this review. These results validate input behavior only.
+
 ## Accessibility and held keyboard combinations (2026-11-02; synthetic validation)
 
 Patches 56–57 add explicit keyboard/mouse left-stick gestures and preserve held

@@ -68,6 +68,17 @@ ApplicationWindow {
                 check(custom.ld_mod[0] === 88, "custom dodge key must stay unchanged")
                 check(Keys.conflictos({ld_mod:[341],r2:[345]}, "ld_mod", 341).indexOf("r2") >= 0,
                       "shared modifier conflicts must be visible")
+                var occupied = Keys.leer('{"ld_mod":[341],"r2":[341],"circle":[346],"l1":[71]}')
+                check(occupied.ld_mod.length === 0 && occupied.qte_stick.length === 0,
+                      "migration must not introduce Alt/G conflicts")
+                check(occupied.circle[0] === 346 && occupied.l1[0] === 71,
+                      "migration must preserve existing gameplay keys")
+                var explicitGesture = Keys.leer('{"qte_stick":[71],"l1":[71]}')
+                check(explicitGesture.qte_stick[0] === 71, "explicit gesture bindings must remain editable")
+                var defaults = Keys.predeterminado()
+                for (var action in defaults)
+                    for (var code of defaults[action])
+                        check(Keys.conflictos(defaults, action, code).length === 0, "conflicting default: " + action)
                 var texture = find(accessibility, o => o.titulo === UI.Tema.t("pacoteTexturas"))
                 check(texture !== null, "texture packs missing from Accessibility")
                 var textureToggle = find(texture, o => o.toggled !== undefined && o.checkable === true)
