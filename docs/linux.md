@@ -15,6 +15,17 @@ The archive uses **system libraries**, not a bundled runtime: consult
 `linux-package.json` for the exact build OS and library dependencies. An Ubuntu
 26.04 binary must not be assumed compatible with SteamOS or older Ubuntu releases.
 
+The packager's `--installer <file.run>` option also creates a self-extracting
+installer containing the same verified archive. Run
+`bash gow-native-pc-linux-x86_64-ubuntu26.04-experimental.run` to install under
+`~/.local/share/gow-native-pc-0.5.0`, or supply a new destination directory as its
+only argument. It checks the payload before extracting and refuses existing
+destinations to preserve games and saves. Open `start-linux.sh` in the installed
+folder, then import your own compatible ISO through the launcher. The installer
+does not install system dependencies or require root. This is a terminal installer,
+not a graphical setup or a universal SteamOS package. Validate a generated installer
+with `python3 -I tools/test/linux-installer.py <file.run>`.
+
 Extract the archive into a writable Linux filesystem and run `bash start-linux.sh`.
 Install the matching Qt Quick/QML and SDL2 packages first. To rebuild for another
 distribution with the development dependencies below, run `bash setup-linux.sh`,

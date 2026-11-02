@@ -1,7 +1,7 @@
 # gow-native-pc installer (setup.cpp): plain Win32 + GDI+, no Qt, so the packed setup is one self-contained .exe.
 # Built and packed by tools/pipeline/build.ps1 -Stages installer (which runs the package stage first).
 cmake_minimum_required(VERSION 3.21)
-project(GowNativePcSetup VERSION 0.4.0 LANGUAGES CXX RC) # same as launcher/CMakeLists.txt
+project(GowNativePcSetup VERSION 0.5.0 LANGUAGES CXX RC) # same as launcher/CMakeLists.txt
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

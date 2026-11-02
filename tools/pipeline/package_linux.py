@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import subprocess
 import tarfile
 
@@ -19,8 +20,11 @@ def main():
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument('--launcher', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--installer', type=Path, help='Optional self-extracting Linux .run installer')
     args = parser.parse_args()
     root = args.root.resolve()
+    version = re.search(r'project\(GowNativePcLauncher VERSION ([0-9.]+)',
+                        (root / 'launcher/CMakeLists.txt').read_text()).group(1)
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         parser.error('Package on the native x86-64 Linux build host')
 
@@ -30,6 +34,7 @@ def main():
     files = {}
     source_names = set(git('ls-files', '-z').split('\0'))
     source_names.add('tools/pipeline/package_linux.py')
+    source_names.add('tools/test/linux-installer.py')
     for name in sorted(source_names):
         if not name:
             continue
@@ -93,6 +98,7 @@ Resultados e limites dos testes: docs/tested-hardware.md e docs/linux.md.
 '''.encode(), 0o644)
     manifest = {
         'schema': 1, 'kind': 'experimental-linux-host-libraries',
+        'version': version,
         'commit': git('rev-parse', 'HEAD').strip(),
         'dirty': bool(git('status', '--porcelain', '--untracked-files=no').strip()),
         'build_os': platform.freedesktop_os_release(),
@@ -125,6 +131,49 @@ Resultados e limites dos testes: docs/tested-hardware.md e docs/linux.md.
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_name(output.name + '.sha256').write_text(f'{digest}  {output.name}\n')
     print(f'PASS: {len(files)} files verified; {output}; SHA256 {digest}')
+    if args.installer:
+        # Host-library installer, not a universal SteamOS/AppImage distribution.
+        header = '''#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == --help ]]; then
+    echo 'Usage: bash setup.run [NEW installation directory]'
+    echo 'Requires compatible Ubuntu 26.04 Qt/QML libraries; see docs/linux.md.'
+    exit 0
+fi
+if (( $# > 1 )); then echo 'ERROR: expected at most one installation directory' >&2; exit 1; fi
+destination=${1:-"${XDG_DATA_HOME:-$HOME/.local/share}/gow-native-pc-@VERSION@"}
+if [[ -e "$destination" || -L "$destination" ]]; then
+    echo "ERROR: destination already exists; choose a new directory to preserve games and saves: $destination" >&2
+    exit 1
+fi
+temporary=$(mktemp -d)
+trap 'rm -rf -- "$temporary"' EXIT
+payload_line=$(awk '/^__GOW_ARCHIVE_BELOW__$/ { print NR + 1; exit }' "$0")
+tail -n +"$payload_line" "$0" > "$temporary/payload.tar.gz"
+if ! printf '%s  %s\\n' '@SHA256@' "$temporary/payload.tar.gz" | sha256sum --check --status; then
+    echo 'ERROR: damaged installer payload; download the installer again' >&2
+    exit 1
+fi
+mkdir -p -- "$(dirname -- "$destination")"
+mkdir -- "$destination"
+tar -xzf "$temporary/payload.tar.gz" --strip-components=1 -C "$destination"
+echo "God of War Native PC @VERSION@ installed in: $destination"
+echo "Open: $destination/start-linux.sh"
+echo 'Import your own compatible ISO in the launcher to compile the game.'
+echo 'Experimental Linux build: Steam Deck compatibility is not validated.'
+exit 0
+__GOW_ARCHIVE_BELOW__
+'''.replace('@VERSION@', version).replace('@SHA256@', digest).encode()
+        installer = args.installer.resolve()
+        installer.parent.mkdir(parents=True, exist_ok=True)
+        candidate = installer.with_name(installer.name + '.partial')
+        candidate.write_bytes(header + output.read_bytes())
+        candidate.chmod(0o755)
+        assert candidate.read_bytes()[len(header):] == output.read_bytes()
+        os.replace(candidate, installer)
+        setup_digest = hashlib.sha256(installer.read_bytes()).hexdigest()
+        installer.with_name(installer.name + '.sha256').write_text(f'{setup_digest}  {installer.name}\n')
+        print(f'PASS: self-extracting installer verified; {installer}; SHA256 {setup_digest}')
 
 
 if __name__ == '__main__':
