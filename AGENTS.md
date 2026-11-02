@@ -30,7 +30,8 @@ engine/patches/NN-*.patch   changes to the runtime; header lines = what and why 
 launcher/                   Qt 6 launcher (from the Tobiichi Launcher). src/lanzador.* = play side (Tobiichi's, Spanish
                             names), src/installer_backend.* = install side (ours, English), qml/InstallPage.qml = tab.
                             Own look (not Tobiichi's): qml/Main.qml = sidebar (NavItem) + pages, `pagina` 0 Home,
-                            1 Install, 2-6 settings, 7 Saves; colours in qml/Tema.qml (oro* hold the crimson accent);
+                            1 Install, 2-6 settings, 7 Saves, 8 Accessibility (AccessibilityPage.qml: input assists,
+                            texture packs and visual mods); colours in qml/Tema.qml (oro* hold the crimson accent);
                             qml/LoadingScreen.qml = the screen over the whole launcher during long pipeline runs
                             (one overall bar planned from installer.stages and the "=== <step> ===" texts of
                             build.ps1, time left, tips cargaDica1..N, the player's own pictures in data/<id>/loading);
@@ -108,6 +109,15 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16),
   GOW_QTE_HOLD / _HZ (accessibility: a held button becomes the presses the minigames ask for, engine/patches/53; the
   logic is tested without the game by tools/test/qte_hold_test.cpp in verify).
+  Shoulder-button repetition (L1/L2/R1/R2) is individually opt-in in the launcher; it can interrupt held actions.
+  GOW_QTE_STICK=shake|rotate (patch 56) enables the explicitly held `qte_stick` keyboard/mouse binding (default G).
+  It overrides only the left stick at the final configurable-stick read, stops on release/focus loss, and leaves
+  all four connected gamepad slots alone. Off by default; no automatic QTE detection. Scripted pad tests disable it.
+  The same isolated QTE suite covers gesture timing, direction coverage, release and repeated reads.
+  Patch 57 preserves held button chords: a key shared with an evade modifier belongs to its gameplay button first.
+  Default keyboard evade is Alt + WASD; Ctrl stays R2. Teclas.js migrates the former shared Ctrl default and marks
+  modifier/button overlaps as conflicts. Shoulder auto-repeat pauses during stick movement or multi-button chords,
+  restarting its delay afterwards. Production-pad tests cover Ctrl + WASD, Ctrl + Space and both Ctrl aliases.
   GOW_VU1N_X64=1 (in-process x86-64 VU1 JIT, engine/patches/18, experimental: the Performance tab's "Compile new areas
   while playing"; docs/research/vu1-x64-jit.md). GOW_VU1N_JIT + GOW_VU1N_JIT_CXX/_PY/_GEN/_FLAGS (patch 17's background
   clang compiler, by hand: data/<id>/vu1_jit.json, which clang builds write, names the values).

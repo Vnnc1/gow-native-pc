@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // "Graphics" tab: card, display mode, resolution, aspect ratio and scaling.
@@ -264,33 +263,6 @@ ScrollView {
                     text: Tema.t("upNoDisponible")
                     color: Tema.textoTenue
                     font.pixelSize: 12
-                }
-            }
-        }
-        // Texture pack in PCSX2's format (runtime patch 52): replaces the game's textures while playing, no rebuild
-        Fila {
-            titulo: Tema.t("pacoteTexturas")
-            descripcion: raiz.ajustes.pacoteTexturas.length > 0 ? Tema.tf("pacoteTexturasPasta", raiz.ajustes.pacoteTexturas)
-                                                                : Tema.t("pacoteTexturasDesc")
-            RowLayout {
-                anchors.right: parent.right
-                spacing: 10
-                BotonSecundario {
-                    text: Tema.t("pacoteTexturasEscolher")
-                    onClicked: dialogoPacote.open()
-                }
-                Interruptor {
-                    enabled: raiz.ajustes.pacoteTexturas.length > 0
-                    checked: raiz.ajustes.usarPacoteTexturas
-                    onToggled: raiz.ajustes.usarPacoteTexturas = checked
-                }
-            }
-            FolderDialog {
-                id: dialogoPacote
-                title: Tema.t("pacoteTexturas")
-                onAccepted: {
-                    raiz.ajustes.pacoteTexturas = lanzador.rutaDesdeUrl(selectedFolder)
-                    raiz.ajustes.usarPacoteTexturas = true
                 }
             }
         }

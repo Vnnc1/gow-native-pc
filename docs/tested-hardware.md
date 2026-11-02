@@ -1,5 +1,27 @@
 # Tested hardware and results
 
+## Accessibility and held keyboard combinations (2026-11-02; synthetic validation)
+
+Patches 56–57 add explicit keyboard/mouse left-stick gestures and preserve held
+button combinations. Ctrl remains R2, while the default evade modifier migrates
+to Alt. Shoulder repetition is individually selectable and pauses during stick
+movement or multi-button interactions. The launcher groups these assists and
+the existing texture-pack controls on Accessibility.
+
+Validation: the game runner rebuilt successfully; the complete `verify` stage
+passed (10 CTest tests, pipeline/patch-stack regressions, synthetic EE generation,
+guest-call checks, VU1 equivalence and task replay). The production input reader
+was exercised with a fake host for Ctrl + WASD, Ctrl + Space, Alt + movement,
+keyboard/mouse gestures, four controller slots, focus loss and scripted-test
+exclusion. The actual QML test passed saved choices, legacy-map migration,
+custom-binding preservation, conflict reporting and texture-pack enablement.
+The Windows launcher was rebuilt and deployed to `launcher/build-clang/deploy`;
+its Accessibility page was inspected through the built-in Portuguese capture mode.
+
+These tests establish input behavior, not successful completion of the opening
+ship's crate scene, Medusa petrification or every grab/QTE. No gameplay FPS or
+new hardware support claim was measured. Instructions: [input accessibility](input-accessibility.md).
+
 ## Linux integration foundation (2026-11-02; Windows host only)
 
 Added a native Clang/Qt/SDL2 source-build pipeline and Linux launcher routing.

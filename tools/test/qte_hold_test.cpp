@@ -124,6 +124,47 @@ int main()
         check(run.presses >= 15, "20 presses/s gives " + std::to_string(run.presses) + " presses in 2 s (expected >= 15)");
     }
 
+    // Shoulder options use the same active-low bits as the game, independently.
+    for (uint16_t shoulder : {0x0100u, 0x0200u, 0x0400u, 0x0800u})
+    {
+        gow_qte::Config selected = config;
+        selected.buttons = shoulder;
+        const Run run = hold(selected, shoulder | kCircle, 2.0, 60.0, kCircle);
+        check(run.presses >= 16 && !run.otherEverUp, "selected shoulder repeats without touching circle");
+        check(hold(selected, shoulder, 0.2, 60.0).presses == 1, "shoulder tap stays a single press");
+    }
+    for (double hz : {30.0, 60.0})
+    {
+        for (auto mode : {gow_qte::StickMode::Shake, gow_qte::StickMode::Rotate})
+        {
+            gow_qte::StickGesture gesture;
+            bool left = false, right = false, up = false, down = false;
+            bool active = true, stable = true;
+            for (int i = 0; i < static_cast<int>(hz); ++i)
+            {
+                uint8_t x = 128, y = 128;
+                active &= gesture.apply(mode, true, i / hz, x, y);
+                left |= x < 32; right |= x > 224; up |= y < 32; down |= y > 224;
+                uint8_t repeatX = 0, repeatY = 0;
+                gesture.apply(mode, true, i / hz, repeatX, repeatY);
+                stable &= x == repeatX && y == repeatY;
+            }
+            check(active && stable, "held gesture is active and same-time reads keep its phase");
+            check(left && right, "gesture reaches both horizontal directions at 30/60 Hz");
+            check(mode == gow_qte::StickMode::Rotate ? up && down : !up && !down,
+                  "rotation covers vertical directions; shake stays horizontal");
+            uint8_t x = 45, y = 200;
+            check(!gesture.apply(mode, false, 2.0, x, y) && x == 45 && y == 200,
+                  "release immediately preserves normal movement");
+            gesture.apply(mode, true, 3.0, x, y);
+            check(y == 128 && x == (mode == gow_qte::StickMode::Shake ? 1 : 255),
+                  "a new hold resets the gesture phase");
+            x = 45; y = 200;
+            check(!gesture.apply(gow_qte::StickMode::Off, true, 4.0, x, y) && x == 45 && y == 200,
+                  "disabled assistance leaves axes untouched");
+        }
+    }
+
     std::printf(g_failures ? "\n%d case(s) failed\n" : "\nall cases passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

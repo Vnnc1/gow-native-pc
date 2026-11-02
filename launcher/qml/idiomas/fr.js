@@ -130,7 +130,6 @@ var textos = {
     qteHold: "Maintenir au lieu de marteler",
     qteHoldDesc: "Dans les mini-jeux qui demandent des appuis répétés (le « Tap O » d'une prise ou d'une mise à mort), maintenir le bouton appuie à votre place. Un appui court reste un seul appui : saisir un ennemi ou ouvrir un coffre ne change pas. Si une jauge « Hold » sur le même bouton cesse de se remplir, désactivez ceci.",
     qteHoldButtons: "Boutons concernés",
-    qteHoldButtonsDesc: "Les mini-jeux de God of War demandent le bouton de saisie. Les autres ne comptent que si une invite les demande. L1, R1, L2 et R2 sont exclus : ils sont maintenus en jeu normal et les répéter ferait tomber la garde.",
     qteHoldCircle: "○ seulement (saisir)",
     qteHoldFace: "○ ✕ □ △",
     qteHoldRate: "Appuis par seconde",

@@ -84,3 +84,11 @@ target_compile_features(gow_qte_hold_test PRIVATE cxx_std_20)
 target_include_directories(gow_qte_hold_test PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
 add_test(NAME gow_qte_hold_test COMMAND gow_qte_hold_test)
 set_tests_properties(gow_qte_hold_test PROPERTIES TIMEOUT 60)
+add_executable(gow_qte_input_test "${CMAKE_CURRENT_LIST_DIR}/qte_input_test.cpp"
+    "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib/ps2_pad.cpp")
+target_compile_features(gow_qte_input_test PRIVATE cxx_std_20)
+target_include_directories(gow_qte_input_test PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include"
+    "$<TARGET_PROPERTY:raylib,INTERFACE_INCLUDE_DIRECTORIES>")
+foreach(mode IN ITEMS off shake rotate smoke)
+    add_test(NAME gow_qte_input_${mode} COMMAND gow_qte_input_test ${mode})
+endforeach()

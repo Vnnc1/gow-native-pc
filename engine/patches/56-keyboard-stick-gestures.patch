@@ -1,0 +1,115 @@
+Keyboard/mouse accessibility: an explicitly held mapped key supplies left-stick
+shake/rotation gestures at the final configurable-stick read. Preserve the right
+stick and connected controllers (all four slots); disable gestures in scripted tests.
+No guest-state detection or gameplay success claim. Synthetic gesture tests cover
+30/60 Hz sampling, release, reset and direction coverage.
+
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+@@ -20,6 +20,43 @@
+ 
+ namespace gow_qte
+ {
++    // Explicit keyboard/mouse gesture: only overrides the left stick while held.
++    // Time-based phase makes repeated reads in one frame identical.
++    enum class StickMode { Off, Shake, Rotate };
++    class StickGesture
++    {
++    public:
++        bool apply(StickMode mode, bool held, double now, uint8_t &x, uint8_t &y)
++        {
++            if (!held || mode == StickMode::Off || !std::isfinite(now))
++            {
++                m_active = false;
++                return false;
++            }
++            if (!m_active || now < m_since)
++            {
++                m_since = now;
++                m_active = true;
++            }
++            const double elapsed = now - m_since;
++            if (mode == StickMode::Shake)
++            {
++                x = std::fmod(elapsed, 0.25) < 0.125 ? 1 : 255;
++                y = 128;
++            }
++            else
++            {
++                const double angle = std::fmod(elapsed, 0.5) * 12.566370614359172;
++                x = static_cast<uint8_t>(std::lround(128.0 + 127.0 * std::cos(angle)));
++                y = static_cast<uint8_t>(std::lround(128.0 + 127.0 * std::sin(angle)));
++            }
++            return true;
++        }
++    private:
++        bool m_active = false;
++        double m_since = 0.0;
++    };
++
+     struct Config
+     {
+         uint16_t buttons = 0u;  // the pad's button bits the assist repeats (PAD_CIRCLE...), 0 = off
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -48,14 +48,14 @@
+         AccArriba, AccAbajo, AccIzquierda, AccDerecha, AccCruz, AccCirculo, AccCuadrado, AccTriangulo,
+         AccL1, AccR1, AccL2, AccR2, AccL3, AccR3, AccStart, AccSelect,
+         AccPoseidon, AccMedusa, AccZeus, AccHades, AccArtemisa, AccFuria,
+-        AccLiArriba, AccLiAbajo, AccLiIzq, AccLiDer, AccLdArriba, AccLdAbajo, AccLdIzq, AccLdDer, AccLdMod,
++        AccLiArriba, AccLiAbajo, AccLiIzq, AccLiDer, AccLdArriba, AccLdAbajo, AccLdIzq, AccLdDer, AccLdMod, AccQteStick,
+         NumAcciones
+     };
+     constexpr const char *kNombresAccion[NumAcciones] = {
+         "up", "down", "left", "right", "cross", "circle", "square", "triangle",
+         "l1", "r1", "l2", "r2", "l3", "r3", "start", "select",
+         "poseidon", "medusa", "zeus", "hades", "artemisa", "furia",
+-        "li_arriba", "li_abajo", "li_izq", "li_der", "ld_arriba", "ld_abajo", "ld_izq", "ld_der", "ld_mod"};
++        "li_arriba", "li_abajo", "li_izq", "li_der", "ld_arriba", "ld_abajo", "ld_izq", "ld_der", "ld_mod", "qte_stick"};
+     // Botones que pulsa cada acción (hasta AccFuria; las demás mueven los sticks).
+     constexpr uint16_t kBitAccion[AccFuria + 1] = {
+         PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_CROSS, PAD_CIRCLE, PAD_SQUARE, PAD_TRIANGLE,
+@@ -306,8 +306,11 @@
+ bool tobiichiSticksTeclado(uint8_t (&sticks)[4])
+ {
+     const MapaTeclas &m = mapaTeclas();
+-    if (!m.activo || IsGamepadAvailable(0))
++    if (!m.activo)
+         return false;
++    // Match the backend's four-slot selection; never replace a connected pad's sticks.
++    for (int i = 0; i < 4; ++i)
++        if (IsGamepadAvailable(i)) return false;
+     const uint8_t x = eje(accionPulsada(m, AccLiIzq), accionPulsada(m, AccLiDer));
+     const uint8_t y = eje(accionPulsada(m, AccLiArriba), accionPulsada(m, AccLiAbajo));
+     if (accionPulsada(m, AccLdMod))
+@@ -315,12 +318,24 @@
+         sticks[0] = x;
+         sticks[1] = y;
+         sticks[2] = sticks[3] = kPadStickCenter;
+-        return true;
+-    }
+-    sticks[0] = eje(accionPulsada(m, AccLdIzq), accionPulsada(m, AccLdDer));
+-    sticks[1] = eje(accionPulsada(m, AccLdArriba), accionPulsada(m, AccLdAbajo));
+-    sticks[2] = x;
+-    sticks[3] = y;
++    }
++    else
++    {
++        sticks[0] = eje(accionPulsada(m, AccLdIzq), accionPulsada(m, AccLdDer));
++        sticks[1] = eje(accionPulsada(m, AccLdArriba), accionPulsada(m, AccLdAbajo));
++        sticks[2] = x;
++        sticks[3] = y;
++    }
++    static const gow_qte::StickMode mode = [] {
++        const char *value = std::getenv("GOW_QTE_STICK");
++        const char *test = std::getenv("GOW_PAD_TEST");
++        if (!value || (test && std::strcmp(test, "1") == 0)) return gow_qte::StickMode::Off;
++        if (std::strcmp(value, "shake") == 0) return gow_qte::StickMode::Shake;
++        if (std::strcmp(value, "rotate") == 0) return gow_qte::StickMode::Rotate;
++        return gow_qte::StickMode::Off;
++    }();
++    static gow_qte::StickGesture gesture;
++    gesture.apply(mode, accionPulsada(m, AccQteStick) && IsWindowFocused(), GetTime(), sticks[2], sticks[3]);
+     return true;
+ }
+ 

@@ -130,7 +130,6 @@ var textos = {
     qteHold: "Halten statt Hämmern",
     qteHoldDesc: "In den Minispielen, die wiederholtes Drücken verlangen (das „Tap O“ eines Griffs oder Finishers), drückt das Halten der Taste für dich. Ein kurzer Druck bleibt ein einzelner Druck: Gegner packen oder Truhen öffnen ändert sich nicht. Wenn sich eine „Hold“-Anzeige auf derselben Taste nicht mehr füllt, schalte dies aus.",
     qteHoldButtons: "Betroffene Tasten",
-    qteHoldButtonsDesc: "Die Minispiele von God of War verlangen die Greiftaste. Die anderen zählen nur, wenn eine Anzeige sie verlangt. L1, R1, L2 und R2 bleiben außen vor: Sie werden im normalen Spiel gehalten, und sie zu wiederholen würde den Block fallen lassen.",
     qteHoldCircle: "Nur ○ (greifen)",
     qteHoldFace: "○ ✕ □ △",
     qteHoldRate: "Drücke pro Sekunde",

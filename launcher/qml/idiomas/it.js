@@ -130,7 +130,6 @@ var textos = {
     qteHold: "Tieni premuto invece di martellare",
     qteHoldDesc: "Nei minigiochi che chiedono pressioni ripetute (il «Tap O» di una presa o di un'esecuzione), tenere premuto il pulsante preme al posto tuo. Una pressione breve resta una sola: afferrare un nemico o aprire un forziere non cambia. Se un indicatore «Hold» sullo stesso pulsante smette di riempirsi, disattiva questa opzione.",
     qteHoldButtons: "Pulsanti interessati",
-    qteHoldButtonsDesc: "I minigiochi di God of War chiedono il pulsante di presa. Gli altri contano solo se un comando li chiede. L1, R1, L2 e R2 restano esclusi: si tengono premuti nel gioco normale e ripeterli farebbe cadere la guardia.",
     qteHoldCircle: "Solo ○ (afferra)",
     qteHoldFace: "○ ✕ □ △",
     qteHoldRate: "Pressioni al secondo",

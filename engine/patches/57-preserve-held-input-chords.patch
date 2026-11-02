@@ -1,0 +1,149 @@
+Preserve held gameplay actions in keyboard/mouse chords. Button mappings take
+priority over a shared evade modifier, including left/right modifier aliases.
+Suspend shoulder auto-repeat during stick movement or any multi-button chord;
+reset the repeat delay when the protected interaction ends. This prevents the
+input layer from dropping R2 while moving a crate or holding R2 + Cross.
+Validated with synthetic production-pad tests; crate-scene gameplay remains a
+separate acceptance check.
+
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+@@ -65,6 +65,15 @@
+         double delay = 0.25;    // a button held this long starts the assist
+     };
+ 
++    // Shoulder actions must stay held during movement or multi-button interactions.
++    inline Config forInput(Config config, uint16_t buttons, bool moving)
++    {
++        const uint16_t pressed = static_cast<uint16_t>(~buttons);
++        if (moving || (pressed && (pressed & (pressed - 1u))))
++            config.buttons &= static_cast<uint16_t>(~0x0f00u);
++        return config;
++    }
++
+     // Button words are the pad's: one bit per button, a bit at 0 meaning pressed.
+     class HoldToMash
+     {
+@@ -72,14 +81,21 @@
+         uint16_t apply(const Config &config, uint16_t buttons, double now)
+         {
+             if (!config.buttons)
++            {
++                *this = HoldToMash{};
+                 return buttons;
++            }
+             const double period = config.period > 0.0 ? config.period : 0.1;
+             const double release = std::min(std::max(config.release, 0.0), period * 0.5);
+             for (int bit = 0; bit < 16; ++bit)
+             {
+                 const uint16_t mask = static_cast<uint16_t>(1u << bit);
+                 if (!(config.buttons & mask))
++                {
++                    m_held[bit] = false;
++                    m_presses[bit] = 0;
+                     continue;
++                }
+                 if (buttons & mask) // the player is not holding it
+                 {
+                     m_held[bit] = false;
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -141,28 +141,28 @@
+         return false;
+     }
+ 
+-    bool esModificador(const MapaTeclas &m, int codigo)
+-    {
+-        for (const int mod : m.codigos[AccLdMod])
+-            if (mod == codigo)
+-                return true;
++    int normalizedKey(int code)
++    {
++        if (code == KEY_RIGHT_CONTROL) return KEY_LEFT_CONTROL;
++        if (code == KEY_RIGHT_SHIFT) return KEY_LEFT_SHIFT;
++        if (code == KEY_RIGHT_ALT) return KEY_LEFT_ALT;
++        return code;
++    }
++
++    // A shared key belongs to its button action first. Never drop R2/L1/etc.
++    // or redirect movement to the evade stick while the player is holding it.
++    bool evadeModifierHeld(const MapaTeclas &map)
++    {
++        for (const int modifier : map.codigos[AccLdMod])
++        {
++            if (!codigoPulsado(modifier)) continue;
++            bool shared = false;
++            for (size_t action = 0; action <= AccFuria; ++action)
++                for (const int code : map.codigos[action])
++                    shared |= normalizedKey(code) == normalizedKey(modifier);
++            if (!shared) return true;
++        }
+         return false;
+-    }
+-
+-    // Botón: una tecla que también es el modificador del stick derecho (Ctrl = R2 y Ctrl + WASD = esquiva) solo cuenta
+-    // si no se está moviendo con el stick izquierdo; así esquivar no lanza también el botón.
+-    bool botonPulsado(const MapaTeclas &m, size_t accion, bool moviendo)
+-    {
+-        for (const int codigo : m.codigos[accion])
+-            if (codigoPulsado(codigo) && !(moviendo && esModificador(m, codigo)))
+-                return true;
+-        return false;
+-    }
+-
+-    bool moviendoStickIzquierdo(const MapaTeclas &m)
+-    {
+-        return accionPulsada(m, AccLiArriba) || accionPulsada(m, AccLiAbajo) || accionPulsada(m, AccLiIzq) ||
+-               accionPulsada(m, AccLiDer);
+     }
+ 
+     uint8_t eje(bool negativo, bool positivo)
+@@ -276,7 +276,7 @@
+     }
+ 
+     // Every listed button the player keeps down reads as a train of presses; the rest of the word is untouched.
+-    uint16_t repetirMantenidos(uint16_t btns)
++    uint16_t repetirMantenidos(uint16_t btns, bool moving)
+     {
+         const gow_qte::Config &config = configQte();
+         if (!config.buttons)
+@@ -288,7 +288,7 @@
+         }();
+         static gow_qte::HoldToMash asistencia;
+         static int registradas[16] = {};
+-        const uint16_t resultado = asistencia.apply(config, btns, GetTime());
++        const uint16_t resultado = asistencia.apply(gow_qte::forInput(config, btns, moving), btns, GetTime());
+         if (diag)
+             for (int bit = 0; bit < 16; ++bit)
+                 if (const int n = asistencia.presses(bit); n != registradas[bit])
+@@ -313,7 +313,7 @@
+         if (IsGamepadAvailable(i)) return false;
+     const uint8_t x = eje(accionPulsada(m, AccLiIzq), accionPulsada(m, AccLiDer));
+     const uint8_t y = eje(accionPulsada(m, AccLiArriba), accionPulsada(m, AccLiAbajo));
+-    if (accionPulsada(m, AccLdMod))
++    if (evadeModifierHeld(m))
+     {
+         sticks[0] = x;
+         sticks[1] = y;
+@@ -487,9 +487,8 @@
+     {
+         // GOW-Port: teclado configurable (lanzador).
+         const MapaTeclas &m = mapaTeclas();
+-        const bool moviendo = moviendoStickIzquierdo(m);
+         for (size_t accion = 0; accion <= AccFuria; ++accion)
+-            if (botonPulsado(m, accion, moviendo))
++            if (accionPulsada(m, accion))
+                 clearBit(kBitAccion[accion]);
+         uint8_t sticks[4];
+         if (tobiichiSticksTeclado(sticks))
+@@ -577,7 +576,9 @@
+ 
+     // gow-native-pc: hold instead of mashing (GOW_QTE_HOLD), on the finished button word, so it works the same with a
+     // controller, with the configurable keyboard and with the fixed layouts
+-    btns = repetirMantenidos(btns);
++    const bool moving = data[4] < 96 || data[4] > 160 || data[5] < 96 || data[5] > 160 ||
++                        data[6] < 96 || data[6] > 160 || data[7] < 96 || data[7] > 160;
++    btns = repetirMantenidos(btns, moving);
+ 
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);

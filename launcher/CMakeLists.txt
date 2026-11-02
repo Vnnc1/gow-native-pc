@@ -55,6 +55,7 @@ set(ARCHIVOS_QML
     qml/PaginaRendimiento.qml
     qml/InstallPage.qml
     qml/LoadingScreen.qml
+    qml/AccessibilityPage.qml
     qml/PaginaControles.qml
     qml/PaginaPartidas.qml
     qml/PaginaTrucos.qml

@@ -56,7 +56,12 @@ ApplicationWindow {
         property bool cancelarAnimaciones: true // snappier evade and input buffer (GOW_CANCELAR)
         // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
         property bool qteHold: false
-        property string qteHoldButtons: "circle" // "circle" or "face" (the four face buttons)
+        property string qteHoldButtons: "circle" // Base group; shoulders are independent opt-ins.
+        property bool qteHoldL1: false
+        property bool qteHoldL2: false
+        property bool qteHoldR1: false
+        property bool qteHoldR2: false
+        property string qteStickMode: "off"
         property int qteHoldRate: 10 // presses per second the assist makes (GOW_QTE_HOLD_HZ)
         property bool escSalir: false
         property bool minimizarAlJugar: true
@@ -190,6 +195,11 @@ ApplicationWindow {
         ajustes.cancelarAnimaciones = true
         ajustes.qteHold = false
         ajustes.qteHoldButtons = "circle"
+        ajustes.qteHoldL1 = false
+        ajustes.qteHoldL2 = false
+        ajustes.qteHoldR1 = false
+        ajustes.qteHoldR2 = false
+        ajustes.qteStickMode = "off"
         ajustes.qteHoldRate = 10
         ajustes.escSalir = false
         ajustes.minimizarAlJugar = true
@@ -250,6 +260,9 @@ ApplicationWindow {
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
             controlesDmc5: ajustes.controlesDmc5, escSalir: ajustes.escSalir,
             cancelarAnimaciones: ajustes.cancelarAnimaciones,
+            qteHoldL1: ajustes.qteHoldL1, qteHoldL2: ajustes.qteHoldL2,
+            qteHoldR1: ajustes.qteHoldR1, qteHoldR2: ajustes.qteHoldR2,
+            qteStickMode: ajustes.qteStickMode,
             qteHold: ajustes.qteHold, qteHoldButtons: ajustes.qteHoldButtons, qteHoldRate: ajustes.qteHoldRate,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
             mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",
@@ -486,7 +499,8 @@ ApplicationWindow {
                     { clave: "pestControles", icono: "" },
                     { clave: "pestTrucos", icono: "" },
                     { clave: "pestOtros", icono: "" },
-                    { clave: "pestPartidas", icono: "\uE74E" }
+                    { clave: "pestPartidas", icono: "\uE74E" },
+                    { clave: "pestAccessibility", icono: "\uE776" }
                 ]
                 delegate: NavItem {
                     required property var modelData
@@ -1023,7 +1037,7 @@ ApplicationWindow {
         // Settings pages: a large title over a panel.
         Repeater {
             model: ["pestInstalar", "pestGrafico", "pestRendimiento", "pestControles", "pestTrucos", "pestOtros",
-                    "pestPartidas"]
+                    "pestPartidas", "pestAccessibility"]
             delegate: Item {
                 id: hojaAjustes
                 required property string modelData
@@ -1058,11 +1072,19 @@ ApplicationWindow {
                             anchors.margins: 24
                             anchors.rightMargin: 14
                             sourceComponent: [paginaInstalar, paginaGrafico, paginaRendimiento, paginaControles,
-                                              paginaTrucos, paginaOtros, paginaPartidas][hojaAjustes.index]
+                                              paginaTrucos, paginaOtros, paginaPartidas, accessibilityPage][hojaAjustes.index]
                         }
                     }
                 }
             }
+        }
+    }
+
+    Component {
+        id: accessibilityPage
+        AccessibilityPage {
+            settings: ventana.ajustesGuardados
+            onOpenControls: ventana.pagina = 4
         }
     }
 

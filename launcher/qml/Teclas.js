@@ -11,6 +11,7 @@ var acciones = [
     { id: "li_abajo", grupo: "grupoMovimiento", boton: "L↓" },
     { id: "li_izq", grupo: "grupoMovimiento", boton: "L←" },
     { id: "li_der", grupo: "grupoMovimiento", boton: "L→" },
+    { id: "qte_stick", grupo: "grupoMovimiento", boton: "QTE" },
     { id: "ld_mod", grupo: "grupoMovimiento", boton: "R" },
     { id: "square", grupo: "grupoCombate", boton: "□" },
     { id: "triangle", grupo: "grupoCombate", boton: "△" },
@@ -43,13 +44,13 @@ var acciones = [
 
 var grupos = ["grupoMovimiento", "grupoCombate", "grupoPoderes", "grupoMenus", "grupoAvanzado"]
 
-// Default layout: WASD moves, Ctrl + WASD evades, 1 Poseidon's Rage, 2 Medusa's Gaze, 3 Zeus' Fury,
+// Default layout: WASD moves, Alt + WASD evades, 1 Poseidon's Rage, 2 Medusa's Gaze, 3 Zeus' Fury,
 // 4 Army of Hades, left/right click attack, middle click draws/sheathes the Blade of Artemis (L1 + R1),
 // F grabs, Q blocks/parries, Shift L2, Ctrl R2, E R1, V Rage of the Gods, arrows d-pad, Enter Start, Tab Select.
 function predeterminado() {
     return {
         li_arriba: [87], li_abajo: [83], li_izq: [65], li_der: [68],
-        ld_mod: [341],
+        ld_mod: [342], qte_stick: [71],
         square: [RATON + 0], triangle: [RATON + 1], circle: [70], cross: [32],
         l1: [81], r1: [69], artemisa: [RATON + 2], r2: [341], l2: [340], furia: [86],
         poseidon: [49], medusa: [50], zeus: [51], hades: [52],
@@ -83,6 +84,10 @@ function leer(texto) {
         }
     } catch (e) {
     }
+    // Migrate the old shared Ctrl default: R2 must remain held while moving/interacting.
+    if (base.ld_mod.length === 1 && normal(base.ld_mod[0]) === 341 &&
+            base.r2.some(function (code) { return normal(code) === 341 }))
+        base.ld_mod = [342]
     return base
 }
 
@@ -123,8 +128,7 @@ function normal(codigo) {
     return codigo
 }
 
-// Other actions using the same code. Ctrl as evade and R2 at once is intended (the game tells the
-// two uses apart), so that pair is not a conflict.
+// Shared modifier/button assignments are conflicts: held gameplay buttons take priority.
 function conflictos(mapa, accion, codigo) {
     var resultado = []
     var c = normal(codigo)
@@ -136,9 +140,7 @@ function conflictos(mapa, accion, codigo) {
         for (var j = 0; j < lista.length; ++j) {
             if (normal(lista[j]) !== c)
                 continue
-            var pareja = (accion === "ld_mod" && otra !== "ld_mod") || (otra === "ld_mod" && accion !== "ld_mod")
-            if (!pareja)
-                resultado.push(otra)
+            resultado.push(otra)
         }
     }
     return resultado

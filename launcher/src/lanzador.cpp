@@ -386,11 +386,14 @@ bool Lanzador::iniciar(const QVariantMap &a)
     // runtime/gow_qte_hold.h). The buttons are action names of TOBIICHI_TECLAS; without the variable nothing changes.
     if (a.value(QStringLiteral("qteHold")).toBool())
     {
-        // Only the face buttons: L1, R1, L2 and R2 are held in normal play (block, magic) and repeating them would
-        // drop a block. GOW_QTE_HOLD itself takes any action name, for anyone who wants one by hand.
+        // Shoulder buttons are individual opt-ins: repeating a held block/action can interrupt it.
         const QString cuales = a.value(QStringLiteral("qteHoldButtons"), QStringLiteral("circle")).toString();
-        const QString botones = cuales == QStringLiteral("face") ? QStringLiteral("circle,cross,square,triangle")
+        QString botones = cuales == QStringLiteral("face") ? QStringLiteral("circle,cross,square,triangle")
                                                                 : QStringLiteral("circle");
+        for (const auto &entry : {std::pair{"qteHoldL1", "l1"}, std::pair{"qteHoldL2", "l2"},
+                                  std::pair{"qteHoldR1", "r1"}, std::pair{"qteHoldR2", "r2"}})
+            if (a.value(QLatin1String(entry.first)).toBool())
+                botones += QLatin1Char(',') + QLatin1String(entry.second);
         entorno.insert(QStringLiteral("GOW_QTE_HOLD"), botones);
         entorno.insert(QStringLiteral("GOW_QTE_HOLD_HZ"),
                        QString::number(std::clamp(a.value(QStringLiteral("qteHoldRate"), 10).toInt(), 2, 20)));
@@ -400,6 +403,11 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.remove(QStringLiteral("GOW_QTE_HOLD"));
         entorno.remove(QStringLiteral("GOW_QTE_HOLD_HZ"));
     }
+    const QString stickMode = a.value(QStringLiteral("qteStickMode"), QStringLiteral("off")).toString();
+    if (stickMode == QStringLiteral("shake") || stickMode == QStringLiteral("rotate"))
+        entorno.insert(QStringLiteral("GOW_QTE_STICK"), stickMode);
+    else
+        entorno.remove(QStringLiteral("GOW_QTE_STICK"));
     // Configurable keyboard and mouse (ps2_pad.cpp): "action=code,code;...".
     const QString teclas = a.value(QStringLiteral("teclas")).toString();
     if (teclas.isEmpty())

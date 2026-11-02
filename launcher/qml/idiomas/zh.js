@@ -130,7 +130,6 @@ var textos = {
     qteHold: "长按代替连打",
     qteHoldDesc: "在需要反复按键的小游戏中（抓取或终结技时出现的“Tap O”），按住按键即可替你连按。短按仍然只算一次：抓住敌人或打开宝箱都不受影响。如果同一按键上的“Hold”提示不再蓄满，请关闭此项。",
     qteHoldButtons: "适用的按键",
-    qteHoldButtonsDesc: "God of War 的小游戏要求按抓取键。其他按键只有在提示要求时才有用。L1、R1、L2 和 R2 不在其中：它们在正常游戏中需要按住，重复按会解除格挡。",
     qteHoldCircle: "仅 ○（抓取）",
     qteHoldFace: "○ ✕ □ △",
     qteHoldRate: "每秒按键次数",
