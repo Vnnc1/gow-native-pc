@@ -51,6 +51,22 @@ cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` wh
 copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
 The launcher also checks CMakeCache's source root before accepting a runner, so a fresh copy cannot use another copy's build.
 
+## Experimental Linux integration
+
+`bash build.sh` runs `tools/pipeline/linux.py` with Python 3.12+, native Clang,
+system/SDK Qt 6.5+ and SDL2. It shares the profile, disc preparation, transactional
+recompiler and ordinal runtime patch chain, holds `data/pipeline.lock` with flock,
+and builds under `data/build-linux/<game>`. The launcher reads
+`data/build-root-linux.txt` and uses case-sensitive CMake source ownership checks.
+Windows build roots, portable tools and PGO profiles are not reused. Linux
+controller capture uses SDL2; gameplay retains raylib. The renderer and System V
+VU1 JIT already have Linux paths in the runtime; do not claim GPU validation from
+compiling them. Linux PGO/automated recording, IOP training, packaging and binary
+updates remain unimplemented. See `docs/linux.md` for stages and acceptance gates.
+Run `tools/test/linux_pipeline_tests.py` plus `tools/test/pipeline_tests.py` for
+pipeline changes. `.github/workflows/linux.yml` compiles the launcher and runtime
+library without game data; Linux/Steam Deck performance remains unvalidated.
+
 ## Performance target for public builds
 
 Target stable 60 guest frames/s on modest and powerful supported PCs. The i5-8265U laptop and Xeon/RX 580 desktop

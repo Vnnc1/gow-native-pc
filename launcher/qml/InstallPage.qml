@@ -57,7 +57,7 @@ ScrollView {
         // (build.ps1 stage tune); without it the plain build
         // On small CPUs (4 threads or fewer) the profile-guided pass is two full -O3 builds, about an extra hour or more:
         // record the game on the plain build instead (build + optimize); the "pgo" maintenance button stays available.
-        if (!prepareFirstPlay) stages += ",build"
+        if (lanzador.sistema === "linux" || !prepareFirstPlay) stages += ",build"
         else stages += installer.cpuThreads() <= 4 ? ",build,optimize" : ",tune"
         installer.run(stages, { isos: compatibleIsos(), config: "Release" })
     }
@@ -214,7 +214,7 @@ ScrollView {
                     // the profile-guided pass (tune) builds the game once with the new runtime and retrains its profile in
                     // the same run: a plain build followed by the "pgo" step the Home page then recommends compiled the
                     // whole game three times. Small CPUs (4 threads or fewer) keep the plain build, as the install does.
-                    onClicked: root.maintenance("tools,fetch,configure,recomp,sync," + (installer.cpuThreads() <= 4 ? "build" : "tune"))
+                    onClicked: root.maintenance("tools,fetch,configure,recomp,sync," + (lanzador.sistema === "linux" || installer.cpuThreads() <= 4 ? "build" : "tune"))
                 }
             }
         }
@@ -312,6 +312,7 @@ ScrollView {
                 Interruptor { checked: root.scanDisc; enabled: !installer.running; onToggled: root.scanDisc = checked }
             }
             Fila {
+                visible: lanzador.sistema !== "linux"
                 titulo: Tema.t("instFirstPlay")
                 descripcion: Tema.t("instFirstPlayDesc")
                 Interruptor { checked: root.prepareFirstPlay; onToggled: root.prepareFirstPlay = checked }
@@ -479,6 +480,7 @@ ScrollView {
             }
             Fila {
                 // the installed game's build tells whether the profile is in use (InstallerBackend::pgoApplied)
+                visible: lanzador.sistema !== "linux"
                 readonly property bool aplicado: root.env.game && !installer.running && installer.pgoApplied()
                 titulo: Tema.t("instPgo") + (aplicado ? "  ·  " + Tema.t("instPgoOn") : (root.env.game ? "  ·  " + Tema.t("instPgoRec") : ""))
                 descripcion: Tema.t("instPgoDesc")

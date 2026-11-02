@@ -37,17 +37,17 @@ namespace
     }
 
     // A Python 3 that really runs: the Microsoft Store's python.exe stub in WindowsApps is on PATH without being a Python
-    // (it only opens the Store), so being on PATH is not enough. "python" first, then the "py" launcher.
+    // (it only opens the Store), so being on PATH is not enough. Require 3.12 for the shared recompiler helpers.
     QString workingPython()
     {
         static const QString found = []
         {
-            for (const QString &candidate : {QStringLiteral("python"), QStringLiteral("py")})
+            for (const QString &candidate : {QStringLiteral("python3"), QStringLiteral("python"), QStringLiteral("py")})
             {
                 if (!onPath(candidate))
                     continue;
                 QProcess probe;
-                probe.start(candidate, {QStringLiteral("-c"), QStringLiteral("import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)")});
+                probe.start(candidate, {QStringLiteral("-c"), QStringLiteral("import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)")});
                 if (probe.waitForFinished(8000) && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0)
                     return candidate;
                 probe.kill();
@@ -72,9 +72,11 @@ InstallerBackend::InstallerBackend(QObject *parent) : QObject(parent), m_root(fi
 // the portable Python of the build tools (data/_tools, build.ps1 stage "tools"), else a system one
 QString InstallerBackend::python() const
 {
+#ifdef Q_OS_WIN
     const QString portable = m_root + QStringLiteral("/data/_tools/python/python.exe");
     if (QFileInfo::exists(portable))
         return portable;
+#endif
     const QString found = workingPython();
     return found.isEmpty() ? QStringLiteral("python") : found;
 }
@@ -82,6 +84,10 @@ QString InstallerBackend::python() const
 // Read the same portable-tool manifest as the PowerShell pipeline.
 bool InstallerBackend::toolsReady() const
 {
+#ifdef Q_OS_LINUX
+    return !workingPython().isEmpty() && onPath("git") && onPath("cmake")
+        && onPath("ninja") && onPath("clang") && onPath("clang++") && onPath("pkg-config");
+#else
     QFile manifest(m_root + QStringLiteral("/tools/pipeline/toolchains.json"));
     if (!manifest.open(QIODevice::ReadOnly))
         return false;
@@ -96,6 +102,7 @@ bool InstallerBackend::toolsReady() const
             return false;
     }
     return true;
+#endif
 }
 
 // the CMake/Ninja build folder: a short path (the runtime's dependencies exceed MAX_PATH under long folders), chosen
@@ -103,22 +110,32 @@ bool InstallerBackend::toolsReady() const
 // another copy already uses that one)
 QString InstallerBackend::buildRoot() const
 {
+#ifdef Q_OS_LINUX
+    QFile file(m_root + QStringLiteral("/data/build-root-linux.txt"));
+#else
     QFile file(m_root + QStringLiteral("/data/build-root.txt"));
+#endif
     if (file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
         const QString path = QString::fromUtf8(file.readAll()).trimmed();
         if (!path.isEmpty())
             return QDir::fromNativeSeparators(path);
     }
+#ifdef Q_OS_LINUX
+    return m_root + QStringLiteral("/data/build-linux/") + m_game;
+#else
     return QStringLiteral("C:/gow-build");
+#endif
 }
 
 QString InstallerBackend::runnerPath() const
 {
     // clang builds go to <build root>-clang (build.ps1)
     QString folder = buildRoot();
+#ifdef Q_OS_WIN
     if (installedToolchain(m_root) == QStringLiteral("clang"))
         folder += QStringLiteral("-clang");
+#endif
     // A fresh installation must not reuse the default build folder of another repository copy.
     QFile cache(folder + QStringLiteral("/CMakeCache.txt"));
     if (!cache.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -132,9 +149,18 @@ QString InstallerBackend::runnerPath() const
             source = QDir::cleanPath(QDir::fromNativeSeparators(QString::fromUtf8(line.mid(prefix.size()))));
     }
     const QString expected = QDir::cleanPath(m_root + QStringLiteral("/engine/runtime/PS2Recomp"));
-    if (source.compare(expected, Qt::CaseInsensitive) != 0)
+#ifdef Q_OS_WIN
+    const auto pathCase = Qt::CaseInsensitive;
+#else
+    const auto pathCase = Qt::CaseSensitive;
+#endif
+    if (source.compare(expected, pathCase) != 0)
         return {};
+#ifdef Q_OS_WIN
     const QString exe = folder + QStringLiteral("/ps2xRuntime/ps2EntryRunner.exe");
+#else
+    const QString exe = folder + QStringLiteral("/ps2xRuntime/ps2EntryRunner");
+#endif
     return QFileInfo::exists(exe) ? exe : QString();
 }
 
@@ -256,7 +282,11 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
 {
     if (m_process)
         return false;
+#ifdef Q_OS_WIN
     const QString script = m_root + QStringLiteral("/tools/pipeline/build.ps1");
+#else
+    const QString script = m_root + QStringLiteral("/tools/pipeline/linux.py");
+#endif
     // An antivirus can quarantine the pipeline script: PowerShell then reports "the term ... is not recognized" (the file
     // was there when it checked -File and gone when it ran it), which says nothing to a player. Say what happened.
     if (!QFileInfo::exists(script))
@@ -264,6 +294,7 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
         QMetaObject::invokeMethod(this, [this] { emit finished(false, kPipelineScriptGone); }, Qt::QueuedConnection);
         return true;
     }
+#ifdef Q_OS_WIN
     QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
                      QStringLiteral("-File"), script,
                      QStringLiteral("-Game"), m_game, QStringLiteral("-Stages"), stages};
@@ -279,9 +310,22 @@ bool InstallerBackend::run(const QString &stages, const QVariantMap &options)
     args << QStringLiteral("-Toolchain") << QStringLiteral("clang");
     if (options.value(QStringLiteral("ltcg")).toBool())
         args << QStringLiteral("-Ltcg");
+#else
+    QStringList args{QStringLiteral("-I"), QStringLiteral("-u"), script,
+                     QStringLiteral("--game"), m_game, QStringLiteral("--stages"), stages,
+                     QStringLiteral("--config"), options.value(QStringLiteral("config"), QStringLiteral("Release")).toString()};
+    const QString xdelta = options.value(QStringLiteral("xdelta")).toString();
+    if (!xdelta.isEmpty()) args << QStringLiteral("--xdelta") << xdelta;
+    const QStringList isos = options.value(QStringLiteral("isos")).toStringList();
+    if (!isos.isEmpty()) args << QStringLiteral("--discs") << isos;
+#endif
     m_stages = stages;
     m_process = new QProcess(this);
+#ifdef Q_OS_WIN
     m_process->setProgram(QStringLiteral("powershell.exe"));
+#else
+    m_process->setProgram(python());
+#endif
     m_process->setArguments(args);
     // The runtime keeps no shader cache: PS2X_GS_SHADER_CACHE_DIR is not read, so none is passed.
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
@@ -351,12 +395,20 @@ void InstallerBackend::cancel()
     if (!m_process)
         return;
     // the pipeline starts compilers and the game: end the whole process tree
+#ifdef Q_OS_WIN
     QProcess::execute(QStringLiteral("taskkill"), {QStringLiteral("/T"), QStringLiteral("/F"), QStringLiteral("/PID"),
                                                    QString::number(m_process->processId())});
+#else
+    m_process->terminate(); // linux.py signals only its private process group
+#endif
 }
 
 void InstallerBackend::checkUpdate()
 {
+#ifndef Q_OS_WIN
+    emit updateChecked({{QStringLiteral("error"), QStringLiteral("Linux updates use the source checkout; see docs/linux.md.")}});
+    return;
+#else
     auto *p = new QProcess(this);
     p->setProgram(QStringLiteral("powershell.exe"));
     p->setArguments({QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"), QStringLiteral("-File"),
@@ -369,10 +421,15 @@ void InstallerBackend::checkUpdate()
         p->deleteLater();
     });
     p->start();
+#endif
 }
 
 bool InstallerBackend::applyUpdate(const QString &url, const QString &sha256, const QString &version)
 {
+#ifndef Q_OS_WIN
+    Q_UNUSED(url); Q_UNUSED(sha256); Q_UNUSED(version);
+    return false;
+#else
     if (m_process || url.isEmpty())
         return false;
     // detached: the script waits for this process to end before replacing its files, then starts the launcher again
@@ -384,6 +441,7 @@ bool InstallerBackend::applyUpdate(const QString &url, const QString &sha256, co
     if (started)
         QCoreApplication::quit();
     return started;
+#endif
 }
 
 int InstallerBackend::cpuThreads() const
@@ -396,6 +454,8 @@ bool InstallerBackend::cpuSupported() const
 #if (defined(__clang__) || defined(__GNUC__)) && (defined(__x86_64__) || defined(__i386__))
     __builtin_cpu_init();
     return __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt");
+#elif defined(Q_OS_LINUX)
+    return false; // The native Linux pipeline currently targets x86-64-v2 only.
 #else
     return true;
 #endif
@@ -425,9 +485,14 @@ bool InstallerBackend::needsRebuild() const
 
 void InstallerBackend::openRequirementPage(const QString &which) const
 {
+#ifdef Q_OS_LINUX
+    Q_UNUSED(which);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(m_root + QStringLiteral("/docs/linux.md")));
+#else
     static const QVariantMap pages{
         {QStringLiteral("git"), QStringLiteral("https://git-scm.com/download/win")},
         {QStringLiteral("python"), QStringLiteral("https://www.python.org/downloads/windows/")},
     };
     QDesktopServices::openUrl(QUrl(pages.value(which).toString()));
+#endif
 }

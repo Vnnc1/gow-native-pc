@@ -1,0 +1,27 @@
+name: Experimental Linux build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libasound2-dev
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: linux_gcc_64
+          cache: true
+      - name: Pipeline regression tests
+        run: |
+          python3 -I tools/test/pipeline_tests.py
+          python3 -I tools/test/linux_pipeline_tests.py
+          python3 -I tools/test/launcher-languages.py
+      - name: Launcher and runtime library (no game data)
+        run: bash build.sh --stages tools,fetch,launcher,runtime-check --jobs 2

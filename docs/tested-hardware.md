@@ -1,5 +1,20 @@
 # Tested hardware and results
 
+## Linux integration foundation (2026-11-02; Windows host only)
+
+Added a native Clang/Qt/SDL2 source-build pipeline and Linux launcher routing.
+Local validation: 14 existing generation/synchronization tests and 6 Linux
+orchestration tests passed; the POSIX lock test was skipped on Windows. Launcher
+language validation passed, and the llvm-mingw/Qt 6.8.3 Windows launcher compiled.
+These tests cover patch-prefix resume/local-edit protection, compiler flags,
+argument handling and failed-build publication, not Linux execution.
+
+The new Linux CI workflow has not been executed in this session. No Linux
+launcher/runtime binary, GPU rendering, sound, gamepad input, frame pacing or
+Steam Deck gameplay was validated. All Linux hardware tiers remain unvalidated;
+see [Linux acceptance requirements](linux.md). The existing Linux OpenGL and
+System V JIT implementations were not changed or measured in this work.
+
 ## Player log review (2026-10-29, Xeon / RX 580; observational)
 
 Session `20261029-232953-466-5d1a01d1` completes in 565.277 seconds with exit code 0. Recorded configuration:

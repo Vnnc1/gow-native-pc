@@ -3,6 +3,8 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <xinput.h>
+#elif defined(Q_OS_LINUX)
+#include <SDL.h>
 #endif
 
 namespace
@@ -47,14 +49,29 @@ namespace
 
 Mando::Mando(QObject *parent) : QObject(parent)
 {
+#ifdef Q_OS_LINUX
+    m_sdlReady = SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0;
+#endif
     connect(&m_timer, &QTimer::timeout, this, &Mando::leer);
     m_timer.start(1000); // connection check; escuchar() polls every frame
     leer();
 }
 
+Mando::~Mando()
+{
+#ifdef Q_OS_LINUX
+    if (m_controller) SDL_GameControllerClose(m_controller);
+    if (m_sdlReady) SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+#endif
+}
+
 QString Mando::nombre() const
 {
+#ifdef Q_OS_LINUX
+    return m_controller ? QString::fromUtf8(SDL_GameControllerName(m_controller)) : QString();
+#else
     return m_slot >= 0 ? QStringLiteral("XInput %1").arg(m_slot + 1) : QString();
+#endif
 }
 
 void Mando::escuchar(bool activo)
@@ -67,10 +84,10 @@ void Mando::escuchar(bool activo)
 
 void Mando::leer()
 {
-#ifdef Q_OS_WIN
-    const XInputGetStateFn get = xinputGetState();
     int slot = -1;
     unsigned bits = 0;
+#ifdef Q_OS_WIN
+    const XInputGetStateFn get = xinputGetState();
     if (get)
         for (DWORD i = 0; i < 4 && slot < 0; ++i)
         {
@@ -81,6 +98,36 @@ void Mando::leer()
                 bits = codigos(state.Gamepad);
             }
         }
+#elif defined(Q_OS_LINUX)
+    if (!m_sdlReady) return;
+    SDL_PumpEvents();
+    SDL_GameControllerUpdate();
+    if (m_controller && !SDL_GameControllerGetAttached(m_controller)) {
+        SDL_GameControllerClose(m_controller);
+        m_controller = nullptr;
+    }
+    if (!m_controller) {
+        for (int i = 0; i < SDL_NumJoysticks() && !m_controller; ++i)
+            if (SDL_IsGameController(i)) m_controller = SDL_GameControllerOpen(i);
+    }
+    if (m_controller) {
+        slot = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(m_controller));
+        static const struct { SDL_GameControllerButton button; int code; } mapping[] = {
+            {SDL_CONTROLLER_BUTTON_DPAD_UP, 1}, {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 2},
+            {SDL_CONTROLLER_BUTTON_DPAD_DOWN, 3}, {SDL_CONTROLLER_BUTTON_DPAD_LEFT, 4},
+            {SDL_CONTROLLER_BUTTON_Y, 5}, {SDL_CONTROLLER_BUTTON_B, 6},
+            {SDL_CONTROLLER_BUTTON_A, 7}, {SDL_CONTROLLER_BUTTON_X, 8},
+            {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 9}, {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 11},
+            {SDL_CONTROLLER_BUTTON_BACK, 13}, {SDL_CONTROLLER_BUTTON_START, 15},
+            {SDL_CONTROLLER_BUTTON_LEFTSTICK, 16}, {SDL_CONTROLLER_BUTTON_RIGHTSTICK, 17}};
+        for (const auto &entry : mapping)
+            if (SDL_GameControllerGetButton(m_controller, entry.button)) bits |= 1u << entry.code;
+        if (SDL_GameControllerGetAxis(m_controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8192) bits |= 1u << 10;
+        if (SDL_GameControllerGetAxis(m_controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8192) bits |= 1u << 12;
+    }
+    // Qt owns the UI event loop; discard SDL events after polling to bound its queue.
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+#endif
     if (slot != m_slot)
     {
         m_slot = slot;
@@ -97,5 +144,4 @@ void Mando::leer()
                 break;
             }
     }
-#endif
 }

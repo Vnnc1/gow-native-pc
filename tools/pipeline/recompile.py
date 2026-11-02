@@ -111,7 +111,7 @@ def generate(root, game, build, codegen, force=False):
     folder = data / 'recomp'
     folder.mkdir(parents=True, exist_ok=True)
     elf = Path(read_json(data / 'languages.json')['recompile_elf']).resolve()
-    compiler = Path(build).resolve() / 'ps2xRecomp/ps2_recomp.exe'
+    compiler = Path(build).resolve() / 'ps2xRecomp' / ('ps2_recomp.exe' if os.name == 'nt' else 'ps2_recomp')
     function_map = runtime / profile['runtime']['function_map']
     template_path = runtime / profile['runtime']['recompiler_template']
     environment = {k: v for k, v in os.environ.items() if k.startswith('PS2X_')}

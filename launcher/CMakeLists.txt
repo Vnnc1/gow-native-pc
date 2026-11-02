@@ -22,8 +22,13 @@ qt_add_executable(gow-launcher WIN32
     src/installer_backend.h
     src/mando.cpp
     src/mando.h
-    gow-launcher.rc
 )
+if(WIN32)
+    target_sources(gow-launcher PRIVATE gow-launcher.rc)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(SDL2 REQUIRED CONFIG)
+    target_link_libraries(gow-launcher PRIVATE SDL2::SDL2)
+endif()
 
 set(ARCHIVOS_QML
     qml/Main.qml

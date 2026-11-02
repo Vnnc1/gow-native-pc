@@ -17,6 +17,10 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 
 </div>
 
+**Linux / Steam Deck:** an experimental native source-build entry point is available.
+See [Linux build instructions and remaining validation](docs/linux.md). There is
+no validated Linux binary release or Steam Deck performance claim yet.
+
 > [!IMPORTANT]
 > This repository contains **no game files**. You need your own copy of God of War. The native runtime
 > (**PS2Recomp**, as extended by Waffle565, KIexster and the Tobiichi port) is **required**; the launcher downloads it,

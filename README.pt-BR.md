@@ -17,6 +17,10 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 
 </div>
 
+**Linux / Steam Deck:** há uma entrada experimental para compilação nativa a partir
+do código-fonte. Veja as [instruções e validações pendentes](docs/linux.md).
+Ainda não há uma versão binária Linux validada nem garantia de desempenho no Steam Deck.
+
 > [!IMPORTANT]
 > Este repositório **não contém arquivos do jogo**. Você precisa da sua própria cópia de God of War. O runtime nativo
 > (**PS2Recomp**, ampliado por Waffle565, KIexster e pelo port Tobiichi) é **obrigatório**; o launcher o baixa, ele não

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+COMPILER = 'build/ps2xRecomp/' + ('ps2_recomp.exe' if os.name == 'nt' else 'ps2_recomp')
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('recompile', ROOT / 'tools/pipeline/recompile.py')
 pipeline = importlib.util.module_from_spec(spec)
@@ -27,7 +28,7 @@ class GenerationTests(unittest.TestCase):
             'games/demo/game.toml': '[runtime]\nfunction_map="map.csv"\nrecompiler_template="template.toml"\noverrides=[]\n',
             'engine/runtime/map.csv': 'map',
             'engine/runtime/template.toml': '@OUT@',
-            'build/ps2xRecomp/ps2_recomp.exe': 'compiler',
+            COMPILER: 'compiler',
             'game.elf': 'elf',
             'data/demo/languages.json': json.dumps({'recompile_elf': str(self.root / 'game.elf')}),
         }
@@ -58,7 +59,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_input_content_invalidates_even_with_same_mtime(self):
         self.generate()
-        for name in ['game.elf', 'engine/runtime/map.csv', 'build/ps2xRecomp/ps2_recomp.exe']:
+        for name in ['game.elf', 'engine/runtime/map.csv', COMPILER]:
             path = self.root / name
             stamp = path.stat().st_mtime_ns
             path.write_bytes(path.read_bytes() + b'changed')
