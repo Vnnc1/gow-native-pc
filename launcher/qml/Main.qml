@@ -24,7 +24,12 @@ ApplicationWindow {
     // Page shown: 0 Home, 1 Install, 2 Graphics, 3 Performance, 4 Controls, 5 Cheats, 6 Other.
     property int pagina: pestanaInicial
     // gow-native-pc: memory card copies (F1 > Saves in game, the Saves page here)
-    readonly property string carpetaPartidas: installer.repoRoot + "/data/" + installer.gameId + "/saves"
+    readonly property var selectedGame: idiomaJuego(ajustes.textoJuego)
+        || (!ajustes.textoJuego && idiomasJuego.length ? idiomasJuego[0] : null)
+    readonly property bool selectedRegional: !!(selectedGame && selectedGame.regional)
+    property bool playingRegional: false
+    readonly property string carpetaPartidas: !selectedGame ? "" : selectedRegional ? selectedGame.saves
+        : installer.repoRoot + "/data/" + installer.gameId + "/saves"
     // The Settings object for the pages: inside their Components "ajustes" names the page's own property.
     readonly property var ajustesGuardados: ajustes
 
@@ -99,7 +104,7 @@ ApplicationWindow {
     property var idiomasJuego: installer.languages()
     property string ejecutableJuego: installer.runnerPath()
     property bool pgoAtivo: installer.pgoApplied() // the installed build uses the profile-guided optimisation
-    readonly property bool listo: ejecutableJuego.length > 0 && idiomasJuego.length > 0
+    readonly property bool listo: idiomasJuego.some(function(e) { return !!e.runner })
     // gow-native-pc: launcher updates (GitHub Releases, tools/pipeline/update.ps1). A newer release than this launcher is
     // offered under the version in the side bar.
     property var actualizacion: null
@@ -243,18 +248,19 @@ ApplicationWindow {
             filtro: ajustes.filtro, nitidez: ajustes.nitidez, fxaa: ajustes.fxaa, anisotropico: ajustes.anisotropico,
             escala: escalaElegida(),
             fpsLimite: ajustes.fpsLimite, vsync: ajustes.vsync, mostrarFps: ajustes.mostrarFps,
-            elf: elegido.elf, iso: "", ejecutable: ejecutableJuego,
+            elf: elegido.elf, iso: "", ejecutable: elegido.runner,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
-            capturaVu1: installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
+            // Isolated regional builds use JIT and have no launcher AOT rebuild stage.
+            capturaVu1: elegido.regional ? "" : installer.repoRoot + "/data/" + installer.gameId + "/vu1_capture",
             // VU1 code met without native code is always compiled while playing (x86-64 JIT, GOW_VU1N_X64, inline tier):
             // the native path is the fast one, so it is no longer a switch
-            datosJit: installer.repoRoot + "/data/" + installer.gameId,
+            datosJit: elegido.dataDir || installer.repoRoot + "/data/" + installer.gameId,
             jitInline: true,
             finAnticipado: ajustes.finAnticipado,
             vuRapida: ajustes.vuRapida,
             pacoteTexturas: ajustes.usarPacoteTexturas ? ajustes.pacoteTexturas : "",
             diagnostics: ajustes.diagnostics,
-            framePc: installer.diagnosticsFramePc(),
+            framePc: elegido.framePc || installer.diagnosticsFramePc(),
             // F1 > Saves in game copies the memory card here; the Saves page puts a copy back (GOW_SAVES_DIR)
             partidas: carpetaPartidas,
             saltarVideos: ajustes.saltarVideos, arranqueRapido: ajustes.arranqueRapido,
@@ -268,8 +274,10 @@ ApplicationWindow {
             mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",
             trucos: ajustes.trucos, idioma: Tema.idioma, textoJuego: ajustes.textoJuego
         }
-        if (lanzador.iniciar(a) && ajustes.minimizarAlJugar)
-            minimizarTrasArrancar.start()
+        if (lanzador.iniciar(a)) {
+            playingRegional = !!elegido.regional
+            if (ajustes.minimizarAlJugar) minimizarTrasArrancar.start()
+        }
     }
 
     function ponerPortada(ruta) {
@@ -317,7 +325,7 @@ ApplicationWindow {
                 dialogoError.open()
             } else {
                 ventana.aviso(Tema.tf("terminadoOk", Tema.duracion(segundos)))
-                if (ajustes.autoNative && !installer.running && installer.hasPendingNativeCode())
+                if (!playingRegional && ajustes.autoNative && !installer.running && installer.hasPendingNativeCode())
                     installer.run("native", { config: "Release" })
             }
         }
@@ -941,7 +949,7 @@ ApplicationWindow {
                     }
                     // an installed game without the profile-guided build: point to the step that adds it
                     Text {
-                        visible: ventana.listo && !ventana.pgoAtivo
+                        visible: ventana.listo && !ventana.selectedRegional && !ventana.pgoAtivo
                         text: "▲  " + Tema.t("pgoRecomendado")
                         color: zonaPgo.containsMouse ? Tema.oroClaro : Tema.oro
                         font.pixelSize: 13
@@ -1090,7 +1098,13 @@ ApplicationWindow {
 
     Component {
         id: paginaInstalar
-        InstallPage {}
+        InstallPage {
+            onSelectRegion: function(selection) {
+                ventana.refrescarInstalacion()
+                ajustes.textoJuego = selection
+                ventana.pagina = 0
+            }
+        }
     }
     Component {
         id: paginaGrafico
@@ -1136,8 +1150,9 @@ ApplicationWindow {
     Component {
         id: paginaPartidas
         PaginaPartidas {
+            enabled: !!ventana.selectedGame
             carpeta: ventana.carpetaPartidas
-            elf: { var e = ventana.idiomaJuego(ventana.ajustesGuardados.textoJuego) || ventana.idiomasJuego[0]; return e ? e.elf : "" }
+            elf: ventana.selectedGame ? ventana.selectedGame.elf : ""
             onAviso: (t) => ventana.aviso(t)
         }
     }

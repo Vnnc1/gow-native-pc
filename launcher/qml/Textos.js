@@ -9,6 +9,8 @@
 // French, German, Italian, Russian and Simplified Chinese in idiomas/<code>.js, one file per language (checked
 // against this table by tools/test/launcher-languages.py). A text missing in a language falls back to English.
 var tabla = {
+    instSelectRegion: { tr: "Bu sürümü seç", en: "Select this edition", es: "Seleccionar esta edición", pt: "Selecionar esta edição" },
+    instRebuildPrimary: { tr: "USA/Asia sürümünü yeniden derle", en: "Rebuild USA/Asia", es: "Recompilar USA/Asia", pt: "Recompilar USA/Asia" },
     subtitulo: { tr: "NATIVE PC", en: "NATIVE PC", es: "NATIVE PC", pt: "NATIVE PC" },
     instDemoExcluded: {"en": "Demo editions are not supported. Select a compatible full game disc.", "pt": "Edições Demo não são suportadas. Selecione um disco completo compatível.", "es": "Las demos no están soportadas. Elige un disco completo compatible.", "tr": "Demo sürümleri desteklenmiyor. Uyumlu tam oyun diski seçin."},
     instRegionUnsupported: {"en": "Region recognized, but this edition cannot run in this port yet. Select a compatible USA edition or translation.", "pt": "Região reconhecida, mas esta edição ainda não pode ser executada neste port. Selecione uma edição USA ou tradução compatível.", "es": "Región reconocida, pero esta edición aún no se puede ejecutar en este port. Selecciona una edición USA o traducción compatible.", "tr": "Bölge tanındı ancak bu sürüm bu portta henüz çalışamaz. Uyumlu USA sürümü veya çevirisi seçin."},

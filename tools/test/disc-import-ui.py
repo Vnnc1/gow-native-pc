@@ -45,6 +45,7 @@ ApplicationWindow {
     QtObject {
         id: lanzador
         property string sistema: "windows"
+        property bool jugando: false
         function rutaDesdeUrl(url) { return url.toString() }
     }
     UI.InstallPage { id: page; anchors.fill: parent }
@@ -58,9 +59,11 @@ ApplicationWindow {
                 check(!page.canInstall && page.discs.length === 1, "unsupported region must stay blocked")
                 installer.identified([{path:"/demo.iso", compatible:false, reason_code:"demo_excluded", problems:[]}])
                 check(!page.canInstall, "demo must stay blocked")
+                installer.identified([{path:"/europe.iso", compatible:false, playable:true, selection:"region:europe", reason_code:"regional_installed", problems:[]}])
+                check(!page.canInstall && page.compatibleIsos().length === 0, "regional runner must never enter USA code generation")
                 installer.identified([{path:"/usa.chd", compatible:false, reason_code:"import_failed", problems:["failure"]}])
                 installer.identified([{path:"/usa.chd", compatible:true, problems:[]}])
-                check(page.discs.length === 3, "retry must replace the failed entry")
+                check(page.discs.length === 4, "retry must replace the failed entry")
                 check(page.canInstall, "compatible CHD must enable install")
                 check(JSON.stringify(page.compatibleIsos()) === '["/usa.chd"]', "pipeline must receive the original CHD path only")
                 page.pickIsos(["/next.chd"])

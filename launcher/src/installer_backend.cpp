@@ -1,4 +1,5 @@
 #include "installer_backend.h"
+#include "regional_installations.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -212,13 +213,16 @@ void InstallerBackend::openRunnerFolder() const
 QVariantList InstallerBackend::languages() const
 {
     QFile file(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/languages.json"));
-    if (!file.open(QIODevice::ReadOnly))
-        return {};
-    const QJsonObject manifest = QJsonDocument::fromJson(file.readAll()).object();
+    const QJsonObject manifest = file.open(QIODevice::ReadOnly)
+        ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject();
     QVariantList out;
     for (const QJsonValue &v : manifest.value(QStringLiteral("languages")).toArray())
-        if (QFileInfo::exists(v.toObject().value(QStringLiteral("elf")).toString()))
-            out << v.toObject().toVariantMap();
+        if (QFileInfo::exists(v.toObject().value(QStringLiteral("elf")).toString())) {
+            auto entry = v.toObject().toVariantMap();
+            entry.insert(QStringLiteral("runner"), runnerPath());
+            out << entry;
+        }
+    out.append(RegionalInstallations::read(m_root, m_game));
     return out;
 }
 
@@ -282,6 +286,23 @@ void InstallerBackend::identify(const QStringList &paths)
         if (m_identifying != p) return;
         const QJsonArray list = QJsonDocument::fromJson(p->readAllStandardOutput()).array();
         QVariantList results = list.toVariantList();
+        // A foreign-code disc is playable only through its registered regional runner.
+        // Keep compatible=false: the USA recompilation pipeline must never consume it.
+        for (auto &result : results) {
+            auto disc = result.toMap();
+            for (const auto &entry : RegionalInstallations::read(m_root, m_game)) {
+                const auto region = entry.toMap();
+                if (disc.value("region") == region.value("region")
+                    && disc.value("elf_crc") == region.value("elf_crc")
+                    && disc.value("text_sha1") == region.value("text_sha1")) {
+                    disc.insert("playable", true);
+                    disc.insert("selection", region.value("language"));
+                    disc.insert("reason_code", "regional_installed");
+                    disc.insert("problems", QStringList());
+                }
+            }
+            result = disc;
+        }
         if (failed || results.isEmpty())
         {
             results.clear();

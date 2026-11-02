@@ -15,7 +15,8 @@ ScrollView {
     contentWidth: availableWidth
     clip: true
 
-    function refrescar() { lista = lanzador.partidas(carpeta) }
+    function refrescar() { lista = carpeta ? lanzador.partidas(carpeta) : [] }
+    onCarpetaChanged: refrescar()
     Component.onCompleted: refrescar()
     Connections {
         target: lanzador

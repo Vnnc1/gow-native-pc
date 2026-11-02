@@ -70,8 +70,17 @@ Europe SCES_531.33 and Japan SLPM_670.10 have separate Windows builds validated
 through initial ship gameplay. `games/gow1/regions` stores conditional runtime
 overlays, baseline source hashes, function ranges and recompiler entry hints.
 Never apply these overlays to the USA runtime or put them in the global ordinal
-patch chain. The normal installer still rejects these different-code ELFs.
+patch chain. The USA compilation pipeline still rejects these different-code ELFs.
 Use separate runtime snapshots, build roots, discs, cards and boot profiles.
+`tools/pipeline/register_region.py` registers an already validated isolated build
+in ignored `data/<game>/regional-builds.json`. The launcher validates ownership,
+CMake source and ELF/runner hashes, merges these entries into its edition selector,
+and routes gameplay, frame probes and saves per region. Regional JIT-only builds
+disable unused AOT capture files. ISO identification
+exposes `playable` for matching registered builds without setting USA `compatible`.
+Never route these discs to the USA generation stages or auto-native/PGO actions.
+Run `tools/test/register-region-tests.py`, the launcher's `gow_region_tests` target,
+`tools/test/regional-play-ui.py` and `tools/test/disc-import-ui.py` after routing edits.
 See `docs/research/regional-port-2026-11-02.md` for evidence and limitations.
 
 ## Experimental Linux integration

@@ -24,6 +24,9 @@ parser.add_argument("--elf", type=Path, help="Prepared regional ELF; never chang
 parser.add_argument("--frame-pc", help="Validated guest frame probe for the explicit regional ELF")
 parser.add_argument("--normal-boot", action="store_true", help="Exercise the original startup and FMV path")
 parser.add_argument("--pad-script", help="Override scripted input for regional menu conventions")
+parser.add_argument("--scale", type=int, choices=range(1, 9), default=1, help="GS internal resolution multiplier")
+parser.add_argument("--early-finish", action="store_true", help="Exercise the launcher's asynchronous GS finish setting")
+parser.add_argument("--fxaa", action="store_true", help="Exercise the launcher's FXAA setting")
 args = parser.parse_args()
 if any((args.runner, args.elf, args.frame_pc)) and not all((args.runner, args.elf, args.frame_pc)):
     parser.error("Regional tests require --runner, --elf and --frame-pc together")
@@ -51,6 +54,7 @@ session.mkdir()
 (session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
     "test": "scripted input, private card, audio enabled", "visible": args.visible,
     "normal_boot": args.normal_boot, "elf_name": Path(elf).name,
+    "scale": args.scale, "early_finish": args.early_finish, "fxaa": args.fxaa,
     "diagnostics": "detailed" if args.detailed else "frames", "seconds": args.seconds}}))
 env = {k: v for k, v in os.environ.items() if not k.startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
 env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HIDDEN="0" if args.visible else "1",
@@ -61,7 +65,8 @@ env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HID
            GOW_PERF_DIAG="1" if args.detailed else "frames", GOW_FRAME_DIAG="1", GOW_PERF_FRAME_PC=args.frame_pc or profile["diagnostics"]["frame_pc"],
            GOW_AUDIO_STATS="1", GOW_IOP_DRIFT="1", GOW_VU1N_DIAG="1",
            GOW_VU1_SIN_COMPILAR="1", GOW_VU1_CAPTURE_MISSES="0", PS2X_GS_HW="1", PS2X_GS_WORKER="1",
-           GOW_GS_FINISH_ASINCRONO="1", PS2X_GS_HW_SCALE="1", PS2X_GS_ESCALA="1", PS2X_GS_ESCALA_DINAMICA="0",
+           GOW_GS_FINISH_ASINCRONO="1", PS2X_GS_HW_SCALE=str(args.scale), PS2X_GS_ESCALA=str(args.scale), PS2X_GS_ESCALA_DINAMICA="0",
+           GOW_GS_EARLY_FINISH="1" if args.early_finish else "0", TOBIICHI_FXAA="1" if args.fxaa else "0",
            TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720")
 if args.normal_boot:
     env.pop("GOW_FAST_BOOT")

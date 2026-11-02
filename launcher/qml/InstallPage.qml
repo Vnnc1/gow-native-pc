@@ -29,6 +29,7 @@ ScrollView {
     property bool scanDisc: false
     property var scanReport: installer.discScanReport()
     property bool lastOk: true
+    signal selectRegion(string selection)
 
     function refresh() {
         env = installer.environment()
@@ -80,7 +81,8 @@ ScrollView {
     }
     // the game is built for x86-64-v2 (SSE4.2): on an older CPU it would not start after the whole install
     readonly property bool cpuOk: installer.cpuSupported()
-    readonly property bool canInstall: cpuOk && !installer.running && !installer.identifying && (compatibleIsos().length > 0 || languages.length > 0)
+    readonly property bool canInstall: cpuOk && !installer.running && !installer.identifying
+        && (compatibleIsos().length > 0 || languages.some(function(e) { return !e.regional }))
 
     Connections {
         target: installer
@@ -254,8 +256,8 @@ ScrollView {
                     Layout.fillWidth: true
                     spacing: 2
                     Text {
-                        text: (modelData.compatible ? "✔  " : "✖  ") + (modelData.label || modelData.path)
-                        color: modelData.compatible ? Tema.bien : Tema.mal
+                        text: (modelData.compatible || modelData.playable ? "✔  " : "✖  ") + (modelData.label || modelData.path)
+                        color: modelData.compatible || modelData.playable ? Tema.bien : Tema.mal
                         font.pixelSize: 14
                     }
                     Text {
@@ -266,6 +268,12 @@ ScrollView {
                         font.pixelSize: 12
                         wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
+                    }
+                    BotonSecundario {
+                        visible: !!modelData.playable
+                        text: Tema.t("instSelectRegion")
+                        enabled: !installer.running && !installer.identifying && !lanzador.jugando
+                        onClicked: root.selectRegion(modelData.selection)
                     }
                 }
             }
@@ -329,7 +337,8 @@ ScrollView {
             RowLayout {
                 spacing: 10
                 BotonSecundario {
-                    text: root.env.game ? Tema.t("instRebuildAll") : Tema.t("instInstall")
+                    text: root.env.game ? Tema.t(root.languages.some(function(e) { return !!e.regional })
+                        ? "instRebuildPrimary" : "instRebuildAll") : Tema.t("instInstall")
                     enabled: root.canInstall
                     onClicked: root.install()
                 }

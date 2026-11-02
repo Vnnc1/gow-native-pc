@@ -18,6 +18,10 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTimer>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <cstdio>
 
 namespace
 {
@@ -77,6 +81,22 @@ int main(int argc, char *argv[])
 
     Lanzador lanzador;
     InstallerBackend installer;
+    // Read-only diagnostics also exercise the same region selection used by QML.
+    if (app.arguments().contains(QStringLiteral("--inspect-installation"))) {
+        const auto bytes = QJsonDocument(QJsonArray::fromVariantList(installer.languages())).toJson();
+        std::fwrite(bytes.constData(), 1, bytes.size(), stdout);
+        return 0;
+    }
+    const int identifyArgument = app.arguments().indexOf(QStringLiteral("--identify-discs"));
+    if (identifyArgument >= 0 && identifyArgument + 1 < app.arguments().size()) {
+        QObject::connect(&installer, &InstallerBackend::identified, &app, [&](const QVariantList &discs) {
+            const auto bytes = QJsonDocument(QJsonArray::fromVariantList(discs)).toJson();
+            std::fwrite(bytes.constData(), 1, bytes.size(), stdout);
+            app.quit();
+        });
+        installer.identify(app.arguments().mid(identifyArgument + 1));
+        return app.exec();
+    }
     Mando mando;
     const QImage icono = dibujarIcono(familiaTitulo, 256);
     QDir().mkpath(lanzador.carpetaDatos());

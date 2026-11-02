@@ -1,4 +1,5 @@
 #include "lanzador.h"
+#include "regional_installations.h"
 #include "session_diagnostics.h"
 
 #include <QCoreApplication>
@@ -363,6 +364,12 @@ bool Lanzador::iniciar(const QVariantMap &a)
         return false;
     }
 
+    const auto regional = RegionalInstallations::forElf(elf);
+    if (!regional.isEmpty() && !RegionalInstallations::samePath(ejecutable, regional.value("runner").toString())) {
+        emit error(QStringLiteral("errorEjecutable"), ejecutable);
+        return false;
+    }
+
     QProcessEnvironment entorno = QProcessEnvironment::systemEnvironment();
     for (const auto &[nombre, valor] : kEntornoBase)
         if (!entorno.contains(QLatin1String(nombre)))
@@ -428,12 +435,12 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.insert(QStringLiteral("TOBIICHI_TRUCOS"), trucos);
     entorno.insert(QStringLiteral("TOBIICHI_IDIOMA"), a.value(QStringLiteral("idioma"), QStringLiteral("en")).toString());
     // Capture context for missing native blocks; "Speed up visited areas" compiles it for future sessions.
-    const QString capturaVu1 = a.value(QStringLiteral("capturaVu1")).toString();
+    const QString capturaVu1 = regional.isEmpty() ? a.value(QStringLiteral("capturaVu1")).toString() : QString();
     if (!capturaVu1.isEmpty() && QDir().mkpath(capturaVu1))
         entorno.insert(QStringLiteral("GOW_VU1_CAPTURA"), capturaVu1);
     else
         entorno.remove(QStringLiteral("GOW_VU1_CAPTURA"));
-    entorno.insert(QStringLiteral("GOW_VU1_CAPTURE_MISSES"), QStringLiteral("1"));
+    entorno.insert(QStringLiteral("GOW_VU1_CAPTURE_MISSES"), regional.isEmpty() ? QStringLiteral("1") : QStringLiteral("0"));
     // Keep diagnostic overrides from leaking into normal play; the JIT helper tier is a user-selected fallback.
     entorno.remove(QStringLiteral("GOW_VU1X_ONLY"));
     entorno.insert(QStringLiteral("GOW_VU1X_INLINE"), a.value(QStringLiteral("jitInline"), true).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
@@ -470,7 +477,7 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.insert(QStringLiteral("TOBIICHI_ICONO"), rutaIcono());
     // Image: aspect ratio (widescreen changes the game camera) and scaling.
     const QString aspecto = a.value(QStringLiteral("aspecto")).toString();
-    if (aspecto.isEmpty() || aspecto == QStringLiteral("4:3"))
+    if (!regional.isEmpty() || aspecto.isEmpty() || aspecto == QStringLiteral("4:3"))
         entorno.remove(QStringLiteral("TOBIICHI_PANORAMICO"));
     else
         entorno.insert(QStringLiteral("TOBIICHI_PANORAMICO"), aspecto);
@@ -541,8 +548,14 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.insert(QStringLiteral("GOW_SAVES_DIR"), partidas);
     else
         entorno.remove(QStringLiteral("GOW_SAVES_DIR"));
-    if (!entorno.contains(QStringLiteral("GOW_MC0")))
+    if (!regional.isEmpty() || !entorno.contains(QStringLiteral("GOW_MC0")))
         entorno.insert(QStringLiteral("GOW_MC0"), rutaTarjeta(elf));
+    if (!regional.isEmpty()) {
+        // Regional builds do not contain the USA camera patches or its diagnostic warp address.
+        entorno.remove(QStringLiteral("GOW_WARP"));
+        entorno.insert(QStringLiteral("GOW_PERF_FRAME_PC"), regional.value("framePc").toString());
+        entorno.insert(QStringLiteral("GOW_SAVES_DIR"), regional.value("saves").toString());
+    }
 
     // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
     QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
@@ -678,6 +691,8 @@ namespace
 
 QString Lanzador::rutaTarjeta(const QString &elf) const
 {
+    const auto regional = RegionalInstallations::forElf(elf);
+    if (!regional.isEmpty()) return regional.value("card").toString();
     const QString ajuste = qEnvironmentVariable("GOW_MC0");
     if (!ajuste.isEmpty() && ajuste != QStringLiteral("0"))
         return ajuste;

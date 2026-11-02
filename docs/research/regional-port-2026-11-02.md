@@ -2,8 +2,9 @@
 
 Europe and Japan now have independently compiled Windows runners that reached
 visible ship gameplay. This is initial-level validation, not whole-game support.
-The production Asia/USA installation remains unchanged. Regional installation
-through the main launcher's importer is not enabled yet.
+The production Asia/USA installation remains unchanged. The launcher now selects
+these separately registered builds and recognizes matching ISOs as playable.
+Fresh regional compilation is still a separate procedure.
 
 ## Exact identities and builds
 
@@ -92,7 +93,55 @@ pipeline tests passed 17/17, Linux orchestration passed 6 with one POSIX-only
 skip, and `regional-overlays.py` passed both regional subtests. These checks do
 not broaden the regional gameplay coverage beyond the sessions above.
 
-## Limits
+## Launcher integration and regression audit
+
+The registered region selector now routes runner, ELF, frame probe and private
+card/save paths together. The real ISOs were identified through the compiled
+launcher backend: Europe/Japan returned `playable=true` with their regional
+selection keys, while Asia retained the existing USA-compatible path. Foreign
+discs never enter USA recompilation. The main rebuild button explicitly names
+USA/Asia when regional builds are present; regional automatic AOT/PGO is disabled.
+
+Regional play keeps JIT enabled but disables unused VU1 capture files. Recording
+them would add disk work without a regional launcher AOT rebuild path. USA capture
+and rendering settings are unchanged. Hashing installed binaries is cached by file
+metadata and occurs during selection/startup, never on the game's frame loop.
+The Saves list refreshes on region changes; missing regional builds do not silently
+fall back to the USA card. Both runtime and launcher backups use the same private card.
+
+Integrity audit (`data/region-validation/integrity-audit.json`):
+
+- Original USA/Asia runner, language manifest and build-root hashes still match.
+- 139 non-overlaid runtime source files per region match the original after newline
+  normalization, including all 16 inspected GS/display/texture-store files.
+- The complete TOC and 16 evenly spaced 1 MiB samples of each PAK match each
+  source ISO for Asia, Europe and Japan; sizes also match. This is sampled PAK
+  validation, not a complete media checksum or whole-game texture validation.
+
+Additional visible, private-card gameplay tests:
+
+| Region | Settings | Session under data/gow1/logs | Result |
+| --- | --- | --- | --- |
+| Asia / USA | 1x | session-game-20261102-165959 | 11/11, ship combat captured |
+| Japan | 2x, FXAA, early FINISH | session-game-20261102-171037 | 11/11, ship combat captured |
+| Europe | 2x, FXAA, early FINISH | session-game-20261102-171427 | 11/11, ship combat captured |
+
+Each run lasted 100 seconds. The first Asia attempt (`165557`) stayed at the
+menu; a repeat with longer scripted confirm holds reached gameplay. Its binary
+hash was unchanged throughout. These are functional tests, not controlled A/B
+performance measurements; some verification/build work overlapped the Asia repeat.
+No new FPS regression conclusion is drawn from those runs. The regions still lack
+USA's PGO training; equal performance across editions is not established.
+
+Checks passed: 17 pipeline tests, 4 registration tests, the Qt regional registry
+test, real Main.qml play/save routing, InstallPage import gating, language keys,
+6 memory/QTE CTests, and disc import tests (8 passed, 6 optional real-CHD checks
+skipped). Launcher build succeeded and was deployed. Screenshots confirmed all
+three edition selectors in the compiled launcher. Desktop click automation failed
+with `coordinate input geometry is unavailable`; the real QML handlers were
+therefore exercised with mocked children, while games were tested separately.
+
+## Remaining limits
 
 - Full campaign, save-altar save/load, all European language choices and every
   keyboard/mouse QTE have not been validated in these regional builds.
@@ -101,5 +150,5 @@ not broaden the regional gameplay coverage beyond the sessions above.
 - Diagnostic GOW_WARP and enhanced host widescreen patches are not validated;
   do not enable them. The normal game's own display settings remain separate.
 - These functional tests establish neither stable 60 FPS nor Linux/Steam Deck
-  compatibility. Regional builds are currently separate from launcher import,
-  update and rebuild workflows; use the direct executables above.
+  compatibility. Regional builds are selectable in the launcher, but rebuilding
+  and updating them still requires the isolated procedure and re-registration.

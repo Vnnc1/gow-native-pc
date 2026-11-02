@@ -44,10 +44,10 @@ See [MAME's chdman documentation](https://docs.mamedev.org/tools/chdman.html).
 | Edition | Boot executable | Native playback |
 | --- | --- | --- |
 | USA | SCUS_973.99 | Existing supported code signature |
-| Japan | SLPM_670.10 | Recognized; runtime port still required |
+| Japan | SLPM_670.10 | Exact measured image: isolated Windows build, opening gameplay validated; selectable when registered |
 | Supplied Asia ISO | SCUS_973.99 | Built and tested in opening gameplay; executable identical to USA |
 | Other Asia serial | SCAJ_300.10 | Recognized; this serial has not been validated |
-| Europe / Australia | SCES_531.33 | Inspected; experimental code generation only, runtime port incomplete |
+| Europe / Australia | SCES_531.33 | Exact measured image: isolated Windows build, opening gameplay validated; selectable when registered |
 | Europe alternate serial | SCES_515.33 | Recognized; no local disc/runtime validation |
 | USA / Europe demos | SCUS_974.67 / SCED_534.31 | Explicitly excluded |
 
@@ -68,8 +68,11 @@ These are preliminary difference measurements, not function-equivalence proof.
 They rule out simply enabling the USA mapping. A real regional port needs its own
 function map, recompiler configuration, verified override and global-data addresses,
 diagnostic PCs, VU1 entry points, save isolation and visible gameplay/audio tests.
-No regional code or media was copied into the repository. The supplied Asia ISO was subsequently built and tested because its executable
-is byte-identical to USA. Japan and Europe gameplay support remains incomplete.
+No guest code or media was copied into the repository. The supplied Asia ISO was built and tested because its executable
+is byte-identical to USA. Japan and Europe now have separate native builds validated through the opening ship.
+The launcher matches CRC and code hash to a registered build and offers **Select this edition** on Install.
+It also lists registered editions on Home. These ISOs never enter USA generation; regional recompilation
+remains a separate process. A missing or modified runner/ELF is not advertised as playable.
 See [regional investigation](research/regional-port-2026-11-02.md).
 
 ## Checks
@@ -83,5 +86,5 @@ source changes, unsupported tracks, per-file errors, regional gates and demos.
 synthetic round trips; Windows `verify` runs tests that need no downloaded tool.
 
 The synthetic tests do not establish whole-game behavior or Linux/Steam Deck
-runtime compatibility. Japan and Europe were identified from actual ISOs but were not run. The supplied
-Asia ISO reached opening gameplay using the USA-compatible executable.
+runtime compatibility. Japan, Europe and the USA-compatible Asia image reached opening gameplay on
+the tested Windows machine. This does not establish whole-campaign support.

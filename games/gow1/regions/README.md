@@ -3,12 +3,20 @@
 These overlays reproduce the Europe/Japan runtime sources used in the Windows
 ship-gameplay tests on 2026-11-02. They are **conditional**, not additions to the
 USA ordinal patch chain. Never apply them to the installed `engine/runtime`.
-The normal installer still rejects these foreign-code ELFs; use their separate
-tested builds. See `docs/research/regional-port-2026-11-02.md` for local paths and
+The USA recompiler still rejects these foreign-code ELFs; the launcher selects
+their separately registered builds. See `docs/research/regional-port-2026-11-02.md` for local paths and
 the remaining acceptance limits.
 
 Run `python -I tools/test/regional-overlays.py` to check source baselines,
 patch applicability, bounded maps, stub/entry addresses and frame probes.
+
+Register a validated build with `python -I tools/pipeline/register_region.py
+--region <europe|japan> --runner <runner.exe> --elf <prepared ELF>
+--data <private region directory>`. This does not copy or alter the primary
+installation. The machine-local registry binds the profile, runner and ELF hashes
+and the CMake source directory. Re-register after a validated rebuild; never ship
+this registry. The launcher lists registered editions on Home and recognizes their
+exact ISO identities on Install, offering selection instead of USA recompilation.
 
 Each region contains:
 

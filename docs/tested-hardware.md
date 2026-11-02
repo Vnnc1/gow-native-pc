@@ -662,6 +662,13 @@ Original Asia/USA runner and installation metadata hashes remained unchanged.
 These are functional checks, not a 60 FPS result or whole-campaign validation.
 See [regional evidence and limitations](research/regional-port-2026-11-02.md).
 
+Follow-up launcher audit: both regional runners also passed 100-second private-card
+ship tests at 2x with FXAA and early FINISH enabled; screenshots showed scenery,
+characters and HUD. Asia/USA passed its repeat with longer menu-confirm holds.
+The original runner hash and sampled disc assets remained unchanged. No controlled
+before/after FPS comparison was performed; these results do not establish equal
+performance between the unprofiled regional builds and the USA PGO build.
+
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 
 Compiler jobs now one per 1.0 GB above 4 GB (11 here; measured 0.5 GB average, 0.64 GB peak per compiler); patch 41

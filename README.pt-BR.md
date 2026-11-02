@@ -164,8 +164,9 @@ O caminho fica registrado em `data/build-root.txt`; o launcher o lê automaticam
 3. Escolha um **perfil gráfico** (página Gráficos), confira os **Controles** se for jogar no teclado e clique em **JOGAR**.
 
 A importação CHD verifica e extrai a imagem para um cache local de ISO, exigindo espaço adicional.
-A imagem Asia fornecida, com executável idêntico ao USA, foi compilada e testada. Os executáveis Japan e Europe
-ainda precisam de adaptação regional do runtime; demos são excluídas. A compatibilidade depende do conteúdo, não do nome.
+A imagem Asia fornecida, com executável idêntico ao USA, foi compilada e testada. As imagens Japan e Europe
+verificadas já têm builds Windows separadas, testadas no início do jogo e selecionáveis no launcher após o registro.
+Elas não usam a recompilação/PGO da USA. Demos continuam excluídas; a compatibilidade depende do conteúdo, não do nome.
 Veja [formatos de disco e compatibilidade regional](docs/disc-import.md).
 
 O tempo depende da CPU, da RAM, do disco e dos downloads; as ~6.400 funções recompiladas do jogo são compiladas no seu
@@ -262,7 +263,8 @@ código da VU1. Relatos de outras máquinas são bem-vindos: ligue antes o **Dia
 
 A compatibilidade é verificada pelo **SHA-1 da seção `.text`** do executável em [`games/gow1/game.toml`](games/gow1/game.toml).
 Traduções que preservam o código original podem ser aceitas mesmo sem uma edição cadastrada; o idioma é detectado pelos
-textos do menu. Traduções que alteram código e outras regiões com código diferente não são suportadas.
+textos do menu. Traduções que alteram código não podem usar esse pipeline. Regiões com código diferente precisam
+de build própria validada e registrada; consulte a tabela de compatibilidade regional.
 
 | ISOs escolhidas | Resultado |
 |---|---|

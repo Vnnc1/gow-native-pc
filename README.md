@@ -161,8 +161,9 @@ The base path is recorded in `data/build-root.txt`; the launcher reads it automa
 3. Pick a **graphics profile** (Graphics page), check **Controls** if you play on the keyboard, then **PLAY**.
 
 CHD import verifies and extracts the image into a local ISO cache. It needs additional disk space.
-The supplied Asia image with the USA-identical executable was built and tested. Japan and Europe executables
-still require a regional runtime port; demos are excluded. Compatibility follows the executable, not the filename.
+The supplied Asia image with the USA-identical executable was built and tested. The exact Japan and Europe
+images now have isolated Windows builds tested through opening gameplay; registered builds are selectable in
+the launcher. They cannot use USA recompilation/PGO. Demos are excluded; identity follows the executable, not its filename.
 See [disc formats and regional compatibility](docs/disc-import.md).
 
 Build time depends on the CPU, RAM, storage and downloads; the game's ~6,400 recompiled functions are compiled on your
@@ -258,7 +259,8 @@ from other machines are welcome: turn on **Audio and compilation diagnostics** f
 
 Compatibility is checked against the executable's **`.text` SHA-1** in [`games/gow1/game.toml`](games/gow1/game.toml).
 Translations that preserve the original game code can be accepted even without a named edition entry; their language
-is detected from menu text. Translations that modify code and other regions with different code are not supported.
+is detected from menu text. Translations that modify code cannot use this pipeline. Different-code regions need
+their own validated, registered build; see the regional compatibility table.
 
 | ISOs selected | Result |
 |---|---|
