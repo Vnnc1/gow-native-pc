@@ -18,6 +18,7 @@ parser.add_argument("--game", default="gow1")
 parser.add_argument("--seconds", type=int, default=100)
 parser.add_argument("--visible", action="store_true", help="Show gameplay with audio enabled")
 parser.add_argument("--capture", action="store_true", help="Keep local GS captures at 10/80 seconds (never exported)")
+parser.add_argument("--texture-pack", type=Path, help="Read-only texture-pack A/B test; never changes launcher settings")
 parser.add_argument("--detailed", action="store_true", help="Enable intrusive per-call timing; not an FPS benchmark")
 parser.add_argument("--runner", type=Path, help="Isolated regional runner; requires --elf and --frame-pc")
 parser.add_argument("--elf", type=Path, help="Prepared regional ELF; never changes the installed language manifest")
@@ -28,6 +29,8 @@ parser.add_argument("--scale", type=int, choices=range(1, 9), default=1, help="G
 parser.add_argument("--early-finish", action="store_true", help="Exercise the launcher's asynchronous GS finish setting")
 parser.add_argument("--fxaa", action="store_true", help="Exercise the launcher's FXAA setting")
 args = parser.parse_args()
+if args.texture_pack and not args.texture_pack.is_dir():
+    parser.error("Texture-pack directory must exist")
 if any((args.runner, args.elf, args.frame_pc)) and not all((args.runner, args.elf, args.frame_pc)):
     parser.error("Regional tests require --runner, --elf and --frame-pc together")
 if args.frame_pc:
@@ -40,21 +43,27 @@ if args.frame_pc:
 root = Path(__file__).resolve().parents[2]
 profile = json.loads(subprocess.check_output([sys.executable, "-I", str(root / "tools/pipeline/profile.py"), args.game]))
 data = root / "data" / args.game
-runner = (args.runner.resolve() if args.runner else
-          Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe")
+if args.runner:
+    runner = args.runner.resolve()
+elif sys.platform == 'linux':
+    runner = Path((root / "data/build-root-linux.txt").read_text().strip()) / "ps2xRuntime/ps2EntryRunner"
+else:
+    runner = Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe"
 elf = (str(args.elf.resolve()) if args.elf else
        json.loads((data / "languages.json").read_text(encoding="utf-8"))["recompile_elf"])
 if not runner.is_file() or not Path(elf).is_file():
     parser.error("Runner and prepared ELF must exist")
-helper = root / "launcher/build-clang/deploy/gow-session.exe"
+helper = root / ("data/build-linux/launcher/gow-session" if sys.platform == 'linux'
+                 else "launcher/build-clang/deploy/gow-session.exe")
 output = data / "logs" / time.strftime("session-game-%Y%m%d-%H%M%S")
-output.mkdir()
+output.mkdir(parents=True)
 session = output / "session"
 session.mkdir()
 (session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
     "test": "scripted input, private card, audio enabled", "visible": args.visible,
     "normal_boot": args.normal_boot, "elf_name": Path(elf).name,
     "scale": args.scale, "early_finish": args.early_finish, "fxaa": args.fxaa,
+    "texture_pack": bool(args.texture_pack),
     "diagnostics": "detailed" if args.detailed else "frames", "seconds": args.seconds}}))
 env = {k: v for k, v in os.environ.items() if not k.startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
 env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HIDDEN="0" if args.visible else "1",
@@ -71,6 +80,10 @@ env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HID
 if args.normal_boot:
     env.pop("GOW_FAST_BOOT")
     env.pop("GOW_SKIP_FMV")
+if args.texture_pack:
+    env["GOW_TEXTURE_PACK"] = str(args.texture_pack.resolve())
+    env["GOW_TEXTURE_PACK_STATS"] = "1"
+    env["GOW_TEX_PCSX2_NAMES"] = str(output / "texture-names.txt")
 process = subprocess.Popen([str(helper), str(session), str(runner), elf, str(output if args.capture else root)], cwd=output, env=env)
 try:
     for elapsed in range(args.seconds):
@@ -95,7 +108,7 @@ with zipfile.ZipFile(archive) as report:
 checks = {"exit_zero": meta["exit_code"] == 0, "gameplay": bool(re.search(r"state=11\b.*levelReady=1", log)),
           "vu1_parity": "2000 runs checked, 0 mismatches" in log,
           "frame_distribution": any(r.get("tag") == "gow-frame" and r.get("values", {}).get("p99_ms", 0) > 0 for r in metrics),
-          "host_memory": any(r.get("private_bytes", 0) > 0 for r in metrics),
+          "host_memory": any(r.get("working_set_bytes" if sys.platform == 'linux' else "private_bytes", 0) > 0 for r in metrics),
           "audio_metrics": any(r.get("tag") == "audio-stats" and "requested" in r.get("values", {}) for r in metrics),
           "iop_metrics": any(r.get("tag") == "iop-drift" and "advanced" in r.get("values", {}) for r in metrics),
           "native_metrics": any(r.get("tag") == "vu1n" and "missBlocks" in r.get("values", {}) for r in metrics),

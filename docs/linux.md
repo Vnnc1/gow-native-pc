@@ -2,9 +2,43 @@
 
 The Linux entry point is `bash build.sh`. It builds native ELF executables with
 Clang and system Qt, separate from Windows build folders and PGO profiles.
-This is a development port, **not a validated Linux release or a Steam Deck
-performance claim**. No Linux binary or visible gameplay was verified on the
-Windows machine where this integration was authored.
+This is a development port, **not a validated Steam Deck release or a performance
+claim**. Native launcher compilation and WSLg UI checks are recorded in
+`docs/tested-hardware.md`; distinguish these from gameplay and real-device checks.
+
+## Experimental test archive
+
+`tools/pipeline/package_linux.py` packages tracked sources plus the two native
+launcher executables, verifies every archive member, and writes a SHA-256 file.
+It never includes the recompiled game, extracted discs, cards or runtime checkout.
+The archive uses **system libraries**, not a bundled runtime: consult
+`linux-package.json` for the exact build OS and library dependencies. An Ubuntu
+26.04 binary must not be assumed compatible with SteamOS or older Ubuntu releases.
+
+Extract the archive into a writable Linux filesystem and run `bash start-linux.sh`.
+Install the matching Qt Quick/QML and SDL2 packages first. To rebuild for another
+distribution with the development dependencies below, run `bash setup-linux.sh`,
+then launch `data/build-linux/launcher/gow-launcher`. To install your own compatible
+disc, use the launcher's Install page or:
+
+```sh
+bash setup-linux.sh --discs "/path/to/your/game.iso" --jobs 2
+```
+
+The resulting game stays local. Europe/Japan Windows builds and their registration
+files cannot be reused as Linux builds. On SteamOS, build in an appropriate
+development environment; do not disable the system's read-only protection.
+
+For local WSL tests, open the Linux launcher from PowerShell with:
+
+```powershell
+wsl -d Ubuntu --exec /home/vinicola/gow-linux-experimental/data/build-linux/launcher/gow-launcher
+```
+
+That path describes the maintainer's isolated test checkout. WSLg can display its
+window on Windows. `glxinfo -B` must report the actual renderer: `llvmpipe` means
+software rendering and cannot establish GPU performance. Neither WSLg nor an
+offscreen UI test validates Steam Deck input, audio, suspend/resume or Gaming Mode.
 
 ## Build from source
 
@@ -20,6 +54,14 @@ On Ubuntu 24.04, install the non-Qt dependencies below, then install the Qt 6.8.
 Linux desktop SDK with the Qt installer and export `CMAKE_PREFIX_PATH` to its
 `gcc_64` directory. Ubuntu 24.04's system Qt is too old for this launcher.
 The CI uses the same Qt version.
+
+The local Ubuntu 26.04 WSL build instead uses the distribution's Qt 6.10.2.
+Its additional packages are `qt6-base-dev`, `qt6-declarative-dev`,
+`qml6-module-qtquick`, `qml6-module-qtquick-controls`, `qml6-module-qtquick-layouts`,
+`qml6-module-qtquick-window`, `qml6-module-qtqml-workerscript` and
+`qml6-module-qt-labs-settings`. `qml-qt6` is needed for the QML regression tests;
+`mame-tools` supplies `chdman` for CHD round-trip tests. Do not mix this system Qt
+with an exported path to a different Qt SDK.
 
 ```sh
 sudo apt-get install git python3 clang cmake ninja-build pkg-config \
@@ -51,7 +93,7 @@ launcher,runtime-check,xdelta`. `tools` checks system programs; it does not
 download Windows toolchains or install packages. `runtime-check` builds the
 runtime library without an ISO. `native` rebuilds captured VU1 code. The existing
 System V x64 JIT remains available while playing. Linux does not yet implement
-the Windows automated recording/IOP training, PGO, release packaging, or binary
+the Windows automated recording/IOP training, PGO, portable dependency packaging, or binary
 updater. First-play training and PGO controls are hidden on Linux; these stages
 are rejected rather than silently treated as completed.
 

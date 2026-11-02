@@ -233,7 +233,9 @@ ScrollView {
         Paso {
             numero: 1
             titulo: Tema.t("instToolsTitle")
-            descripcion: root.env.tools ? Tema.t("instToolsOk") : Tema.t("instToolsDesc")
+            descripcion: lanzador.sistema === "linux"
+                ? Tema.t(root.env.tools ? "instLinuxToolsOk" : "instLinuxToolsDesc")
+                : (root.env.tools ? Tema.t("instToolsOk") : Tema.t("instToolsDesc"))
             hecho: root.env.tools
             BotonSecundario {
                 visible: !root.env.tools

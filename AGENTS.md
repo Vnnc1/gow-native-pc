@@ -93,8 +93,15 @@ and builds under `data/build-linux/<game>`. The launcher reads
 Windows build roots, portable tools and PGO profiles are not reused. Linux
 controller capture uses SDL2; gameplay retains raylib. The renderer and System V
 VU1 JIT already have Linux paths in the runtime; do not claim GPU validation from
-compiling them. Linux PGO/automated recording, IOP training, packaging and binary
-updates remain unimplemented. See `docs/linux.md` for stages and acceptance gates.
+compiling them. Linux PGO/automated recording, IOP training, portable dependency
+packaging and binary updates remain unimplemented. `tools/pipeline/package_linux.py`
+creates a host-library launcher/source archive with an OS/dependency manifest and
+verified member hashes; never label that archive universally SteamOS-compatible.
+The Linux diagnostic collector reads bounded `/proc/<child>/stat` CPU/RSS counters;
+RSS is not the Windows private-bytes metric. See `docs/linux.md` for acceptance gates.
+Disc normalization preserves original IRX names and creates missing lowercase
+aliases in the profile's IOP directory for Linux guest requests. Keep existing
+files untouched; `tools/disc/prepare_test.py` covers reruns and case-sensitive names.
 Run `tools/test/linux_pipeline_tests.py` plus `tools/test/pipeline_tests.py` for
 pipeline changes. `.github/workflows/linux.yml` compiles the launcher and runtime
 library without game data; Linux/Steam Deck performance remains unvalidated.

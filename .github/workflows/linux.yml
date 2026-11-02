@@ -24,5 +24,8 @@ jobs:
           python3 -I tools/test/linux_pipeline_tests.py
           python3 -I tools/test/launcher-languages.py
           python3 -I tools/disc/import_test.py --chdman /usr/bin/chdman
+          python3 -I tools/disc/prepare_test.py
       - name: Launcher and runtime library (no game data)
         run: bash build.sh --stages tools,fetch,launcher,runtime-check --jobs 2
+      - name: Linux diagnostic collector
+        run: python3 -I tools/test/session_diagnostics.py data/build-linux/launcher/gow-session

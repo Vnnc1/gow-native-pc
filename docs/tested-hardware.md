@@ -669,6 +669,40 @@ The original runner hash and sampled disc assets remained unchanged. No controll
 before/after FPS comparison was performed; these results do not establish equal
 performance between the unprofiled regional builds and the USA PGO build.
 
+## Experimental WSL Linux build (2026-11-02)
+
+An isolated Ubuntu 26.04.1 WSL2 checkout built the native x86-64 launcher,
+diagnostic helper and USA-compatible game with Clang 21.1.8, Qt 6.10.2 and
+two compiler jobs (7.7 GiB available to the VM). No Windows build, card or
+regional registration was reused. The Linux preparation now supplies lowercase
+IOP module aliases: the first launch exposed missing `IOP_MOD/*.irx` on the
+case-sensitive filesystem despite a successful compilation.
+
+After that fix, the scripted private-card run reached ship gameplay
+(`state=11 levelReady=1`); the 80-second GS capture showed the ship and Kratos.
+Audio/IOP/frame metrics were present, and the session's VU1 verifier completed
+2000 checks without mismatches. WSLg used llvmpipe software rendering, with
+very low guest FPS; this is not a playable-performance result. A temporary
+D3D12 driver probe identified the RX 580 but exposed OpenGL 4.2, below the
+renderer shaders' 4.3 requirement. No driver-version override was used.
+The final session passed all 11 smoke checks, including exit code zero after a
+normal close event sent to the test-owned game window. The first close attempt
+targeted a hidden GS context instead; its subsequent SIGTERM was not counted as
+a successful exit. No player card was used in either run.
+
+Validation also passed 17 generation tests, 7 Linux pipeline tests, 14 real
+synthetic CHD tests, 2 disc-normalization tests, 4 regional-registration tests,
+the import/region/loading QML suites, language checks, 8 Linux diagnostic tests
+and all 10 native CTest suites. VU1 differential tests matched generated modules,
+x64 inline/helper/SSE paths and deterministic self-loop exits for all five seeds.
+The diagnostic suite and import QML also passed on Windows. The Linux input test
+needed the fake host's `IsWindowReady` stub; production runtime code was unchanged.
+
+Steam Deck hardware, Steam Input/reconnects, audible output, suspend/resume,
+Gaming Mode, regional Linux game builds and Mesa/NVIDIA GPU gameplay remain
+unvalidated. The launcher archive uses its build host's libraries, not a portable
+Steam Linux Runtime baseline. See [Linux instructions](linux.md).
+
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 
 Compiler jobs now one per 1.0 GB above 4 GB (11 here; measured 0.5 GB average, 0.64 GB peak per compiler); patch 41

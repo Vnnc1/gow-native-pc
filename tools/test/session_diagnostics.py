@@ -74,7 +74,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual((native["nativePairs"], native["missBlocks"], native["laneFails"]), (123, 7, 0))
         self.assertEqual((jit["compiled"], jit["unsupported"], jit["avgCompileUs"]), (12, 1, 4.0))
         self.assertTrue(any("cpu_percent_one_core" in r for r in rows))
-        self.assertTrue(any(r.get("private_bytes", 0) > 0 for r in rows))
+        memory_metric = "private_bytes" if os.name == 'nt' else "working_set_bytes"
+        self.assertTrue(any(r.get(memory_metric, 0) > 0 for r in rows))
         (self.session / "private.ps2").write_text("SAVE_MUST_NOT_APPEAR")
         (self.session / "private.iso").write_text("ISO_MUST_NOT_APPEAR")
         archive = self.root / "report.zip"
@@ -115,9 +116,13 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.metadata()["state"], "failed_to_start")
 
     def test_crash_exit(self):
-        self.start("import ctypes\nk=ctypes.windll.kernel32\nk.GetCurrentProcess.restype=ctypes.c_void_p\nk.TerminateProcess.argtypes=[ctypes.c_void_p,ctypes.c_uint]\nk.TerminateProcess(k.GetCurrentProcess(),0xC0000005)\n").wait(timeout=10)
+        if os.name == 'nt':
+            child = "import ctypes\nk=ctypes.windll.kernel32\nk.GetCurrentProcess.restype=ctypes.c_void_p\nk.TerminateProcess.argtypes=[ctypes.c_void_p,ctypes.c_uint]\nk.TerminateProcess(k.GetCurrentProcess(),0xC0000005)\n"
+        else:
+            child = "import os,signal,resource\nresource.setrlimit(resource.RLIMIT_CORE,(0,0))\nos.kill(os.getpid(),signal.SIGSEGV)\n"
+        self.start(child).wait(timeout=10)
         self.assertEqual(self.metadata()["state"], "crashed")
-        self.assertEqual(self.metadata()["exit_code_hex"], "c0000005")
+        self.assertEqual(self.metadata()["exit_code_hex"], "c0000005" if os.name == 'nt' else "b")
 
     def test_log_rotation_and_incomplete_lines(self):
         self.start("import sys\nfor i in range(16000): print('line '+str(i)+' '+('x'*1000))\nsys.stdout.write('tail-without-newline')\n").wait(timeout=30)

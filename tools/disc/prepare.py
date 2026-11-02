@@ -82,11 +82,15 @@ def normalise(folder, prof):
     """make an extracted disc self-sufficient for the port (see the module docstring)"""
     d = prof['disc']
     iop = os.path.join(folder, d.get('iop_modules_dir', 'IOP_MOD'))
-    if not os.path.isdir(iop):
-        os.makedirs(iop)
-        for n in os.listdir(folder):
-            if n.upper().endswith('.IRX'):
-                shutil.copy2(os.path.join(folder, n), os.path.join(iop, n))
+    os.makedirs(iop, exist_ok=True)
+    for n in os.listdir(folder):
+        if n.upper().endswith('.IRX') and os.path.isfile(os.path.join(folder, n)):
+            # The guest requests lowercase IRX names; ISO9660 names are uppercase.
+            # Keep both on case-sensitive hosts, including already prepared discs.
+            for name in (n, n.lower()):
+                destination = os.path.join(iop, name)
+                if not os.path.exists(destination):
+                    shutil.copy2(os.path.join(folder, n), destination)
     toc_name = d.get('toc')
     if not toc_name or not os.path.isfile(os.path.join(folder, toc_name)):
         return []

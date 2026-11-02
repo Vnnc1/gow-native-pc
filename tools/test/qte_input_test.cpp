@@ -36,6 +36,7 @@ float GetGamepadAxisMovement(int, int) { return 0; }
 const char *GetGamepadName(int) { return "test"; }
 void SetGamepadVibration(int, float, float, float) {}
 bool IsWindowFocused() { return focused; }
+bool IsWindowReady() { return true; }
 double GetTime() { return clockTime; }
 }
 #ifdef _WIN32

@@ -949,7 +949,7 @@ ApplicationWindow {
                     }
                     // an installed game without the profile-guided build: point to the step that adds it
                     Text {
-                        visible: ventana.listo && !ventana.selectedRegional && !ventana.pgoAtivo
+                        visible: lanzador.sistema !== "linux" && ventana.listo && !ventana.selectedRegional && !ventana.pgoAtivo
                         text: "▲  " + Tema.t("pgoRecomendado")
                         color: zonaPgo.containsMouse ? Tema.oroClaro : Tema.oro
                         font.pixelSize: 13

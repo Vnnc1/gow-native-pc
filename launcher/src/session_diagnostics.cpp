@@ -24,6 +24,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#elif defined(Q_OS_LINUX)
+#include <unistd.h>
 #endif
 
 namespace {
@@ -100,6 +102,9 @@ public:
     quint64 previousCpu = 0, warningLines = 0, rotations = 0;
     bool stopping = false, done = false, writeFailure = false;
     int result = 1;
+#ifdef Q_OS_LINUX
+    bool haveCpuSample = false;
+#endif
 #ifdef Q_OS_WIN
     HANDLE handle = nullptr;
     ~Recorder() override { if (handle) CloseHandle(handle); }
@@ -235,6 +240,33 @@ public:
         if (GlobalMemoryStatusEx(&memory)) values["system_available_ram_bytes"] = qint64(memory.ullAvailPhys);
         SYSTEM_POWER_STATUS power{};
         if (GetSystemPowerStatus(&power)) { values["ac_line_status"] = int(power.ACLineStatus); values["battery_percent"] = int(power.BatteryLifePercent); }
+#elif defined(Q_OS_LINUX)
+        values["process_counters_available"] = false;
+        if (game.processId()) {
+            QFile stat(QStringLiteral("/proc/%1/stat").arg(game.processId()));
+            if (stat.open(QIODevice::ReadOnly)) {
+                const QByteArray bytes = stat.read(4096);
+                // comm can contain spaces and parentheses; fields start after its final ')'.
+                const int end = bytes.lastIndexOf(')');
+                const auto fields = bytes.mid(end + 1).simplified().split(' ');
+                const long ticks = sysconf(_SC_CLK_TCK), page = sysconf(_SC_PAGESIZE);
+                if (end >= 0 && fields.size() > 21 && ticks > 0 && page > 0) {
+                    bool userOk = false, systemOk = false, rssOk = false;
+                    const quint64 user = fields[11].toULongLong(&userOk);
+                    const quint64 system = fields[12].toULongLong(&systemOk);
+                    const qint64 rss = fields[21].toLongLong(&rssOk);
+                    if (userOk && systemOk) {
+                        const quint64 cpu = user + system;
+                        values["process_counters_available"] = true;
+                        if (haveCpuSample && now > lastSample && cpu >= previousCpu)
+                            values["cpu_percent_one_core"] = double(cpu - previousCpu) * 100000.0 / double(ticks) / double(now - lastSample);
+                        previousCpu = cpu;
+                        haveCpuSample = true;
+                    }
+                    if (rssOk && rss >= 0) values["working_set_bytes"] = rss * page;
+                }
+            }
+        }
 #endif
         lastSample = now;
         append(metrics, QJsonDocument(values).toJson(QJsonDocument::Compact) + '\n', logLimit);

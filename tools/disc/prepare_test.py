@@ -11,6 +11,23 @@ import prepare
 
 
 class MovieFallbackTests(unittest.TestCase):
+    def test_guest_irx_case_aliases_and_existing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'SIO2MAN.IRX').write_bytes(b'original module')
+            modules = root / 'modules'
+            modules.mkdir()
+            (modules / 'unrelated.txt').write_bytes(b'keep')
+            profile = {'disc': {'iop_modules_dir': 'modules'}}
+            prepare.normalise(tmp, profile)
+            self.assertEqual((modules / 'sio2man.irx').read_bytes(), b'original module')
+            self.assertEqual((modules / 'SIO2MAN.IRX').read_bytes(), b'original module')
+            (modules / 'sio2man.irx').write_bytes(b'local modification')
+            prepare.normalise(tmp, profile)
+            self.assertEqual((modules / 'sio2man.irx').read_bytes(), b'local modification')
+            self.assertEqual((root / 'SIO2MAN.IRX').read_bytes(), b'original module')
+            self.assertEqual((modules / 'unrelated.txt').read_bytes(), b'keep')
+
     def test_exact_placeholder_only_and_idempotence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
