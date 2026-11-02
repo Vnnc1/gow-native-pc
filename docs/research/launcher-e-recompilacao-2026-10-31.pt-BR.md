@@ -88,3 +88,41 @@ Propostas, da maior para a menor:
    novo o que outra cópia já baixou (~1 min e menos falha de rede).
 
 A VU rápida (patch 51) acrescenta 6 arquivos gerados compilados uma segunda vez: ~1 min em paralelo.
+
+## 3. Item A: recompilação em ~10 min (2026-11-01)
+
+**Medições** (cópia principal, Xeon de 20 threads, clang `-O3` + PGO, sem cache de objetos):
+
+| Medição | Resultado |
+|---|---|
+| Configure numa pasta nova | 234 s; testes de compilador ~46 s, geração 16 s, configuração das dependências ~75 s |
+| Build completa | 9,7 min de parede, 117 min de CPU, paralelismo médio de 12 (de ~18 jobs) |
+| Código do jogo (402 arquivos de unity) | 44 min de CPU |
+| VU1 nativa (exata + rápida) | 44 min de CPU (aqui com 4.413 imagens gravadas; numa instalação nova são ~110) |
+| Arquivos mais longos | `iopn_989nomid` 127 s; `unity_63` 110 s; `programa1–12` da VU1 exata ~55 s cada, no fim da build |
+| VU1 a partir do disco (`vu1disc --compare`) | só **12,4%** dos blocos gravados aparecem no disco no mesmo endereço (53% em qualquer endereço) |
+
+**Feito:**
+- **Patch 55** (`55-iop-native-part-files`): o código nativo do IOP de um módulo grande é dividido em partes de
+  8 chunks. O `989nomid` caiu de 126,5 s para no máximo 24,5 s por parte, compiladas em paralelo; o código gerado não
+  muda. Corta o caminho crítico da build e do rebuild do código nativo depois da gravação. O jogo inicia, chega ao
+  gameplay e o driver de som nativo funciona.
+
+**Descartado:**
+- **VU1 a partir do disco no lugar da gravação**: com 12,4% de cobertura, quase todo o código da VU1 iria para o JIT.
+
+**Próximos cortes, em ordem de ganho:**
+1. **Código do jogo em `-O2`**: 44 min de CPU em `-O3`. O código do EE não é o gargalo de FPS (é a VU1), mas precisa de
+   pares de FPS com o PC ocioso antes de mudar.
+2. **Gravação mais curta** (`[optimize] seconds`, hoje 240): o que a gravação não cobrir o JIT compila no jogo e grava
+   para a próxima "Acelerar áreas visitadas". Medir a cobertura com 120 s.
+3. **Ordem da build**: os arquivos longos (`programa1–12`, unity pesados) começam por último. Um `.ninja_log` de
+   referência ou a ordem das fontes no CMake põe-os no começo (o ninja 1.12+ agenda pelo caminho crítico do log).
+4. **Testes do compilador num cache inicial** (`-C`), amarrado à versão do llvm-mingw: ~30–45 s por configure.
+5. **Runtime e dependências pré-compilados na release** (sem nada do jogo): o configure e a build ficam só com o código
+   gerado do jogo. É o maior corte estrutural, e também o maior trabalho.
+
+**Regra (decisão do projeto, 2026-11-01):** nenhum corte de tempo de compilação entra se baixar o FPS. Os cortes que
+não mudam o código otimizado (patch 55, ordem da build, cache dos testes de compilador, runtime pré-compilado) entram
+direto. Os que mudam (`-O2`, gravação mais curta) só entram com empate em pares de FPS com o PC ocioso, ou junto com um
+ganho de FPS medido maior que a perda, para o saldo ser positivo.

@@ -59,6 +59,10 @@ if ($PSVersionTable.PSVersion.Major -lt 6) { $env:PSModulePath = "$env:SystemRoo
 $ErrorActionPreference = 'Stop'
 trap { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red; exit 1 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$pipelineTemp = Join-Path $root 'data\_tmp'
+New-Item -ItemType Directory -Force $pipelineTemp | Out-Null
+$env:TEMP = $pipelineTemp
+$env:TMP = $pipelineTemp
 $Stages = @(($Stages -join ',') -split ',' | Where-Object { $_ })
 . (Join-Path $PSScriptRoot 'modules/common.ps1')
 $allowedStages = @('tools','fetch','xdelta','discs','vu1disc','configure','recomp','sync','build','pgo','tune','optimize','native','verify','launcher','package','installer')

@@ -24,7 +24,9 @@ Documento vivo: o que falta, em que ordem, e como medir. Base: Xeon E5-2666 v3 +
 ## Fase 1 — patches exatos, incrementais (em andamento)
 
 Cada um é um patch numerado em `engine/patches/`, medido sozinho antes de entrar. O 48 foi usado por uma correção de
-som fora desta fase (`48-sound-exponential-release`) e o 52 pelos texture packs (`52-gs-texture-packs`).
+som fora desta fase (`48-sound-exponential-release`) o 52 pelos texture packs (`52-gs-texture-packs`) e pela mensagem de falha do renderizador; 53 e 54 por correções de
+jogo (QTE, áudio dos vídeos), 55 pela divisão do código nativo do IOP. Os itens ainda não feitos ficam sem número (`—`):
+recebem o próximo número livre quando virarem patch.
 
 | Patch | O quê | Teto / ganho medido | Situação |
 |---|---|---|---|
@@ -35,8 +37,8 @@ som fora desta fase (`48-sound-exponential-release`) e o 52 pelos texture packs 
 | 47 | Contexto OpenGL 4.6 → 4.3 (GPUs Intel HD 4000–4600 e outras que param no 4.3–4.5 caíam no renderizador por software, ~23 FPS num i3-4170 + HD 4400) | testado com a RX 580 limitada a 4.3: renderizador por GPU ativo, mesmo FPS | **feito**; falta rodar numa HD 4400 |
 | 49 | Transições entre blocos (`VU1NativeAccess::chain`) | medido direto (`rdtsc` em 1 de cada 64 chamadas): ~10–11 ns por transição, ~18 milhões/s, **~20% do worker**. Testado e descartado: tirar de linha os casos raros (`blockTiming`, `scalarStart`) — neutro; convenção `preserve_none` (sem salvar registradores) — **pior** (+7% sem PGO, +11% com PGO). O custo não está no prólogo, e sim no trabalho por transição. **Estudo de 2026-10-31** (replay de combate, 4000 execuções, ~174 transições por execução): 15% são auto-laços (95% deles fora do caminho rápido por terem cauda de flags ou FDIV/EFU), 20% saem de blocos com um só sucessor, 39% seguem o sucessor dominante de um bloco condicional. Testados, todos com 0 diferenças e **empate** em pares alternados de 8 rodadas: (a) caminho rápido para 89% dos auto-laços (146,1 vs 146,2 ms); (b) `chain` em linha nas saídas de bloco, caso comum (156,3 vs 156,3 ms com PGO; 178,4 vs 178,5 ms sem PGO nos dois lados). Nem o trabalho de contabilidade nem a chamada pesam: o que resta é o desvio dependente de dados e a troca de código entre blocos, que superblocos não garantem tirar | **parado**: sem ganho mensurável no que um patch removeria; superblocos só com evidência nova (ex.: contadores de desvio errado) |
 | 50 | Quadro de pilha de `VU1Interpreter::run`, `recordReplay` e `recordTask` (chamadas a cada programa da VU1): o código de depuração/gravação que copia o interpretador inteiro passa a um quadro próprio fora de linha. Antes, `run()` reservava 202 KB de pilha a cada chamada, sondados página a página por `___chkstk_ms` | perfil do worker no save de combate: `___chkstk_ms` 2,3% → 0%; replay 0 diferenças; `verify` passa | **feito**; falta FPS em pares com o PC ocioso |
-| 53 | Envio de pacotes (XGKICK → estágio GS): cópia e cabeçalhos por pacote | **medido em 2026-10-31** (perfil do worker no save de combate): `ps2_gs_stage::push` 3,2%, `xgkick` 0,5%, resto do caminho <1% — ~4% no total, bem abaixo da estimativa de 12–15% | **baixa prioridade**: teto ~1–2 FPS. No mesmo perfil: `chain` 27%, blocos gerados 35%, `memcmp` 1,9% (candidato), espera do worker 8% (`ZwWaitForAlertByThreadId`, não é custo) |
-| 54 | Sobras de normalização: dados lidos da memória da VU usados como operandos | teto de normalização restante (~7%) | a estudar (o modo VU rápida, patch 51, já as dispensa) |
+| — | Envio de pacotes (XGKICK → estágio GS): cópia e cabeçalhos por pacote | **medido em 2026-10-31** (perfil do worker no save de combate): `ps2_gs_stage::push` 3,2%, `xgkick` 0,5%, resto do caminho <1% — ~4% no total, bem abaixo da estimativa de 12–15% | **baixa prioridade**: teto ~1–2 FPS. No mesmo perfil: `chain` 27%, blocos gerados 35%, `memcmp` 1,9% (candidato), espera do worker 8% (`ZwWaitForAlertByThreadId`, não é custo) |
+| — | Sobras de normalização: dados lidos da memória da VU usados como operandos | teto de normalização restante (~7%) | a estudar (o modo VU rápida, patch 51, já as dispensa) |
 
 Descartados (medidos, não vale): timing estático completo da VU1 (teto ~5%, dias de trabalho no gerador); AVX2 no
 código da VU1 (0%); checagem de overflow do `madd` mais barata (nenhuma forma exata mais barata que as 5 operações
