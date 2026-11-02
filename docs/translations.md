@@ -22,6 +22,16 @@ repack without `PART2.PAK` gets its TOC part-1 entries pointed at their part-0 c
 
 A Brazilian Portuguese fan translation was tested to gameplay both standalone and full (see `docs/tested-hardware.md`).
 
+### Movie audio and incomplete videos in v0.5.0
+
+Runtime patch 54 fixes stale audio packets from one movie shifting the next movie's
+left/right channel blocks, reproduced in the PT-BR edition. This is an audio fix,
+not restoration of video frames removed from a repacked disc. Missing widescreen
+videos still use the fallback described above; providing the original USA disc
+alongside a compatible translation preserves its original movies in the full edition.
+Check that **Skip FMV videos** is disabled before reporting skipped scenes. Include
+the edition and scene in reports of remaining sound gaps or cut-off videos.
+
 When more than one language is prepared, the launcher asks once which one to play; **Other → Game text** changes it.
 All languages share one memory card (`data/<id>/mc0`).
 

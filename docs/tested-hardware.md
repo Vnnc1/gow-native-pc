@@ -705,6 +705,12 @@ Steam Linux Runtime baseline. See [Linux instructions](linux.md).
 
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 
+The following measurements are historical. The v0.5.0 release packaging did not
+repeat a controlled whole-installation timing or full-campaign FPS benchmark.
+Patch 55 separately measured a native IOP compile unit shrinking from 126.5 s
+to a longest parallel part of 24.5 s on the Xeon; do not report that ratio as
+the speedup of a complete installation.
+
 Compiler jobs now one per 1.0 GB above 4 GB (11 here; measured 0.5 GB average, 0.64 GB peak per compiler); patch 41
 builds register_functions.cpp alone at -O1 (331 s -> 9.8 s). Stage tune (instrumented build, one recorded run for VU1
 code and profile, final build): 24.1 min against about 63 min for the former build, optimize and pgo sequence. Save

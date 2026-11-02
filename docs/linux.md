@@ -8,6 +8,11 @@ claim**. Native launcher compilation and WSLg UI checks are recorded in
 
 ## Experimental test archive
 
+The v0.5.0 Linux download is intended for community testing on Linux PCs and
+Steam Deck. Only the WSL environment below has been exercised locally; this is
+not certification for SteamOS or other distributions. Release features and
+remaining limitations are listed in the [changelog](../CHANGELOG.md#v050--2026-11-02).
+
 `tools/pipeline/package_linux.py` packages tracked sources plus the two native
 launcher executables, verifies every archive member, and writes a SHA-256 file.
 It never includes the recompiled game, extracted discs, cards or runtime checkout.

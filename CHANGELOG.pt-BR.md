@@ -23,6 +23,50 @@ diziam v0.0.x. Agora são v0.1.0, v0.2.0, v0.3.0 e v0.3.1, com os mesmos arquivo
 cima da instalação atual**; daí em diante as atualizações automáticas voltam a funcionar. A compilação do jogo, os
 discos e os saves são mantidos.
 
+## [v0.5.0] — 2026-11-02
+
+### Novidades
+- **Distribuição Linux experimental:** launcher e coletor nativos, pipeline Linux, pacote verificado de fontes/binários
+  e instalador autoextraível `.run`. Destinada a testes em dispositivos Linux e Steam Deck; compilada e testada
+  inicialmente no Ubuntu 26.04 via WSL. Usa bibliotecas do sistema; SteamOS, Deck real e desempenho ainda não validados.
+- **Importação de CHD para recompilação:** imagens CHDv5 suportadas são verificadas e convertidas para um cache de ISO,
+  passando pelas mesmas verificações de compatibilidade do executável. Exige espaço extra e preserva a imagem original.
+- **Regiões:** EUA e a imagem Asia testada, com código idêntico ao USA; builds Windows isoladas de Japão `SLPM_670.10`
+  e Europa `SCES_531.33`, validadas no navio inicial. O launcher seleciona builds correspondentes registradas e separa
+  seus saves. Uma instalação nova não recompila automaticamente discos de código diferente pela pipeline USA.
+  Outros seriais e a campanha completa ainda não foram validados; demos são excluídas.
+- **Nova tela de Acessibilidade:** texture packs e assistência aos controles em uma página própria. As substituições
+  PNG no formato PCSX2 já existentes permitem personalizar o visual; nenhum pack acompanha o projeto.
+- **Assistência de analógico no teclado:** tecla segurada opcional para alternar direções ou girar (G por padrão),
+  interrompida ao soltar/perder foco, sem alterar gamepads conectados. Repetição de L1/L2/R1/R2 ativada individualmente.
+- **Mods de ISO:** aplicação verificada de patches xdelta/VCDIFF em uma nova imagem, preservando o disco de origem.
+
+### Correções
+- **Áudio das cutscenes:** pacotes restantes de um vídeo não corrompem mais o alinhamento dos canais e as vozes PT-BR
+  do vídeo seguinte (patch 54). A cena PT-BR medida passou a corresponder à faixa original dentro do erro de arredondamento;
+  USA permaneceu inalterada. Mantidas as correções anteriores de efeitos sonoros sumindo. Outras cenas ainda precisam de testes.
+- **Combinações de teclado seguradas:** Ctrl + Espaço e Ctrl + WASD preservam os botões do jogo; esquiva padrão em
+  Alt + WASD. A repetição de QTE pausa durante combinações para não interromper ações seguradas (patches 57–58).
+- **Inicialização Linux:** discos preparados recebem aliases IOP em minúsculas para caminhos sensíveis a maiúsculas.
+  O coletor registra CPU/memória RSS no Linux, com testes de falha apropriados à plataforma.
+
+### Compilação e desempenho
+- Módulos IOP nativos compilados em partes paralelas (patch 55). No teste Xeon/Clang registrado, a unidade mais demorada
+  caiu de **126,5 s para 24,5 s**; não é o tempo da instalação completa nem uma comparação entre máquinas diferentes.
+- Reduzir mais o tempo de recompilação e melhorar PCs mais fracos seguem como metas rumo à v1.0.0, sem prazo ou duração
+  prometidos. Mantidas as melhorias de VU1/PGO; as medições não comprovam 60 FPS cravados em toda a categoria intermediária
+  nem na campanha completa. Veja [evidências por hardware](docs/tested-hardware.md).
+- O pacote Windows v0.5.0 **não inclui perfil PGO pré-treinado**; o treinamento local continua disponível.
+
+### Gráficos e limitações restantes
+- Mantidos resolução interna, filtro nítido, FXAA, anisotropia e modo sem bordas para ferramentas externas.
+  **DLSS, inclusive DLSS 5, não está integrado**; escala/geração de quadros externa não equivale a suporte nativo a DLSS.
+- Inimigos transparentes foram reproduzidos com um pack; ainda não foi isolado se a causa está nos arquivos ou no
+  tratamento pelo renderizador. Não foi aplicada uma correção geral de transparência.
+- Os testes Linux chegaram ao gameplay inicial com renderização por software no WSL. Steam Input, suspensão,
+  desempenho de GPU real e builds Linux Japão/Europa ainda precisam de validação. Veja [Linux](docs/linux.md) e
+  [compatibilidade dos discos](docs/disc-import.md).
+
 ## [v0.4.0] — 2026-10-31
 
 Mudanças desde a v0.3.1 na branch de desenvolvimento.
@@ -146,6 +190,7 @@ Antes v1.0.0. 12 commits: a primeira versão.
   do runtime fora do heap do jogo; áudio dos vídeos; saves no memory card mais rápidos; os patches do runtime mantêm as
   quebras de linha.
 
+[v0.5.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.5.0
 [v0.4.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.4.0
 [v0.3.1]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.1
 [v0.3.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.0

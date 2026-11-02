@@ -21,6 +21,50 @@ said v0.0.x. They are now v0.1.0, v0.2.0, v0.3.0 and v0.3.1, with the same files
 releases (it reports 1.0.0 to 3.0.1) does not see 0.x releases as newer: **install v0.4.0 once from its setup over the
 existing installation**; automatic updates work again from there on. Your game build, discs and saves are kept.
 
+## [v0.5.0] — 2026-11-02
+
+### Added
+- **Experimental Linux distribution:** native launcher and diagnostic helper, Linux build pipeline, verified source/binary
+  archive and self-extracting `.run` installer. Intended for testing on Linux devices and Steam Deck; compiled and
+  smoke-tested in Ubuntu 26.04 WSL. Uses host libraries; SteamOS, real Deck hardware and performance are not validated.
+- **CHD import for recompilation:** supported CHDv5 images are verified and converted to a cached ISO, then pass the
+  same executable compatibility checks as ISO imports. Extra disk space is required; source images remain read-only.
+- **Regions:** USA and the tested USA-identical Asia disc; isolated Japan `SLPM_670.10` and Europe `SCES_531.33`
+  Windows builds validated through opening ship gameplay. The launcher selects matching registered builds and keeps
+  their saves separate. A fresh installation does not automatically compile foreign-code discs with the USA pipeline.
+  Other serials and whole-campaign compatibility remain unvalidated; demos are excluded.
+- **Accessibility page:** texture packs and input assistance now have a dedicated page. Existing PCSX2-format PNG
+  replacements can customize the visuals; no packs are distributed with the project.
+- **Keyboard stick assistance:** optional held shake/rotate binding (G by default), with release/focus-loss handling
+  and no changes to connected gamepads. Shoulder-button repetition (L1/L2/R1/R2) is individually opt-in.
+- **ISO mods:** verified xdelta/VCDIFF application to a separate output image, preserving the source disc.
+
+### Fixed
+- **Cutscene audio:** stale packets from a previous movie no longer corrupt the next movie's channel alignment and
+  PT-BR voices (patch 54). The measured PT-BR scene now matches its source audio within rounding error; USA remains
+  unchanged. Earlier disappearing-sound-effect fixes are retained. This does not certify every movie or transition.
+- **Held keyboard chords:** Ctrl + Space and Ctrl + WASD retain their gameplay buttons; default evade moves to Alt +
+  WASD. QTE repetition pauses during chords to avoid interrupting held actions (patches 57–58).
+- **Linux startup:** prepared discs include lowercase IOP-module aliases for case-sensitive paths. The diagnostic
+  helper now records Linux process CPU/RSS, with platform-correct crash tests.
+
+### Build and performance
+- Native IOP modules compile in parallel parts (patch 55). On the recorded Xeon/Clang build, the longest unit fell
+  from **126.5 s to 24.5 s**; this is not the complete installation time or a cross-machine benchmark.
+- Further compilation-time reductions and better performance on slower PCs remain goals toward v1.0.0, without a
+  promised date or duration. Existing VU1/PGO improvements remain; recorded results do not establish locked 60 FPS
+  on every mid-range computer or across the full game. See [hardware evidence](docs/tested-hardware.md).
+- The v0.5.0 Windows package ships **without a pre-trained PGO profile**; local training remains available.
+
+### Graphics and remaining limits
+- Existing internal scaling, sharp filtering, FXAA, anisotropic filtering and borderless external-tool mode remain
+  available. **DLSS, including DLSS 5, is not integrated**; external scaling/frame generation is not native DLSS support.
+- Transparent enemies were reproduced with a replacement pack; pack data versus renderer handling has not been
+  isolated. No blanket alpha correction is included.
+- Linux tests reached initial gameplay with software rendering in WSL. Steam Input, suspend/resume, hardware GPU
+  performance and Japan/Europe Linux builds still need validation. See [Linux instructions](docs/linux.md) and
+  [disc compatibility](docs/disc-import.md).
+
 ## [v0.4.0] — 2026-10-31
 
 Changes since v0.3.1 on the development branch.
@@ -134,6 +178,7 @@ Formerly v1.0.0. 12 commits: the first release.
 - Image fixes at higher internal resolutions from the God of War II native port; MOVZ/MOVN translation; runtime memory
   out of the game's heap; FMV audio streams; faster memory card saves; runtime patches keep their line endings.
 
+[v0.5.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.5.0
 [v0.4.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.4.0
 [v0.3.1]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.1
 [v0.3.0]: https://github.com/Vnnc1/gow-native-pc/releases/tag/v0.3.0

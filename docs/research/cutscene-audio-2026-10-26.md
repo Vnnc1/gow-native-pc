@@ -1,5 +1,11 @@
 # PT-BR cutscene audio: reproduced channel-block misalignment
 
+> **Status update for v0.5.0 (2026-11-02):** the reproduced stale-packet defect was
+> fixed by runtime patch 54. The PT-BR scene's residual RMS fell from about 2245
+> to 1.18 against its source track; USA was unchanged. The investigation below
+> records the earlier diagnosis, not the current fix status. Other cutscenes and
+> transition gaps still require validation; see [runtime patches](../../engine/README.md).
+
 ## Scope and result
 
 The player confirmed that their two saves load normally; the title menu question was resolved without changing
