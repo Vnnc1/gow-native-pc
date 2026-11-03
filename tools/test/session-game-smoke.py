@@ -20,6 +20,7 @@ parser.add_argument("--visible", action="store_true", help="Show gameplay with a
 parser.add_argument("--capture", action="store_true", help="Keep local GS captures at 10/80 seconds (never exported)")
 parser.add_argument("--texture-pack", type=Path, help="Read-only texture-pack A/B test; never changes launcher settings")
 parser.add_argument("--detailed", action="store_true", help="Enable intrusive per-call timing; not an FPS benchmark")
+parser.add_argument("--texture-cache", action="store_true", help="Validate GS texture budget and storage reuse counters")
 parser.add_argument("--runner", type=Path, help="Isolated regional runner; requires --elf and --frame-pc")
 parser.add_argument("--elf", type=Path, help="Prepared regional ELF; never changes the installed language manifest")
 parser.add_argument("--frame-pc", help="Validated guest frame probe for the explicit regional ELF")
@@ -84,6 +85,8 @@ if args.texture_pack:
     env["GOW_TEXTURE_PACK"] = str(args.texture_pack.resolve())
     env["GOW_TEXTURE_PACK_STATS"] = "1"
     env["GOW_TEX_PCSX2_NAMES"] = str(output / "texture-names.txt")
+if args.texture_cache:
+    env["GOW_GS_HW_STATS"] = "1"
 process = subprocess.Popen([str(helper), str(session), str(runner), elf, str(output if args.capture else root)], cwd=output, env=env)
 try:
     for elapsed in range(args.seconds):
@@ -115,6 +118,12 @@ checks = {"exit_zero": meta["exit_code"] == 0, "gameplay": bool(re.search(r"stat
           "jit_metrics": any(r.get("tag") == "vu1x" and "compiled" in r.get("values", {}) for r in metrics),
           "player_marker": any(r.get("type") == "player_marker" for r in events),
           "graceful_stop": not any(r.get("type") == "forced_termination" for r in events)}
+if args.texture_cache:
+    cache = [dict((key, int(value)) for key, value in re.findall(r"(\w+)=(\d+)", line))
+             for line in log.splitlines() if "[gs-cache]" in line]
+    checks["texture_budget"] = bool(cache) and all(row["bytes"] <= row["budget"] for row in cache)
+    checks["texture_storage_reused"] = any(row["reuses"] > 0 for row in cache)
+    (output / "texture-cache.json").write_text(json.dumps(cache, indent=2))
 (output / "checks.json").write_text(json.dumps(checks, indent=2))
 print(json.dumps({"directory": str(output), "checks": checks}, indent=2))
 assert all(checks.values()), "Session gameplay validation failed"

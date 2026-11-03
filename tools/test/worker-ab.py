@@ -1,4 +1,4 @@
-"""Compare VIF1 barrier or GS stage spin with one runner, fixed graphics and private cards.
+"""Compare builds, VIF1 barrier or GS stage spin with fixed graphics and private cards.
 
 FPS, intrusive timing, and task capture are separate modes. Real-time scripted inputs
 are repeatable inputs, not guaranteed identical guest-frame/scene trajectories.
@@ -68,8 +68,9 @@ def environment(profile, run, args, early):
         PS2X_GS_HW_SCALE=str(args.scale), PS2X_GS_ESCALA=str(args.scale), PS2X_GS_ESCALA_DINAMICA="0",
         GOW_WINDOW_HIDDEN="1" if args.hidden else "0", TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720",
         TOBIICHI_FXAA="0", TOBIICHI_VSYNC="0", TOBIICHI_VENTANA_FPS="60", TOBIICHI_PANORAMICO="16:9")
-    if getattr(args, "experiment", "barrier") == "stage-spin":
-        env.update(GOW_VU1_EARLY_FINISH="0", GOW_GS_EARLY_FINISH="1", GOW_GS_STAGE_SPIN_US="50" if early else "0")
+    if getattr(args, "experiment", "barrier") in ("stage-spin", "build"):
+        env.update(GOW_VU1_EARLY_FINISH="0", GOW_GS_EARLY_FINISH="1",
+                   GOW_GS_STAGE_SPIN_US="0" if args.experiment == "stage-spin" and not early else "50")
     if args.mode == "timing":
         env.update(GOW_SYNC_DIAG="1", GOW_VU1N_DIAG="1", GOW_AUDIO_STATS="1", GOW_IOP_DRIFT="1")
         if getattr(args, "experiment", "barrier") == "stage-spin":
@@ -84,9 +85,10 @@ def environment(profile, run, args, early):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--game", default="gow1")
-    p.add_argument("--experiment", choices=("barrier", "stage-spin"), default="barrier",
+    p.add_argument("--experiment", choices=("barrier", "stage-spin", "build"), default="barrier",
                    help="stage-spin compares 50 us vs immediate sleep, with early GS FINISH fixed on")
     p.add_argument("--runner", type=Path)
+    p.add_argument("--baseline-runner", type=Path, help="Required for build comparison: variant 0; --runner is variant 1")
     p.add_argument("--elf", type=Path)
     p.add_argument("--helper", type=Path)
     p.add_argument("--card", type=Path, help="Read-only initial card; copied separately for every run")
@@ -98,6 +100,8 @@ def main():
     p.add_argument("--hidden", action="store_true", help="Functional checks only; no visible-gameplay claim")
     p.add_argument("--output", type=Path)
     a = p.parse_args()
+    if (a.experiment == "build") != bool(a.baseline_runner):
+        p.error("Use --baseline-runner only with --experiment build")
     if not 1 <= a.pairs <= 10 or not 0 <= a.warmup < a.seconds - 15 or a.seconds > 600:
         p.error("Require 1–10 pairs and at least 15 seconds after warm-up, maximum 600 seconds/run")
     root = Path(__file__).resolve().parents[2]
@@ -106,13 +110,15 @@ def main():
     runner = (a.runner or Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe").resolve()
     elf = (a.elf or Path(json.loads((data / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"])).resolve()
     helper = (a.helper or root / "launcher/build-clang/deploy/gow-session.exe").resolve()
-    for f in (runner, elf, helper):
+    baseline = a.baseline_runner.resolve() if a.baseline_runner else runner
+    for f in (runner, baseline, elf, helper):
         if not f.is_file():
             p.error(f"Required file missing: {f}")
     output = (a.output or data / "logs" / time.strftime("worker-ab-%Y%m%d-%H%M%S")).resolve()
     output.mkdir(parents=True, exist_ok=False)
     identity = {"runner_sha256": sha(runner), "elf_sha256": sha(elf), "helper_sha256": sha(helper),
                 "card_sha256": sha(a.card) if a.card else None}
+    identity["baseline_runner_sha256"] = sha(baseline)
     report = {"schema": 1, "mode": a.mode, "identity": identity, "settings": vars(a) | {"root": str(root)},
               "scope": "Alternating real-time scripted route; scene alignment is not guaranteed. Timing/capture are not FPS benchmarks.",
               "runs": []}
@@ -121,9 +127,9 @@ def main():
     save()
     sequence = [1] if a.mode == "capture" else [v for i in range(a.pairs) for v in ((1, 0) if i % 2 == 0 else (0, 1))]
     for index, early in enumerate(sequence):
-        if sha(runner) != identity["runner_sha256"] or sha(elf) != identity["elf_sha256"]:
+        if sha(runner) != identity["runner_sha256"] or sha(elf) != identity["elf_sha256"] or sha(baseline) != identity["baseline_runner_sha256"]:
             raise RuntimeError("Runner/ELF changed during comparison")
-        label = "early" if a.experiment == "barrier" else "stage-spin"
+        label = "early" if a.experiment == "barrier" else a.experiment
         run = output / f"{index + 1:02d}-{label}-{early}"
         session = run / "session"
         session.mkdir(parents=True)
@@ -137,7 +143,8 @@ def main():
         (session / "session.json").write_text(json.dumps({"schema": 1, "id": run.name, "state": "prepared", "settings": settings}))
         env = environment(profile, run, a, early)
         print(f"Run {index + 1}/{len(sequence)}: {a.experiment} variant={early}, mode={a.mode}, {a.seconds}s", flush=True)
-        proc = subprocess.Popen([str(helper), str(session), str(runner), str(elf), str(root)], cwd=run, env=env)
+        selected_runner = baseline if a.experiment == "build" and not early else runner
+        proc = subprocess.Popen([str(helper), str(session), str(selected_runner), str(elf), str(root)], cwd=run, env=env)
         try:
             deadline = time.monotonic() + a.seconds
             while proc.poll() is None and time.monotonic() < deadline:
@@ -156,7 +163,7 @@ def main():
             "effective_setting": any(r.get("tag") == "gow-sync-config" and r["values"].get("early_finish") == effective_early
                                      and r["values"].get("timing") == int(a.mode == "timing") for r in rows)}
         if a.mode == "timing":
-            if a.experiment == "stage-spin":
+            if a.experiment in ("stage-spin", "build"):
                 checks["queue_metrics"] = {int(r["values"]["queue"]) for r in rows
                     if r.get("tag") == "gow-queue" and r["values"].get("enabled") == 1} == {1, 2}
             else:

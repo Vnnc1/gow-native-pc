@@ -1,4 +1,5 @@
 #include "session_diagnostics.h"
+#include "session_summary.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -31,7 +32,7 @@
 namespace {
 constexpr qint64 logLimit = 4 * 1024 * 1024;
 const QStringList reportFiles{"session.json", "startup.log", "runtime.log", "runtime.1.log", "runtime.2.log",
-                              "metrics.jsonl", "events.jsonl"};
+                              "metrics.jsonl", "events.jsonl", "summary.json", "RESUMO.txt"};
 QString utc() { return QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs); }
 bool saveJson(const QString &path, const QJsonObject &obj)
 {
@@ -137,6 +138,9 @@ public:
     {
         QString text = redact(QString::fromUtf8(bytes).trimmed(), paths);
         if (text.isEmpty()) return;
+        static const QRegularExpression renderer(R"(^\[gs-hw\] render-target renderer ready, scale [0-9.]+ \((.*)\)$)");
+        const auto gpu = renderer.match(text);
+        if (gpu.hasMatch()) meta["gs_renderer"] = gpu.captured(1).left(256);
         lastOutput = clock.elapsed();
         const auto output = (QString("[%1 ms] ").arg(lastOutput) + text + '\n').toUtf8();
         if (runtime.size() + output.size() > logLimit) {
@@ -155,7 +159,7 @@ public:
             ++warningLines;
             if (warningLines <= 1000) event({{"type", "runtime_warning_candidate"}, {"text", text.left(2048)}});
         }
-        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-queue|gow-sync|gow-sync-config|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
+        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-queue|gow-sync|gow-sync-config|gs-cache|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
         const auto match = tag.match(text);
         if (match.hasMatch()) {
             QJsonObject sample{{"type", "runtime"}, {"tag", match.captured(1)}, {"elapsed_ms", lastOutput}};
@@ -280,6 +284,7 @@ public:
         meta["exit_code"] = code; meta["exit_code_hex"] = QString::number(quint32(code), 16);
         meta["stop_requested"] = stopping; meta["ended_utc"] = utc();
         event({{"type", "process_exit"}, {"code", code}, {"state", meta["state"]}}); persist();
+        SessionDiagnostics::writeSummary(dir);
         result = status == QProcess::NormalExit && code == 0 && state.isEmpty() ? 0 : 1;
         QCoreApplication::exit(result);
     }
@@ -332,6 +337,7 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
 {
     const auto fail = [&](const QString &message) { if (error) *error = message; return QString(); };
     if (!validSession(session)) return fail("No recorded session is available.");
+    if (!writeSummary(session)) return fail("Cannot create diagnostic summary.");
     const QString out = QFileInfo(session).absolutePath() + "/report-" + QFileInfo(session).fileName() + '-' + QUuid::createUuid().toString(QUuid::Id128).left(8) + ".zip";
     QSaveFile zip(out);
     if (!zip.open(QIODevice::WriteOnly)) return fail(zip.errorString());
@@ -413,7 +419,7 @@ int SessionDiagnostics::run(const QStringList &args)
     QJsonObject env;
     for (const char *name : {"GOW_PERF_DIAG", "GOW_FRAME_DIAG", "GOW_PERF_FRAME_PC", "GOW_AUDIO", "GOW_AUDIO_STATS", "GOW_IOP_DRIFT",
          "GOW_VU1N_DIAG", "GOW_VU1N_X64", "GOW_VU1X_INLINE", "GOW_DISPATCH_FULL", "GOW_GS_FINISH_ASINCRONO",
-         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "GOW_GS_STAGE_SPIN_US", "PS2X_GS_QUEUE_CHUNKS", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
+         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "GOW_GS_HW_STATS", "GOW_GS_STAGE_SPIN_US", "PS2X_GS_QUEUE_CHUNKS", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
          "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ"})
         if (qEnvironmentVariableIsSet(name)) env[name] = redact(qEnvironmentVariable(name).left(128), r.paths);
     r.meta["runtime_environment"] = env;

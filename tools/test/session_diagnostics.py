@@ -141,6 +141,52 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(output.exists())
 
+    def test_summary_windows_missing_metrics_and_queue_totals(self):
+        rows = [
+            {"tag": "gow-perf", "elapsed_ms": end, "values": {"window": window, "guest_flip_hz": fps}}
+            for end, window, fps in [(32000, 5, 99), (35000, 5, 60), (45000, 10, 30), (50000, 5, 0)]
+        ]
+        rows += [
+            {"tag": "gow-queue", "values": {"queue": 1, "enabled": 1}},
+            {"tag": "gow-queue", "values": {"queue": 1, "waits": 2, "wait_ms": 3, "max_ms": 2, "queued_peak": 4}},
+            {"tag": "gow-queue", "values": {"queue": 1, "waits": 1, "wait_ms": 5, "max_ms": 5, "queued_peak": 2, "final": 1}},
+            {"type": "host_process", "process_running": True, "elapsed_ms": 40000,
+             "ac_line_status": 0, "system_available_ram_bytes": 1024, "cpu_percent_one_core": 150},
+        ]
+        (self.session / "metrics.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+        archive = self.root / "summary.zip"
+        subprocess.run([str(HELPER), "--export", str(self.session), str(archive)], check=True, timeout=15)
+        with zipfile.ZipFile(archive) as z:
+            summary = json.loads(z.read("summary.json"))
+            human = z.read("RESUMO.txt").decode("utf-8")
+        self.assertEqual(summary["guest_fps_mean"], 30)
+        self.assertEqual(summary["guest_fps_min_window"], 0)
+        self.assertEqual(summary["fps_windows"], 3)
+        self.assertEqual(summary["measured_seconds"], 20)
+        self.assertEqual(summary["queues_whole_session"]["1"], {"waits": 3, "wait_ms": 8, "max_ms": 5, "queued_peak": 4})
+        self.assertEqual(summary["scoped_ms_after_warmup"], {})
+        for key in ("native_miss_blocks", "jit_unsupported_max_counter", "audio_missing_frames", "guest_intervals_over_100ms"):
+            self.assertNotIn(key, summary)
+        self.assertIn("battery_power_observed", summary["flags"])
+        self.assertIn("low_available_ram_observed", summary["flags"])
+        self.assertIn("Uso na bateria detectado", human)
+        self.assertIn("indisponível", human)
+
+    def test_summary_renderer_and_counters(self):
+        self.start("print('[gs-hw] render-target renderer ready, scale 1.00 (Test GPU)',flush=True)\nprint('[vu1n] missBlocks=3',flush=True)\nprint('[vu1n] missBlocks=2',flush=True)\nprint('[vu1x] unsupported=2',flush=True)\nprint('[vu1x] unsupported=4',flush=True)\n").wait(timeout=15)
+        self.assertEqual(self.metadata()["gs_renderer"], "Test GPU")
+        summary = json.loads((self.session / "summary.json").read_text())
+        self.assertEqual(summary["native_miss_blocks"], 5)
+        self.assertEqual(summary["jit_unsupported_max_counter"], 4)
+
+    def test_texture_cache_metrics(self):
+        self.env["GOW_GS_HW_STATS"] = "1"
+        self.start("print('[gs-cache] bytes=67108864 budget=134217728 evictions=12 reuses=300',flush=True)\n").wait(timeout=15)
+        self.assertEqual(self.metadata()["runtime_environment"]["GOW_GS_HW_STATS"], "1")
+        rows = [json.loads(line) for line in (self.session / "metrics.jsonl").read_text().splitlines()]
+        row = next(r for r in rows if r.get("tag") == "gs-cache")
+        self.assertEqual(row["values"], {"bytes": 67108864, "budget": 134217728, "evictions": 12, "reuses": 300})
+
     def test_collector_survives_parent_exit(self):
         self.child.write_text("import time\nprint('detached start',flush=True)\ntime.sleep(1)\nprint('detached end',flush=True)\n")
         args = [str(HELPER), str(self.session), sys.executable, str(self.child), str(self.root)]

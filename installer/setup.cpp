@@ -54,8 +54,15 @@ struct Footer
 constexpr char kMagic[8] = {'G', 'O', 'W', 'S', 'E', 'T', 'U', 'P'};
 constexpr size_t kBlock = 16u << 20;
 
+#ifdef GOW_DIAGNOSTIC_SETUP
+const wchar_t *const kProduct = L"God of War Native PC - Diagnostico";
+const wchar_t *const kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gow-native-pc-diagnostics";
+const wchar_t *const kInstallFolder = L"gow-native-pc-diagnostics";
+#else
 const wchar_t *const kProduct = L"God of War Native PC";
 const wchar_t *const kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gow-native-pc";
+const wchar_t *const kInstallFolder = L"gow-native-pc";
+#endif
 const wchar_t *const kLauncher = L"launcher\\bin\\gow-launcher.exe";
 const wchar_t *const kFolderLink = L"God of War Launcher.lnk"; // same name as the launcher stage's shortcut in a checkout
 const wchar_t *const kRepoUrl = L"https://github.com/Vnnc1/gow-native-pc";
@@ -312,7 +319,11 @@ std::wstring longPath(const std::wstring &p)
     std::replace(out.begin() + 4, out.end(), L'/', L'\\');
     return out;
 }
-bool isInstall(const std::wstring &dir) { return exists(dir + L"\\games\\gow1\\game.toml") && exists(dir + L"\\" + kLauncher); }
+bool isInstall(const std::wstring &dir) {
+#ifdef GOW_DIAGNOSTIC_SETUP
+    if (!exists(dir + L"\\diagnostic-kit.json")) return false;
+#endif
+    return exists(dir + L"\\games\\gow1\\game.toml") && exists(dir + L"\\" + kLauncher); }
 
 std::wstring regString(const wchar_t *name)
 {
@@ -434,6 +445,10 @@ void installWorker(std::wstring dir, bool desktop)
     // An update over an installation: patches removed upstream go (fetch applies every file in the folder), and when
     // the patch set changes the game must be rebuilt, as after a launcher update (tools/pipeline/update.ps1). Without
     // it, moving from a 1.0.0-3.0.1 launcher (which cannot see 0.x releases) by running this setup kept the old build.
+    #ifdef GOW_DIAGNOSTIC_SETUP
+    if (exists(dir + L"\\" + kLauncher) && !isInstall(dir))
+        return finish(false, L"Choose a separate folder for the diagnostic kit."), CoUninitialize();
+#endif
     const auto patchesBefore = readPatches(dir);
     for (const auto &[name, bytes] : patchesBefore)
     {
@@ -642,8 +657,8 @@ void pickFolder()
         // a folder of its own unless the chosen one is empty or already an installation
         std::error_code ec;
         const bool empty = fs::is_empty(chosen, ec);
-        if (!isInstall(chosen) && !empty && _wcsicmp(fs::path(chosen).filename().c_str(), L"gow-native-pc") != 0)
-            chosen = (chosen.back() == L'\\' ? chosen : chosen + L"\\") + L"gow-native-pc";
+        if (!isInstall(chosen) && !empty && _wcsicmp(fs::path(chosen).filename().c_str(), kInstallFolder) != 0)
+            chosen = (chosen.back() == L'\\' ? chosen : chosen + L"\\") + kInstallFolder;
         g_dir = chosen;
         g_existing = isInstall(g_dir);
     }
@@ -1084,7 +1099,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
         const std::wstring dir = fs::path(self).parent_path().wstring();
         wchar_t tmp[MAX_PATH];
         GetTempPathW(MAX_PATH, tmp);
-        const std::wstring copy = std::wstring(tmp) + L"gow-native-pc-uninstall.exe";
+        const std::wstring copy = std::wstring(tmp) + kInstallFolder + L"-uninstall.exe";
         CopyFileW(self.c_str(), copy.c_str(), FALSE);
         ShellExecuteW(nullptr, L"open", copy.c_str(), (L"/uninstall-from \"" + dir + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         return 0;
@@ -1103,7 +1118,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
         g_rawSize = g_payload ? g_footer.raw : 0;
         g_dir = regString(L"InstallLocation");
         if (g_dir.empty())
-            g_dir = knownFolder(FOLDERID_LocalAppData) + L"\\Programs\\gow-native-pc";
+            g_dir = knownFolder(FOLDERID_LocalAppData) + L"\\Programs\\" + kInstallFolder;
         g_existing = isInstall(g_dir);
         if (!g_payload)
         {

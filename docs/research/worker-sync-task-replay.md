@@ -121,3 +121,10 @@ These intervals are not aligned to the post-warm-up FPS selection. Queue limits
 and stage-spin overrides are included in diagnostic exports. Compare on the same
 hardware, with visible gameplay and sound; restricting a Xeon's affinity does not
 validate notebook performance or thermal behavior.
+
+For a source change, use `--experiment build --baseline-runner <old.exe>
+--runner <new.exe> --mode fps --pairs 3`. Variant 0 is the baseline and variant 1
+is the candidate. Both use the same environment: GS early FINISH on, large VIF
+barrier off, stage spin 50 us. The report records both executable hashes and
+checks them before each run. Preserve the baseline before rebuilding; keep its
+runtime dependencies available. Compilation/profiling must finish before FPS runs.

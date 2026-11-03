@@ -32,3 +32,10 @@ queue_rows = [{"tag": "gow-queue", "values": {"queue": 1, "enabled": 1}},
               {"tag": "gow-queue", "values": {"queue": 1, "waits": 1, "wait_ms": 4, "max_ms": 4, "queued_peak": 7, "final": 1}}]
 assert m.summarize(queue_rows, 60)["queue_whole_session"]["1"] == {"waits": 3, "wait_ms": 7, "max_ms": 4, "queued_peak": 9}
 print("PASS: stage-spin comparison changes one setting; queue totals include final flush and ignore config records")
+
+args = SimpleNamespace(mode="fps", scale=1, hidden=False, warmup=25, experiment="build")
+before = m.environment(profile, Path("private-run"), args, 0)
+after = m.environment(profile, Path("private-run"), args, 1)
+assert before == after and before["GOW_GS_STAGE_SPIN_US"] == "50"
+assert before["GOW_GS_EARLY_FINISH"] == "1" and before["GOW_VU1_EARLY_FINISH"] == "0"
+print("PASS: build comparison keeps both runtime environments identical")

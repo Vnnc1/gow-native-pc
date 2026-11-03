@@ -1,5 +1,54 @@
 # Tested hardware and results
 
+## Default GS texture storage update (2026-11-03)
+
+Patch 60 bounds decoded RGBA/index texture storage to 128 MiB before upload and
+updates existing same-shape storage with `TexSubImage2D` instead of redefining it.
+No player setting is required. The budget excludes render targets, replacement
+packs, driver staging and other process memory; it is not a total RAM cap.
+
+On Xeon E5-2666 v3 / RX 580 2048SP, three alternating pairs of visible, audio-enabled
+100-second scripted runs used internal 1x, 1280x720, host cap 60, VSync off, early GS
+FINISH and precise VU defaults. Complete measurement windows begin after 40 seconds.
+No concurrent compilation or profiling ran during these FPS comparisons.
+
+| Pair | Baseline guest FPS | Updated guest FPS | Change |
+| --- | ---: | ---: | ---: |
+| 1 | 59.091 | 59.382 | +0.49% |
+| 2 | 58.600 | 59.690 | +1.86% |
+| 3 | 59.127 | 59.471 | +0.58% |
+| Mean | 58.940 | 59.514 | +0.97% |
+
+Lowest five-second windows across these runs were 45.2 and 54.8 FPS respectively;
+neither variant had a measured interval above 100 ms after warm-up. Window-p95
+medians were 17.060–17.148 ms versus 17.075–17.121 ms. Private-memory peaks overlapped
+(baseline 326.9–336.5 MiB; updated 319.0–347.8 MiB), so no process-memory reduction is
+established here. This timed input route does not guarantee identical scene alignment;
+the small positive result in 3/3 pairs is not locked-60 or full-game acceptance.
+
+The earlier budget-only layout was slower: 59.145 -> 58.596 FPS. It is not the final
+implementation. The final change also reuses storage and appends accounting members
+to preserve existing renderer member offsets. Evidence is retained under
+`data/experiments/gs61/{ab,ab-reuse,result.json}`. Baseline runner SHA-256:
+`d1a6b52699c4964e3a87fbc14a889f3e9200ae91d72cb87d4a2771f5c33b9ab2`;
+updated runner: `f269bfc2fe3762b9446e4124176c236b9a1833547d4e79fd6df2232d1e52be0c`.
+
+Validation: `build.cmd -Stages verify` passed (11 native suites, synthetic ELF,
+VU1 equivalence and isolated replay); Linux pipeline tests passed with one
+platform-specific skip. The production eviction policy passed a 9,996-upload
+stress loop. The optional real-GPU `gow_texture_upload_test` verified alternating
+red/blue pixels after 20 invalidating uploads each in CT32, T8 and T4 on RX 580.
+The visible `session-game-smoke.py --capture --early-finish --texture-cache` run
+passed all 13 checks, including 2,000 VU1 parity checks, and its gameplay image was
+inspected. It recorded 17,222 storage reuses; its approximately 7.2 MiB working set
+did not exercise in-game eviction. Eviction pressure is covered by the synthetic
+policy test, not by a reproduced Intel memory spike.
+
+The i3-10110U/Intel UHD multi-second stalls and near-6-GiB process-memory spike
+remain unvalidated with this revision. NVIDIA is also untested. No VU1 semantic or
+queue-ordering changes were adopted; existing unsuccessful chain/spin experiments
+remain rejected. The private kit now enables GS cache counters in detailed mode.
+
 ## Supplied Asia disc and Europe code generation (2026-11-02)
 
 The supplied `God of War (Asia).iso` boots `SCUS_973.99` and has the same complete
@@ -763,6 +812,91 @@ This is the scripted opening ship route, not a reproduction of the historical
 alignment. The i3-10110U and weaker hardware were not available for new runs;
 these results establish neither their performance nor a stable-60-FPS tier.
 
+## Rejected shuffle scratch experiment (2026-11-03, Xeon E5-2666 v3 / RX 580 2048SP)
+
+An experimental patch reused four temporary geometry vectors in `tryShuffle`, clearing all
+four before each mapping attempt. Partial geometry from a rejected sprite never
+enters the queued pass. Shader code, geometry calculations and draw ordering are
+unchanged. Storage is owned by the backend and retains its high-water capacity
+until destruction; it is not a cache keyed by game content.
+
+A separate 30-second sampling run showed `tryShuffle` in 7.22% of GSThread
+samples, with VU1 chaining also prominent (29.51% on its worker). Sampling includes
+waiting threads and is intrusive: these are not whole-frame cost percentages.
+Local evidence is in `data/experiments/gs60/profile.txt`.
+
+The synthetic test compiles the actual renderer source and calls its geometry
+builder without a GL context. It repeats 100,000 valid sprites interleaved with
+14,286 failures after partial mapping, hashing queued geometry. Both revisions
+produced `6b52eb0da9289d43`; warm allocations fell from 428,572 to zero. Five
+alternating pairs of the final layout gave median 143.381 ms before and 110.191 ms after (23.15% less
+elapsed time, including output hashing). This is a synthetic routine result,
+not a gameplay FPS improvement or GPU rasterization check. The local
+`gs_shuffle_scratch.cpp` regression requires the reference digest and zero warm
+allocations, but deliberately has no timing threshold.
+
+The experiment used `C:/gow-q59-clang`; its pre-change executable is
+preserved under `data/experiments/gs60/baseline`. Both builds retain the same
+portable CPU target and existing PGO profile. The candidate passed the visible
+100-second private-card smoke test, including 2000 VU1 checks without mismatches;
+the 80-second capture showed ship gameplay with HUD. Audio metrics were present,
+but audible output was not independently checked.
+
+The initial placement of scratch storage before hot renderer fields measured
+58.413 versus 59.008 mean guest FPS in three alternating pairs (candidate versus
+baseline). A second variant instead appended storage after all existing members,
+preserving their offsets. This controls a layout difference; it does not establish
+cache layout as the cause of the initial result. The initial evidence is retained
+in `data/experiments/gs60/fps`, with final-layout measurements kept separately.
+
+The second series (`fps-layout`) did not complete: its fourth run lost complete
+`gow-perf` windows and needed forced termination, while `gow-frame` continued.
+Its incomplete averages must not be used as performance evidence. The cause was
+not established. Neither variant demonstrated a gameplay improvement, so the
+renderer change and its native test target were removed from the production
+patch chain. Source variants, the experimental patch, binaries and the test
+fixture remain local under `data/experiments/gs60`; the baseline renderer was
+restored. Do not ship or advertise the synthetic speedup as a game FPS gain.
+
+The `verify` command stopped twice at a synthetic ELF test with Windows access
+denied while renaming temporary output under `data/_tmp`. That test passed
+separately using the normal Windows temporary directory. The remaining checks
+were run explicitly: native suites, guest calls, VU1 equivalence/task replay and
+language checks passed. The final-layout native build passed all eleven CTest
+suites including the new geometry/allocation regression; 17 pipeline tests and
+the A/B methodology checks also passed. Do not describe the interrupted aggregate
+`verify` invocations as successful.
+
+## Rejected VU1 branch-hint experiment (2026-11-03, same Xeon)
+
+The sampled route reported approximately 11–12% self blocks. Removing the
+`[[likely]]` annotation on `chain`'s self-loop branch changed the unprofiled
+machine-code layout, placing the ordinary successor path nearer the entry.
+No VU1 arithmetic, timing or dispatch conditions were changed.
+
+A private-card capture with the baseline runner completed normally and recorded
+128 real MSCAL tasks. All JIT replays matched their captured native baseline;
+all 128 tasks used native blocks. Native and exact baseline digests differed on
+all 128 tasks, so this is backend-preserving parity, not exact/native equivalence.
+The first unpinned comparison suggested a small benefit, but five alternating
+pairs pinned to the same logical CPU after a warm-up pair did not confirm it.
+Summed per-record warm medians (100 repetitions per task) were:
+
+| Pair | Original hint (us) | Hint removed (us) |
+| --- | --- | --- |
+| 1 | 2105.5 | 2063.0 |
+| 2 | 2174.1 | 2194.1 |
+| 3 | 2169.7 | 2435.5 |
+| 4 | 2076.9 | 2081.9 |
+| 5 | 2028.2 | 2055.4 |
+
+The candidate lost four of five pairs and was reverted before any game build was
+made from it. These isolated execution costs exclude reconstruction/hashing/final
+flush and are not FPS. Affinity mask 4 controlled scheduling for this test only;
+it does not simulate notebook hardware. Logs, assembly and results are local in
+`data/experiments/vu60`, and the captured corpus stays under ignored `data/`.
+Neither this candidate nor the shuffle experiment is in the runtime patch chain.
+
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 
 The following measurements are historical. The v0.5.0 release packaging did not
@@ -778,3 +912,15 @@ route, full screen, 3 alternating pairs: tune build 54.81 vs traditional PGO bui
 slower (45.0 vs 49.7, 3/3) and is not used. PGO retrained with early FINISH: neutral (51.9 vs 52.2). Intro movies with
 early FINISH: gameplay reached, no errors. 30-minute session from the save: 48.1 FPS mean after loading, 3 windows over
 100 ms (max 309 ms), memory stable over the last 8 minutes.
+# Private diagnostic kit — 2026-11-03
+
+Built the isolated `gow-diagnostics` frontend and `gow-session` with pinned LLVM/Qt.
+Packaged the preserved queue-59 runner (`ffd4e85d3f40a3395da46aec4ef0618c9b43401894fd98efd6aa3b33f92b83df`),
+without the rejected GS/VU1 experiments. Installer: `data/_package/diagnostic-kit-20261103-final/setup.exe`.
+All 1,356 payload members matched staging; a separate silent installation matched every member and opened
+the dedicated UI. Ten collector tests, 17 pipeline tests and launcher language checks passed.
+The detailed scripted session reached `state=11 levelReady=1`, produced a visually inspected gameplay
+capture, completed with exit 0 and exported its summary/metrics. The installed light mode also launched
+the game and recorded frame windows; it was stopped early to deliver the kit to the user.
+These are functional checks on the Xeon/RX 580, not notebook performance acceptance or an FPS gain.
+No new optimization is adopted. Notebook diagnostics and reproduction of the 28-minute scene are pending.

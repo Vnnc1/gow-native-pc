@@ -108,6 +108,11 @@ library without game data; Linux/Steam Deck performance remains unvalidated.
 
 ## Performance target for public builds
 
+Performance improvements must be part of the normal first-install build and launch defaults. Do not require
+players to toggle diagnostic flags, install external tuning tools or rerun optimization stages to activate a
+shipped improvement. Existing compiled installations still need a matching updated runner. RX 580 results are
+local evidence only; they do not establish a gain on the i3-10110U/Intel UHD or weaker PCs.
+
 Target stable 60 guest frames/s on modest and powerful supported PCs. The i5-8265U laptop and Xeon/RX 580 desktop
 are separate validation targets; compare revisions on the same hardware/settings and never transfer their FPS or
 build-time results between machines. Measure frame pacing and first-visit stalls, and require visible gameplay
@@ -116,6 +121,15 @@ The laptop has not yet met the 60 fps target. Follow the hardware-tier acceptanc
 `docs/research/roadmap-2026-10-27.md`; do not promise universal performance or classify an untested tier as supported.
 
 ## Player diagnostic reports
+
+`launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
+identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
+per session, and invokes the same detached collector. `tools/pipeline/package_diagnostics.py` packages it with
+an explicitly supplied runner; `installer` option `GOW_DIAGNOSTIC_SETUP` gives it a separate uninstall key,
+folder and shortcuts. Never add disc files or cards to this package. The normal launcher's CMake ownership
+checks remain unchanged. `session_summary.h` derives human/JSON summaries only from bounded report files;
+unknown metrics stay absent, and queue/scoped timings must not be presented as GPU frame time. Validate with
+`tools/test/session_diagnostics.py`, packaged UI/game smoke and `tools/test/verify_setup.py`.
 
 `launcher/src/session_diagnostics.*` implements the independent `gow-session` collector and local report export.
 It must keep collecting when the launcher closes, preserve actual child exit codes, and stop only its own child.
@@ -381,3 +395,10 @@ for stage-ring capacity (queue 1, bytes) and backend capacity (queue 2, chunks).
 These producer waits include scheduling and can overlap existing VU/GS timers.
 Keep timing opt-in, preserve queue ordering/limits, and test the collector parser
 with `tools/test/session_diagnostics.py`. Semantics: `docs/reporting-bugs.md`.
+
+Patch 60 bounds decoded GS texture allocations by bytes (128 MiB, excluding the active oversized texture)
+and reuses existing storage after invalidation. Render targets, replacement packs and driver staging are
+outside this budget. `gow_texture_budget_tests` is in verify; `gow_texture_upload_test` is an explicitly
+run, real-OpenGL CT32/T8/T4 pixel check, not a headless test. `session-game-smoke.py --texture-cache`
+checks `[gs-cache]` counters. Keep reference validity during eviction and preserve cache-key dimensions/formats.
+Detailed private-kit reports enable `GOW_GS_HW_STATS`; normal FPS collection keeps it off.

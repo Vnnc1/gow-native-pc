@@ -89,6 +89,16 @@ endif()
 
 install(TARGETS gow-launcher gow-session RUNTIME DESTINATION bin)
 
+if(WIN32)
+    qt_add_executable(gow-diagnostics WIN32 diagnostics/main.cpp diagnostics/diagnostic_kit.cpp
+        diagnostics/diagnostic_kit.h src/session_diagnostics.cpp src/session_diagnostics.h)
+    target_include_directories(gow-diagnostics PRIVATE src)
+    target_compile_definitions(gow-diagnostics PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}-diagnostics")
+    target_link_libraries(gow-diagnostics PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 psapi comdlg32)
+    qt_add_resources(gow-diagnostics diagnostic_ui PREFIX "/" FILES diagnostics/Main.qml qml/Textos.js
+        qml/idiomas/fr.js qml/idiomas/de.js qml/idiomas/it.js qml/idiomas/ru.js qml/idiomas/zh.js)
+endif()
+
 # Explicit regression target; never included in the player package.
 add_executable(gow_region_tests EXCLUDE_FROM_ALL ../tools/test/regional_launcher_test.cpp)
 target_include_directories(gow_region_tests PRIVATE src)
