@@ -1,5 +1,29 @@
 # Tested hardware and results
 
+For prior hypotheses, rejected changes and incomplete gains, start with the
+[performance experiment ledger](research/performance-experiments.md). Consult its
+retest rules before repeating a performance investigation; detailed evidence follows here.
+
+## VU1 / synchronization follow-up (2026-11-03)
+
+On Xeon E5-2666 v3 / RX 580 2048SP, three isolated candidates were compared with
+the patch-60 baseline using three alternating visible, audio-enabled pairs each
+(100 seconds, complete measurement windows after 40 seconds, 1x, precise VU,
+GS early FINISH on). No compilation/profiling overlapped FPS measurements.
+
+| Candidate | Baseline → candidate mean guest FPS | Decision |
+| --- | ---: | --- |
+| Separate stage head/tail cache lines | 59.4245 → 59.5143 | Rejected: +0.15%, inconsistent pairs/pacing |
+| Separate VU1 timing history from flag tails | 59.4121 → 59.4173 | Rejected: gameplay tied despite -0.37% isolated JIT replay time |
+| Publish consumed stage space every 4 KiB / batch end | 59.3409 → 57.7046 | Rejected: -2.76%, lost all pairs |
+
+All 18 runs passed gameplay, graceful exit and measurement checks. The VU1
+candidate passed the full verify gate and the local 128-task corpus across five
+backends; the queue candidate passed production DMA/worker/ring tests. Runtime
+sources were restored exactly. No additional FPS gain, notebook validation or
+28-minute-scene reproduction is claimed. Details and local evidence paths:
+[experiment report](research/vu1-sync-2026-11-03.md).
+
 ## Default GS texture storage update (2026-11-03)
 
 Patch 60 bounds decoded RGBA/index texture storage to 128 MiB before upload and

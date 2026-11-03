@@ -108,6 +108,16 @@ library without game data; Linux/Steam Deck performance remains unvalidated.
 
 ## Performance target for public builds
 
+Before proposing or rerunning performance experiments, read
+[`docs/research/performance-experiments.md`](docs/research/performance-experiments.md).
+It indexes regressions, neutral/invalid comparisons and gains with missing acceptance
+criteria. Reuse those results; do not repeat the same rejected experiment merely because
+a new agent/chat starts. A retest must cite the previous experiment ID and document a
+materially changed implementation, workload, hardware/toolchain or measurement flaw first.
+For partial gains, validate the missing criterion instead of repeating completed checks.
+Routine correctness regression tests still apply. Append new results and decisions to
+the ledger and `docs/tested-hardware.md`; never erase negative or interrupted evidence.
+
 Performance improvements must be part of the normal first-install build and launch defaults. Do not require
 players to toggle diagnostic flags, install external tuning tools or rerun optimization stages to activate a
 shipped improvement. Existing compiled installations still need a matching updated runner. RX 580 results are
