@@ -1,4 +1,4 @@
-"""Alternate the VIF1 barrier on/off with one runner, fixed graphics and private cards.
+"""Compare VIF1 barrier or GS stage spin with one runner, fixed graphics and private cards.
 
 FPS, intrusive timing, and task capture are separate modes. Real-time scripted inputs
 are repeatable inputs, not guaranteed identical guest-frame/scene trajectories.
@@ -37,7 +37,16 @@ def summarize(rows, warmup):
         e = sync.setdefault(str(int(v["site"])), {k: 0 for k in ("syncs", "worker_waits", "stage_waits", "worker_ms", "stage_ms")})
         for k in e:
             e[k] += v.get(k, 0)
+    queues = {}
+    for r in rows:
+        if r.get("tag") != "gow-queue" or "waits" not in r["values"]:
+            continue
+        v = r["values"]
+        e = queues.setdefault(str(int(v["queue"])), {"waits": 0, "wait_ms": 0, "max_ms": 0, "queued_peak": 0})
+        for k in ("waits", "wait_ms"): e[k] += v[k]
+        for k in ("max_ms", "queued_peak"): e[k] = max(e[k], v[k])
     return {
+        "queue_whole_session": queues,
         "windows": len(perf), "measured_seconds": duration,
         "guest_fps": sum(v["guest_flip_hz"] * v["window"] for v in perf) / duration if duration else None,
         "min_window_fps": min((v["guest_flip_hz"] for v in perf), default=None),
@@ -59,8 +68,12 @@ def environment(profile, run, args, early):
         PS2X_GS_HW_SCALE=str(args.scale), PS2X_GS_ESCALA=str(args.scale), PS2X_GS_ESCALA_DINAMICA="0",
         GOW_WINDOW_HIDDEN="1" if args.hidden else "0", TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720",
         TOBIICHI_FXAA="0", TOBIICHI_VSYNC="0", TOBIICHI_VENTANA_FPS="60", TOBIICHI_PANORAMICO="16:9")
+    if getattr(args, "experiment", "barrier") == "stage-spin":
+        env.update(GOW_VU1_EARLY_FINISH="0", GOW_GS_EARLY_FINISH="1", GOW_GS_STAGE_SPIN_US="50" if early else "0")
     if args.mode == "timing":
         env.update(GOW_SYNC_DIAG="1", GOW_VU1N_DIAG="1", GOW_AUDIO_STATS="1", GOW_IOP_DRIFT="1")
+        if getattr(args, "experiment", "barrier") == "stage-spin":
+            env["GOW_GS_HW_STATS"] = "1"
     if args.mode == "capture":
         env.update(GOW_VU1_TASK_RECORD=str(run / "tasks.bin"), GOW_VU1_TASK_LIMIT="128",
                    GOW_VU1_TASK_STRIDE="256", GOW_VU1_TASK_DELAY=str(args.warmup),
@@ -71,6 +84,8 @@ def environment(profile, run, args, early):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--game", default="gow1")
+    p.add_argument("--experiment", choices=("barrier", "stage-spin"), default="barrier",
+                   help="stage-spin compares 50 us vs immediate sleep, with early GS FINISH fixed on")
     p.add_argument("--runner", type=Path)
     p.add_argument("--elf", type=Path)
     p.add_argument("--helper", type=Path)
@@ -108,18 +123,20 @@ def main():
     for index, early in enumerate(sequence):
         if sha(runner) != identity["runner_sha256"] or sha(elf) != identity["elf_sha256"]:
             raise RuntimeError("Runner/ELF changed during comparison")
-        run = output / f"{index + 1:02d}-early-{early}"
+        label = "early" if a.experiment == "barrier" else "stage-spin"
+        run = output / f"{index + 1:02d}-{label}-{early}"
         session = run / "session"
         session.mkdir(parents=True)
         if a.card:
             if sha(a.card) != identity["card_sha256"]: raise RuntimeError("Initial card changed")
             shutil.copyfile(a.card, run / "card.ps2")
             if sha(run / "card.ps2") != identity["card_sha256"]: raise RuntimeError("Initial card changed while copying")
-        settings = {"early_finish": early, "mode": a.mode, "warmup_seconds": a.warmup, "visible": not a.hidden,
+        effective_early = early if a.experiment == "barrier" else 0
+        settings = {"experiment": a.experiment, "variant": early, "early_finish": effective_early, "mode": a.mode, "warmup_seconds": a.warmup, "visible": not a.hidden,
                     "scale": a.scale, "dynamic_scale": False, "input_script": profile["optimize"]["pad_script"]}
         (session / "session.json").write_text(json.dumps({"schema": 1, "id": run.name, "state": "prepared", "settings": settings}))
         env = environment(profile, run, a, early)
-        print(f"Run {index + 1}/{len(sequence)}: early_finish={early}, mode={a.mode}, {a.seconds}s", flush=True)
+        print(f"Run {index + 1}/{len(sequence)}: {a.experiment} variant={early}, mode={a.mode}, {a.seconds}s", flush=True)
         proc = subprocess.Popen([str(helper), str(session), str(runner), str(elf), str(root)], cwd=run, env=env)
         try:
             deadline = time.monotonic() + a.seconds
@@ -136,15 +153,25 @@ def main():
         stats = summarize(rows, a.warmup)
         checks = {"exit_zero": meta.get("exit_code") == 0, "graceful": not any(e["type"] == "forced_termination" for e in events),
             "gameplay": bool(re.search(r"state=11\b.*levelReady=1", log)), "windows": stats["windows"] >= 3,
-            "effective_setting": any(r.get("tag") == "gow-sync-config" and r["values"].get("early_finish") == early
+            "effective_setting": any(r.get("tag") == "gow-sync-config" and r["values"].get("early_finish") == effective_early
                                      and r["values"].get("timing") == int(a.mode == "timing") for r in rows)}
-        if a.mode == "timing": checks["sync_metrics"] = bool(stats["sync_whole_session"])
+        if a.mode == "timing":
+            if a.experiment == "stage-spin":
+                checks["queue_metrics"] = {int(r["values"]["queue"]) for r in rows
+                    if r.get("tag") == "gow-queue" and r["values"].get("enabled") == 1} == {1, 2}
+            else:
+                checks["sync_metrics"] = bool(stats["sync_whole_session"])
+        if a.experiment == "stage-spin":
+            checks["stage_spin_environment"] = meta.get("runtime_environment", {}).get("GOW_GS_STAGE_SPIN_US") == ("50" if early else "0")
+            if a.mode == "timing":
+                checks["stage_spin_effective"] = any(r.get("tag") == "gow-queue" and r["values"].get("queue") == 1
+                    and r["values"].get("spin_us") == (50 if early else 0) for r in rows)
         if a.mode == "capture": checks["task_corpus"] = (run / "tasks.bin").is_file() and (run / "tasks.bin").stat().st_size > 0
-        report["runs"].append({"directory": str(run), "early_finish": early, "checks": checks, **stats})
+        report["runs"].append({"directory": str(run), "early_finish": effective_early, "variant": early, "checks": checks, **stats})
         save()
         if not all(checks.values()): raise RuntimeError(f"Run failed validation: {checks}; evidence: {output}")
     if a.mode == "fps":
-        report["mean_run_guest_fps"] = {str(mode): statistics.mean(r["guest_fps"] for r in report["runs"] if r["early_finish"] == mode) for mode in (0, 1)}
+        report["mean_run_guest_fps"] = {str(mode): statistics.mean(r["guest_fps"] for r in report["runs"] if r["variant"] == mode) for mode in (0, 1)}
     report["completed"] = True
     save()
     print(output / "summary.json")

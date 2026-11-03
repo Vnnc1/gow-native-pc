@@ -375,3 +375,9 @@ and write `standalone.log` beside the executable (patch 25). Never package this 
 The Performance diagnostics toggle enables audio buffer/rate, IOP drift, VU1 and performance counters.
 `tools/test/sound_regression.cpp` covers positive/negative SPU2 master-volume overflow (patch 24).
 See `docs/research/audio-standalone-mods-2026-10-26.md` for unresolved scene, HUD and mod acceptance criteria.
+
+Queue backpressure diagnostics (patch 59): `GOW_SYNC_DIAG=1` also emits `[gow-queue]`
+for stage-ring capacity (queue 1, bytes) and backend capacity (queue 2, chunks).
+These producer waits include scheduling and can overlap existing VU/GS timers.
+Keep timing opt-in, preserve queue ordering/limits, and test the collector parser
+with `tools/test/session_diagnostics.py`. Semantics: `docs/reporting-bugs.md`.

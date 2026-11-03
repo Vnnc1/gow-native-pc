@@ -155,7 +155,7 @@ public:
             ++warningLines;
             if (warningLines <= 1000) event({{"type", "runtime_warning_candidate"}, {"text", text.left(2048)}});
         }
-        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-sync|gow-sync-config|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
+        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-queue|gow-sync|gow-sync-config|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
         const auto match = tag.match(text);
         if (match.hasMatch()) {
             QJsonObject sample{{"type", "runtime"}, {"tag", match.captured(1)}, {"elapsed_ms", lastOutput}};
@@ -413,7 +413,7 @@ int SessionDiagnostics::run(const QStringList &args)
     QJsonObject env;
     for (const char *name : {"GOW_PERF_DIAG", "GOW_FRAME_DIAG", "GOW_PERF_FRAME_PC", "GOW_AUDIO", "GOW_AUDIO_STATS", "GOW_IOP_DRIFT",
          "GOW_VU1N_DIAG", "GOW_VU1N_X64", "GOW_VU1X_INLINE", "GOW_DISPATCH_FULL", "GOW_GS_FINISH_ASINCRONO",
-         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
+         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "GOW_GS_STAGE_SPIN_US", "PS2X_GS_QUEUE_CHUNKS", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
          "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ"})
         if (qEnvironmentVariableIsSet(name)) env[name] = redact(qEnvironmentVariable(name).left(128), r.paths);
     r.meta["runtime_environment"] = env;

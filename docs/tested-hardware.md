@@ -703,6 +703,66 @@ Gaming Mode, regional Linux game builds and Mesa/NVIDIA GPU gameplay remain
 unvalidated. The launcher archive uses its build host's libraries, not a portable
 Steam Linux Runtime baseline. See [Linux instructions](linux.md).
 
+## GS queue instrumentation (2026-11-03, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Patch 59 was built separately at `C:/gow-q59-clang` with Release `-O3`,
+portable x86-64-v2, PDBs and the existing local PGO profile (not retrained).
+The executable SHA-256 is
+`ffd4e85d3f40a3395da46aec4ef0618c9b43401894fd98efd6aa3b33f92b83df`.
+Local evidence and build provenance are under `data/experiments/queue59/`.
+
+The complete `verify` stage passed, including all ten native CTest suites,
+VU1 differential checks and task replay. The new forced-capacity backend test
+verified producer blocking, wakeup, payload contents and packet order. Eight
+collector tests passed against the deployed helper. A separate 100-second visible
+private-card smoke run passed all eleven checks, including gameplay, audio metrics,
+2000 VU1 comparisons without mismatches and graceful shutdown. The 80-second
+capture showed ship gameplay. Audible output was not independently checked.
+
+Two 105-second detailed runs compared the stage's existing 50-us idle spin with
+immediate sleep. Both used scale 1, GS early FINISH, no large-VIF barrier and
+private new-game cards. Whole-session queue capacity waits were:
+
+| Stage idle spin | VU1-to-GS ring total / longest wait | Backend total / longest wait |
+| --- | --- | --- |
+| 50 us | 0.591 ms / 0.170 ms | 3416.076 ms / 4.818 ms |
+| 0 us | 13.254 ms / 3.653 ms | 3513.929 ms / 8.024 ms |
+
+These elapsed waits overlap other work; they are not GPU time or directly
+recoverable frame time. The ring was not a substantial capacity bottleneck on
+this route. Backend counters also showed no texture decodes in the final warm
+windows, which does not establish texture behavior in other scenes. Renderer
+`batches` are not GL draw-call counts: shadow-volume and alpha-fail paths can
+issue several draws per batch. Profile these paths before changing their semantics.
+
+The separate FPS experiment completed three alternating pairs of 105-second runs,
+discarding complete windows that overlapped the first 25 seconds. Detailed timing
+and captures were disabled; each run supplied 15 complete FPS windows (about 75 s).
+All six runs passed gameplay, effective-setting and graceful-exit checks.
+
+| Pair | Existing 50-us spin, guest FPS | Immediate sleep, guest FPS | Sleep change |
+| --- | --- | --- | --- |
+| 1 | 56.719 | 56.013 | -1.24% |
+| 2 (reverse order) | 58.772 | 59.038 | +0.45% |
+| 3 | 58.972 | 55.467 | -5.94% |
+| Mean of runs | 58.154 | 56.839 | -2.26% |
+
+The lowest five-second windows were 47.2 FPS with spin and 46.0 FPS with sleep;
+neither achieved stable 60 FPS. Median window p95 frame intervals ranged from
+16.849 to 17.570 ms with spin and 17.372 to 19.535 ms with sleep. No measured
+interval exceeded 100 ms. CPU samples from 30–100 s averaged 416.7% versus 422.5%
+of one logical CPU (spin versus sleep), with inconsistent pairwise changes;
+there is no demonstrated CPU saving. These are process CPU samples, not power
+measurements. Keep the 50-us default: immediate sleep did not demonstrate a gain.
+The comparison uses the same patched binary, not pre/post-patch binaries.
+Detailed evidence: `fps/summary.json` and `fps-analysis.json` under the local
+experiment directory.
+
+This is the scripted opening ship route, not a reproduction of the historical
+28-minute scene. Real-time inputs do not guarantee identical guest-frame scene
+alignment. The i3-10110U and weaker hardware were not available for new runs;
+these results establish neither their performance nor a stable-60-FPS tier.
+
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 
 The following measurements are historical. The v0.5.0 release packaging did not
