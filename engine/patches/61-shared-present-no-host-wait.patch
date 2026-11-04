@@ -1,0 +1,88 @@
+Avoid waiting for the GPU publisher mutex on the host presentation thread.
+Retain the immutable acquired reading slot while publication is busy; preserve fences,
+newest-completed selection and blank frames. Reset the host snapshot at lifecycle boundaries.
+Production-code contention test: reference blocked for 2.007 s; candidate returned promptly.
+This fixes one CPU lock stall, not all input latency or GPU saturation. No player flags.
+Gameplay comparison and limitations: docs/research/shared-present-input-2026-11-03.md.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+@@ -34,6 +34,8 @@
+     int s_readingSlot = -1;
+     uint64_t s_sharedSequence = 0;
+     std::atomic<bool> s_sharedActive{false};
++    // Host-thread snapshot: the reading slot cannot be recycled until this host releases it.
++    thread_local GSSharedPresent::Frame s_acquiredFrame;
+ 
+     bool completed(const GSGL::Api &gl, GSGL::GLsync fence)
+     {
+@@ -269,6 +271,7 @@
+ {
+     void CaptureHostContext()
+     {
++        s_acquiredFrame = {};
+         // GOW-Port: on by default; PS2X_GS_DIRECT_PRESENT=0 keeps the RAM (readback + upload) presentation.
+         if (!directPresentEnabled())
+             return;
+@@ -301,6 +304,7 @@
+ 
+     void ShutdownHost()
+     {
++        s_acquiredFrame = {};
+         std::lock_guard<std::mutex> lock(s_sharedMutex);
+         releaseReading();
+         s_sharedActive.store(false, std::memory_order_release);
+@@ -482,6 +486,7 @@
+ {
+     void CaptureHostContext()
+     {
++        s_acquiredFrame = {};
+         if (!directPresentEnabled())
+             return;
+         GLFWwindow *window = glfwGetCurrentContext();
+@@ -507,6 +512,7 @@
+ 
+     void ShutdownHost()
+     {
++        s_acquiredFrame = {};
+         std::lock_guard<std::mutex> lock(s_sharedMutex);
+         releaseReading();
+         s_sharedActive.store(false, std::memory_order_release);
+@@ -641,8 +647,20 @@
+     bool Acquire(Frame &frame)
+     {
+         if (!Active())
+-            return false;
+-        std::lock_guard<std::mutex> lock(s_sharedMutex);
++        {
++            s_acquiredFrame = {};
++            return false;
++        }
++        // Publication can stall inside the driver while holding this mutex. Keep the
++        // immutable reading slot instead of delaying the window's input/event loop.
++        std::unique_lock<std::mutex> lock(s_sharedMutex, std::try_to_lock);
++        if (!lock.owns_lock())
++        {
++            if (s_acquiredFrame.sequence == 0u)
++                return false;
++            frame = s_acquiredFrame;
++            return true;
++        }
+         int newest = -1;
+         uint64_t sequence = s_readingSlot >= 0 ? s_sharedSlots[s_readingSlot].frame.sequence : 0u;
+         for (int i = 0; i < static_cast<int>(s_sharedSlots.size()); ++i)
+@@ -666,8 +684,12 @@
+             s_readingSlot = newest;
+         }
+         if (s_readingSlot < 0)
+-            return false;
++        {
++            s_acquiredFrame = {};
++            return false;
++        }
+         frame = s_sharedSlots[s_readingSlot].frame;
++        s_acquiredFrame = frame;
+         return true;
+     }
+ }

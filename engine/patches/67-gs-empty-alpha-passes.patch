@@ -6,8 +6,9 @@
 
 --- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
 +++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
-@@ -2,6 +2,7 @@
+@@ -2,7 +2,8 @@
  #include "runtime/gs/gs_hw_backend.h"
+ #include "runtime/gs/gs_texture_budget.h"
  #include "runtime/gow_ajustes_vivo.h"
  #include "gs_texture_store.h"
 +#include "gs_alpha_pass.h"
@@ -66,18 +67,24 @@
          {
              // failing fragments: 1 FB_ONLY (colour+alpha, no Z), 2 ZB_ONLY (Z only), 3 RGB_ONLY (colour, no alpha, no Z)
              g.Uniform1i(locPass, 2);
-@@ -2873,6 +2880,9 @@
+@@ -2873,9 +2880,12 @@
          if (now - stats.last < std::chrono::seconds(5))
              return;
          stats.last = now;
+         std::fprintf(stderr, "[gs-cache] bytes=%llu budget=%llu evictions=%llu reuses=%llu\n",
+             (unsigned long long)textureBytes, (unsigned long long)textureBudget,
+             (unsigned long long)textureEvictions, (unsigned long long)textureReuses);
 +        std::fprintf(stderr, "[gs-alpha] prune=%u skipped_pass=%llu skipped_fail=%llu\n", alphaPrune ? 1u : 0u,
 +                     (unsigned long long)stats.alphaPassesSkipped, (unsigned long long)stats.alphaFailPassesSkipped);
 +        stats.alphaPassesSkipped = stats.alphaFailPassesSkipped = 0;
          std::fprintf(stderr, "[gs-hw] shuffles=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu textures=%zu\n",
                       (unsigned long long)stats.shuffles, (unsigned long long)stats.draws, (unsigned long long)stats.batches, (unsigned long long)stats.texDecodes,
                       (unsigned long long)stats.texHits, (unsigned long long)stats.skippedPsm, (unsigned long long)stats.skippedPrim,
-@@ -2889,7 +2899,10 @@
+@@ -2889,10 +2899,13 @@
      }
+     // Keep existing hot renderer members at their previous offsets.
+     uint64_t textureBytes = 0;
+     uint64_t textureEvictions = 0, textureReuses = 0;
  };
  
 -GSHwBackend::GSHwBackend() : m_impl(std::make_unique<Impl>()) {}

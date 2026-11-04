@@ -134,6 +134,88 @@ check and 17 pipeline tests pass. Six real CHD cases were skipped without `chdma
 This validates preparation, not full movie playback, subtitles, audio synchronization or FPS. See the
 [investigation](research/movie-placeholder-review-2026-11-04.md) for evidence and unresolved report claims.
 
+## RX 5500 XT player observation (2026-11-03; not locally validated)
+
+Player reports drastic FPS drops near full GPU utilization during Hydra attacks
+above and below the ship deck, launcher 0.5.0, defaults and VSync off. No target
+runner hash, driver, exact FPS range or trace supplied yet. This is an observation,
+not an RX5500 XT benchmark, confirmed root cause or performance-support claim.
+The [source investigation](research/gpu-saturation-2026-11-03.md) records the
+destination-blending fallback, presentation/queue mechanisms and required measurements.
+
+For prior hypotheses, rejected changes and incomplete gains, start with the
+[performance experiment ledger](research/performance-experiments.md). Consult its
+retest rules before repeating a performance investigation; detailed evidence follows here.
+
+## VU1 / synchronization follow-up (2026-11-03)
+
+On Xeon E5-2666 v3 / RX 580 2048SP, three isolated candidates were compared with
+the patch-60 baseline using three alternating visible, audio-enabled pairs each
+(100 seconds, complete measurement windows after 40 seconds, 1x, precise VU,
+GS early FINISH on). No compilation/profiling overlapped FPS measurements.
+
+| Candidate | Baseline → candidate mean guest FPS | Decision |
+| --- | ---: | --- |
+| Separate stage head/tail cache lines | 59.4245 → 59.5143 | Rejected: +0.15%, inconsistent pairs/pacing |
+| Separate VU1 timing history from flag tails | 59.4121 → 59.4173 | Rejected: gameplay tied despite -0.37% isolated JIT replay time |
+| Publish consumed stage space every 4 KiB / batch end | 59.3409 → 57.7046 | Rejected: -2.76%, lost all pairs |
+
+All 18 runs passed gameplay, graceful exit and measurement checks. The VU1
+candidate passed the full verify gate and the local 128-task corpus across five
+backends; the queue candidate passed production DMA/worker/ring tests. Runtime
+sources were restored exactly. No additional FPS gain, notebook validation or
+28-minute-scene reproduction is claimed. Details and local evidence paths:
+[experiment report](research/vu1-sync-2026-11-03.md).
+
+## Default GS texture storage update (2026-11-03)
+
+Patch 60 bounds decoded RGBA/index texture storage to 128 MiB before upload and
+updates existing same-shape storage with `TexSubImage2D` instead of redefining it.
+No player setting is required. The budget excludes render targets, replacement
+packs, driver staging and other process memory; it is not a total RAM cap.
+
+On Xeon E5-2666 v3 / RX 580 2048SP, three alternating pairs of visible, audio-enabled
+100-second scripted runs used internal 1x, 1280x720, host cap 60, VSync off, early GS
+FINISH and precise VU defaults. Complete measurement windows begin after 40 seconds.
+No concurrent compilation or profiling ran during these FPS comparisons.
+
+| Pair | Baseline guest FPS | Updated guest FPS | Change |
+| --- | ---: | ---: | ---: |
+| 1 | 59.091 | 59.382 | +0.49% |
+| 2 | 58.600 | 59.690 | +1.86% |
+| 3 | 59.127 | 59.471 | +0.58% |
+| Mean | 58.940 | 59.514 | +0.97% |
+
+Lowest five-second windows across these runs were 45.2 and 54.8 FPS respectively;
+neither variant had a measured interval above 100 ms after warm-up. Window-p95
+medians were 17.060–17.148 ms versus 17.075–17.121 ms. Private-memory peaks overlapped
+(baseline 326.9–336.5 MiB; updated 319.0–347.8 MiB), so no process-memory reduction is
+established here. This timed input route does not guarantee identical scene alignment;
+the small positive result in 3/3 pairs is not locked-60 or full-game acceptance.
+
+The earlier budget-only layout was slower: 59.145 -> 58.596 FPS. It is not the final
+implementation. The final change also reuses storage and appends accounting members
+to preserve existing renderer member offsets. Evidence is retained under
+`data/experiments/gs61/{ab,ab-reuse,result.json}`. Baseline runner SHA-256:
+`d1a6b52699c4964e3a87fbc14a889f3e9200ae91d72cb87d4a2771f5c33b9ab2`;
+updated runner: `f269bfc2fe3762b9446e4124176c236b9a1833547d4e79fd6df2232d1e52be0c`.
+
+Validation: `build.cmd -Stages verify` passed (11 native suites, synthetic ELF,
+VU1 equivalence and isolated replay); Linux pipeline tests passed with one
+platform-specific skip. The production eviction policy passed a 9,996-upload
+stress loop. The optional real-GPU `gow_texture_upload_test` verified alternating
+red/blue pixels after 20 invalidating uploads each in CT32, T8 and T4 on RX 580.
+The visible `session-game-smoke.py --capture --early-finish --texture-cache` run
+passed all 13 checks, including 2,000 VU1 parity checks, and its gameplay image was
+inspected. It recorded 17,222 storage reuses; its approximately 7.2 MiB working set
+did not exercise in-game eviction. Eviction pressure is covered by the synthetic
+policy test, not by a reproduced Intel memory spike.
+
+The i3-10110U/Intel UHD multi-second stalls and near-6-GiB process-memory spike
+remain unvalidated with this revision. NVIDIA is also untested. No VU1 semantic or
+queue-ordering changes were adopted; existing unsuccessful chain/spin experiments
+remain rejected. The private kit now enables GS cache counters in detailed mode.
+
 ## Supplied Asia disc and Europe code generation (2026-11-02)
 
 The supplied `God of War (Asia).iso` boots `SCUS_973.99` and has the same complete
@@ -837,6 +919,151 @@ Gaming Mode, regional Linux game builds and Mesa/NVIDIA GPU gameplay remain
 unvalidated. The launcher archive uses its build host's libraries, not a portable
 Steam Linux Runtime baseline. See [Linux instructions](linux.md).
 
+## GS queue instrumentation (2026-11-03, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Patch 59 was built separately at `C:/gow-q59-clang` with Release `-O3`,
+portable x86-64-v2, PDBs and the existing local PGO profile (not retrained).
+The executable SHA-256 is
+`ffd4e85d3f40a3395da46aec4ef0618c9b43401894fd98efd6aa3b33f92b83df`.
+Local evidence and build provenance are under `data/experiments/queue59/`.
+
+The complete `verify` stage passed, including all ten native CTest suites,
+VU1 differential checks and task replay. The new forced-capacity backend test
+verified producer blocking, wakeup, payload contents and packet order. Eight
+collector tests passed against the deployed helper. A separate 100-second visible
+private-card smoke run passed all eleven checks, including gameplay, audio metrics,
+2000 VU1 comparisons without mismatches and graceful shutdown. The 80-second
+capture showed ship gameplay. Audible output was not independently checked.
+
+Two 105-second detailed runs compared the stage's existing 50-us idle spin with
+immediate sleep. Both used scale 1, GS early FINISH, no large-VIF barrier and
+private new-game cards. Whole-session queue capacity waits were:
+
+| Stage idle spin | VU1-to-GS ring total / longest wait | Backend total / longest wait |
+| --- | --- | --- |
+| 50 us | 0.591 ms / 0.170 ms | 3416.076 ms / 4.818 ms |
+| 0 us | 13.254 ms / 3.653 ms | 3513.929 ms / 8.024 ms |
+
+These elapsed waits overlap other work; they are not GPU time or directly
+recoverable frame time. The ring was not a substantial capacity bottleneck on
+this route. Backend counters also showed no texture decodes in the final warm
+windows, which does not establish texture behavior in other scenes. Renderer
+`batches` are not GL draw-call counts: shadow-volume and alpha-fail paths can
+issue several draws per batch. Profile these paths before changing their semantics.
+
+The separate FPS experiment completed three alternating pairs of 105-second runs,
+discarding complete windows that overlapped the first 25 seconds. Detailed timing
+and captures were disabled; each run supplied 15 complete FPS windows (about 75 s).
+All six runs passed gameplay, effective-setting and graceful-exit checks.
+
+| Pair | Existing 50-us spin, guest FPS | Immediate sleep, guest FPS | Sleep change |
+| --- | --- | --- | --- |
+| 1 | 56.719 | 56.013 | -1.24% |
+| 2 (reverse order) | 58.772 | 59.038 | +0.45% |
+| 3 | 58.972 | 55.467 | -5.94% |
+| Mean of runs | 58.154 | 56.839 | -2.26% |
+
+The lowest five-second windows were 47.2 FPS with spin and 46.0 FPS with sleep;
+neither achieved stable 60 FPS. Median window p95 frame intervals ranged from
+16.849 to 17.570 ms with spin and 17.372 to 19.535 ms with sleep. No measured
+interval exceeded 100 ms. CPU samples from 30–100 s averaged 416.7% versus 422.5%
+of one logical CPU (spin versus sleep), with inconsistent pairwise changes;
+there is no demonstrated CPU saving. These are process CPU samples, not power
+measurements. Keep the 50-us default: immediate sleep did not demonstrate a gain.
+The comparison uses the same patched binary, not pre/post-patch binaries.
+Detailed evidence: `fps/summary.json` and `fps-analysis.json` under the local
+experiment directory.
+
+This is the scripted opening ship route, not a reproduction of the historical
+28-minute scene. Real-time inputs do not guarantee identical guest-frame scene
+alignment. The i3-10110U and weaker hardware were not available for new runs;
+these results establish neither their performance nor a stable-60-FPS tier.
+
+## Rejected shuffle scratch experiment (2026-11-03, Xeon E5-2666 v3 / RX 580 2048SP)
+
+An experimental patch reused four temporary geometry vectors in `tryShuffle`, clearing all
+four before each mapping attempt. Partial geometry from a rejected sprite never
+enters the queued pass. Shader code, geometry calculations and draw ordering are
+unchanged. Storage is owned by the backend and retains its high-water capacity
+until destruction; it is not a cache keyed by game content.
+
+A separate 30-second sampling run showed `tryShuffle` in 7.22% of GSThread
+samples, with VU1 chaining also prominent (29.51% on its worker). Sampling includes
+waiting threads and is intrusive: these are not whole-frame cost percentages.
+Local evidence is in `data/experiments/gs60/profile.txt`.
+
+The synthetic test compiles the actual renderer source and calls its geometry
+builder without a GL context. It repeats 100,000 valid sprites interleaved with
+14,286 failures after partial mapping, hashing queued geometry. Both revisions
+produced `6b52eb0da9289d43`; warm allocations fell from 428,572 to zero. Five
+alternating pairs of the final layout gave median 143.381 ms before and 110.191 ms after (23.15% less
+elapsed time, including output hashing). This is a synthetic routine result,
+not a gameplay FPS improvement or GPU rasterization check. The local
+`gs_shuffle_scratch.cpp` regression requires the reference digest and zero warm
+allocations, but deliberately has no timing threshold.
+
+The experiment used `C:/gow-q59-clang`; its pre-change executable is
+preserved under `data/experiments/gs60/baseline`. Both builds retain the same
+portable CPU target and existing PGO profile. The candidate passed the visible
+100-second private-card smoke test, including 2000 VU1 checks without mismatches;
+the 80-second capture showed ship gameplay with HUD. Audio metrics were present,
+but audible output was not independently checked.
+
+The initial placement of scratch storage before hot renderer fields measured
+58.413 versus 59.008 mean guest FPS in three alternating pairs (candidate versus
+baseline). A second variant instead appended storage after all existing members,
+preserving their offsets. This controls a layout difference; it does not establish
+cache layout as the cause of the initial result. The initial evidence is retained
+in `data/experiments/gs60/fps`, with final-layout measurements kept separately.
+
+The second series (`fps-layout`) did not complete: its fourth run lost complete
+`gow-perf` windows and needed forced termination, while `gow-frame` continued.
+Its incomplete averages must not be used as performance evidence. The cause was
+not established. Neither variant demonstrated a gameplay improvement, so the
+renderer change and its native test target were removed from the production
+patch chain. Source variants, the experimental patch, binaries and the test
+fixture remain local under `data/experiments/gs60`; the baseline renderer was
+restored. Do not ship or advertise the synthetic speedup as a game FPS gain.
+
+The `verify` command stopped twice at a synthetic ELF test with Windows access
+denied while renaming temporary output under `data/_tmp`. That test passed
+separately using the normal Windows temporary directory. The remaining checks
+were run explicitly: native suites, guest calls, VU1 equivalence/task replay and
+language checks passed. The final-layout native build passed all eleven CTest
+suites including the new geometry/allocation regression; 17 pipeline tests and
+the A/B methodology checks also passed. Do not describe the interrupted aggregate
+`verify` invocations as successful.
+
+## Rejected VU1 branch-hint experiment (2026-11-03, same Xeon)
+
+The sampled route reported approximately 11–12% self blocks. Removing the
+`[[likely]]` annotation on `chain`'s self-loop branch changed the unprofiled
+machine-code layout, placing the ordinary successor path nearer the entry.
+No VU1 arithmetic, timing or dispatch conditions were changed.
+
+A private-card capture with the baseline runner completed normally and recorded
+128 real MSCAL tasks. All JIT replays matched their captured native baseline;
+all 128 tasks used native blocks. Native and exact baseline digests differed on
+all 128 tasks, so this is backend-preserving parity, not exact/native equivalence.
+The first unpinned comparison suggested a small benefit, but five alternating
+pairs pinned to the same logical CPU after a warm-up pair did not confirm it.
+Summed per-record warm medians (100 repetitions per task) were:
+
+| Pair | Original hint (us) | Hint removed (us) |
+| --- | --- | --- |
+| 1 | 2105.5 | 2063.0 |
+| 2 | 2174.1 | 2194.1 |
+| 3 | 2169.7 | 2435.5 |
+| 4 | 2076.9 | 2081.9 |
+| 5 | 2028.2 | 2055.4 |
+
+The candidate lost four of five pairs and was reverted before any game build was
+made from it. These isolated execution costs exclude reconstruction/hashing/final
+flush and are not FPS. Affinity mask 4 controlled scheduling for this test only;
+it does not simulate notebook hardware. Logs, assembly and results are local in
+`data/experiments/vu60`, and the captured corpus stays under ignored `data/`.
+Neither this candidate nor the shuffle experiment is in the runtime patch chain.
+
 ## Build time and the tune stage (2026-10-30, Xeon E5-2666 v3, 20 threads, 16 GB)
 
 The following measurements are historical. The v0.5.0 release packaging did not
@@ -880,3 +1107,100 @@ Two bounded diagnostic sessions reached gameplay and exited cleanly; both record
 backends against their own baselines (native/exact differ in all 32 records).
 These are CPU isolation inputs, not a valid FPS comparison or audio-quality gate.
 Final runner SHA-256: `6476be39ceb5ef33e5f0594fc0c44cb01dedd41f4bb9d02c239579913b34da35`.
+
+# Private diagnostic kit — 2026-11-03
+
+Built the isolated `gow-diagnostics` frontend and `gow-session` with pinned LLVM/Qt.
+Packaged the preserved queue-59 runner (`ffd4e85d3f40a3395da46aec4ef0618c9b43401894fd98efd6aa3b33f92b83df`),
+without the rejected GS/VU1 experiments. Installer: `data/_package/diagnostic-kit-20261103-final/setup.exe`.
+All 1,356 payload members matched staging; a separate silent installation matched every member and opened
+the dedicated UI. Ten collector tests, 17 pipeline tests and launcher language checks passed.
+The detailed scripted session reached `state=11 levelReady=1`, produced a visually inspected gameplay
+capture, completed with exit 0 and exported its summary/metrics. The installed light mode also launched
+the game and recorded frame windows; it was stopped early to deliver the kit to the user.
+These are functional checks on the Xeon/RX 580, not notebook performance acceptance or an FPS gain.
+No new optimization is adopted. Notebook diagnostics and reproduction of the 28-minute scene are pending.
+
+## Shared presentation contention — 2026-11-03 (GPU-02)
+
+Read-only LK report (`E:/doc/lk`): Ryzen 5 5500 / RX7600, launcher 0.4.0,
+patches through 55, 2x/FXAA on/VSync off. Late-session guest windows averaged
+56.22 FPS while host stayed 59.91 Hz. No GPU-utilization, queue or input-latency
+measurements; this is not the RX5500 XT / 0.5.0 report and does not identify a cause.
+
+Patch 61 removes an unconditional host wait on the shared-image publisher mutex.
+The production-code synthetic test failed on the old implementation (2.007 s)
+and passed on the candidate. Full verify passed. Xeon/RX580 alternating comparison
+(3 pairs, 100 s each, 40 s warmup, 2x, FXAA off): 59.05 -> 59.40 guest FPS,
+2/3 pairs positive; small variable difference, not a confirmed general FPS gain.
+Retained for the demonstrated lock-stall fix; no stable 60 or physical input-lag
+claim. See [GPU-02](research/shared-present-input-2026-11-03.md) for hashes,
+pacing, route/settings, limits and artifact paths. RX7600/RX5500 XT/NVIDIA and
+notebook gameplay validation are pending. Real AMD FSR remains a documented
+proposal (GPU-03); the existing scaler is bicubic plus sharpening.
+
+The separate visible 100-second 2x/FXAA-on smoke passed all 11 checks, with
+2000 VU1 parity runs (zero differences), audio/IOP metrics and graceful report
+export. The 80-second GS capture was visually inspected (ship combat and HUD).
+Artifact: `data/gow1/logs/session-game-20261103-215811`. This is functional
+coverage, not a default-FXAA performance comparison or physical latency test.
+
+Packaged 100-second light game smoke also reached `state=11 levelReady=1`,
+recorded the candidate runner hash and exited zero without forced termination.
+Evidence: `data/experiments/present61/packaged-smoke.json`.
+
+## FSR 1 isolated experiment — 2026-11-03 (GPU-03, rejected)
+
+Xeon E5-2666 v3 / RX580 2048SP, driver 31.0.21924.61, portable Release O3/PGO.
+Official AMD EASU/RCAS FP32 prototype passed actual OpenGL orientation/resizing,
+visible 1x/FXAA gameplay and 2000 VU1 parity checks. Full verify passed. Nine valid
+100-second runs (40 s warmup, 1280x720, FXAA on, cap 60, VSync off): current 2x
+59.6545 FPS; current 1x 59.3880; FSR 1x 59.3395. No reliable FPS or pacing benefit.
+The isolated identical-input GPU scaler timing increased ~0.107 -> ~0.243 ms.
+FSR output was softer; no clear quality advantage established. Original source
+and build restored, preserving patch 61; no new public setting/patch/package.
+
+One no-FSR 2x control stalled in presentation/host reporting and required forced
+termination; excluded, evidence retained. Its replacement exited zero but left
+stale session metadata; actual exit was cross-checked with the event and collector
+result, without rewriting raw files. Details, hashes, exact sequence and artifacts:
+[FSR 1 experiment](research/fsr1-experiment-2026-11-03.md),
+`data/experiments/fsr62/comparison.json`. Weaker GPUs, NVIDIA and Hydra attack
+remain unvalidated; this result must not be generalized into a universal FSR loss.
+
+## Notebook installer delivery — 2026-11-03
+
+Rebuilt the normal launcher/collector/diagnostic frontend and packaged both
+installers from current sources through runtime patch 61, without the rejected
+FSR prototype. Normal: `build.cmd -Stages launcher,installer -NoReleaseProfile`;
+no compatible freshly trained release PGO manifest was available, so no stale
+profile was shipped. The normal installer uses the standard game installation/
+compilation workflow; the diagnostic kit embeds the previously validated restored
+runner (`07e5cedfe449e9776efb0fc3c3845b917c2bbdbe419069c7cb5f11ab2a463dd8`).
+These are different installation workflows, not a notebook performance comparison.
+
+Both installers are in `data/_package/notebook-p61-20261103/` with SHA256SUMS.txt.
+Normal payload: 1,571 members / 6 LZMS blocks; diagnostic: 1,358 / 12. Every member
+matched its staging directory. Current runtime patches matched byte-for-byte;
+normal staging contains no PGO profile, ISO, card or generated data directory.
+Normal and diagnostic UI captures passed and were inspected; 11 deployed-collector
+tests and launcher language validation passed. Artifacts:
+`data/experiments/delivery61/`. No clean full game installation or physical notebook
+performance validation is claimed by these packaging checks.
+
+`gow-native-pc-setup.exe`: 28899958 bytes, SHA-256 `885501c3dec5fe096eec31390ead92d456b9b43e47d41279e827c49fb22641e4`.
+
+`gow-native-pc-diagnostic-setup.exe`: 50073886 bytes, SHA-256 `fceb85867262c7d477261e419c2cbc7f0e637974f57dfe80f61880c623f46ab5`.
+
+The newly packaged diagnostic kit also passed a 100-second gameplay smoke:
+state=11/levelReady=1, matching runner hash, exit zero and no forced termination.
+Evidence: `data/experiments/delivery61/game-smoke.json`.
+
+## Local branch integration (2026-11-04, correctness only)
+
+Combined main `37290ba` with fix-chore `2e0b023`, preserving both histories and
+experimental defaults. Full `fetch,verify` passed with 15 CTest groups, VU1
+backend equivalence and task replay. Disc-preparation and Linux orchestration
+checks also passed. Patch 67 required context-only rebasing over patch 60.
+No combined FPS/GPU or notebook acceptance claim; the game runner was not rebuilt.
+See [integration evidence](research/merge-fix-chore-2026-11-04.md).

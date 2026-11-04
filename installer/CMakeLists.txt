@@ -11,3 +11,8 @@ target_compile_definitions(gow-setup PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A0
 target_compile_options(gow-setup PRIVATE -Wall -Wextra)
 target_link_options(gow-setup PRIVATE -static -municode)
 target_link_libraries(gow-setup PRIVATE user32 gdi32 gdiplus shell32 ole32 cabinet advapi32)
+
+option(GOW_DIAGNOSTIC_SETUP "Build the isolated diagnostic kit installer" OFF)
+if(GOW_DIAGNOSTIC_SETUP)
+    target_compile_definitions(gow-setup PRIVATE GOW_DIAGNOSTIC_SETUP=1)
+endif()
