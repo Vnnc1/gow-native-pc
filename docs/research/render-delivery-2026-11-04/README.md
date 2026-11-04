@@ -153,3 +153,5 @@ Stable 60 guest FPS remains the target. Neither this delivery nor these local co
 target on the laptop, and they do not establish a percentage gain or universal hardware support.
 
 Next execution: [scene-controlled CPU/GPU investigation and opt-in countdown](scene-bottlenecks.md).
+
+Follow-up: [frame-aligned arrival, isolated VU1 chain tests and promotion gates](vu1-chain.md).

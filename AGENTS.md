@@ -402,3 +402,13 @@ first-batch trigger. `gs-run-ab.py --task-capture` is an intrusive diagnostic mo
 with a 32-record cap; never present those session FPS as a benchmark or export its
 local game-derived task files. See the scene-bottleneck report for rejected combat
 comparisons and the separately validated exact-input VU1 corpus.
+
+Patch 70 adds test-only `f<N>` pad/capture times and frame-window boundaries.
+`ship_arrival_frames` compares the first 360 rendered arrival frames; it is not sustained combat.
+The harness requires matching frame-indexed trajectories and consecutive pad observations.
+Pad-observed intervals are not GPU latency; exact audio snapshots can straddle one device callback.
+Missing five-second windows and unavailable exact dropped-audio counts must remain null.
+Patch 71's JIT chain adapter is opt-in (`GOW_VU1X_CHAIN_INLINE=1`), default off.
+`gs-run-ab.py --compare vu1-inline` forces JIT-only in both variants and checks effective markers;
+do not present those results as the shipped hybrid mode. Preserve the original chain/AOT/DLL path.
+Run the methodology tests, full verify and identical-task replay for changes to these contracts.

@@ -73,3 +73,24 @@ assert not m.same_scene([paused], 2, ["ship"])
 assert m.same_scene([paused], 2, ["ship"], [13])
 assert not m.same_scene([scene, paused], 2, ["ship"], [13])
 print("PASS: paused scenes require an explicit state contract")
+
+markers = "[20000 ms] [gow-scene] phase=begin frame=240 t=17.500000\n[40000 ms] [gow-scene] phase=end frame=840 t=37.500000"
+w = m.frame_window(markers,{"frame_begin":240,"frame_end":840})
+assert w["guest_frames"] == 600 and w["guest_fps"] == 30
+for bad in ["",markers.splitlines()[0],markers.replace("frame=240","frame=241"),markers.replace("37.500000","16.000000"),markers+"\n"+markers]:
+    try: m.frame_window(bad,{"frame_begin":240,"frame_end":840})
+    except ValueError: pass
+    else: raise AssertionError("Invalid frame boundary accepted")
+t={"samples":3,"gameplay_only":True,"zones":["ship"],"trajectory":{"240":[0,0,0],"300":[100,0,0],"360":[200,0,0]}}
+assert m.same_trajectory([t,t],1,["ship"])
+assert not m.same_trajectory([t,{**t,"trajectory":{**t["trajectory"],"300":[102,0,0]}}],1,["ship"])
+assert not m.same_trajectory([t,{**t,"trajectory":{"240":[0,0,0]}}],1,["ship"])
+print("PASS: exact frame boundaries and frame-matched trajectories")
+
+a="[gow-scene-frame] intervals=360 skipped=0 p50_ms=16.0 p95_ms=20.0 p99_ms=30.0 max_ms=40.0 over_100=0\n[gow-scene-audio] requested=48000 missing=10"
+assert m.aligned_metrics(a,360)["audio_missing"] == 10
+for bad in [a.replace("skipped=0","skipped=1"), a.replace("intervals=360","intervals=359"),a.replace("requested=48000","requested=0"), ""]:
+    try: m.aligned_metrics(bad,360)
+    except ValueError: pass
+    else: raise AssertionError("Incomplete aligned metrics accepted")
+print("PASS: aligned frame/audio availability and skipped-frame rejection")

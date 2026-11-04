@@ -1,0 +1,175 @@
+Frame-relative test input/capture and bounded gameplay measurement markers.
+Reuse the existing guest frame counter; no simulation, audio-clock or player-save changes.
+f<N> timestamps and durations are guest frames; existing wall/g timestamps remain.
+
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -1,5 +1,8 @@
+ // GOW-Port: enlaces manuales para God of War (SCUS-97399).
+ #include "runtime/ee_scheduler.h"
++#include "runtime/ps2_perf.h"
++#include "runtime/gow_test_time.h"
++extern std::atomic<uint64_t> g_gowAudioFramesPlayed, g_gowAudioFramesMissing;
+ #include "game_overrides.h"
+ #include "ps2_runtime.h"
+ #include "ps2_runtime_macros.h"
+@@ -327,22 +330,55 @@
+             // GOW-Port: times written "g<s>" in GOW_PAD_GUION / GOW_PAD_CAPTURAS count from the start of gameplay
+             // (first state 11 with nothing pending), so runs at different speeds act at the same point in the game.
+             // They are stored as kGameplayTime + s.
+-            constexpr double kGameplayTime = 1.0e6;
++            constexpr double kGameplayTime = gow_test_time::gameplay;
++            static uint64_t firstGameplayFrame = 0;
++            const uint64_t totalFrames = ps2_perf::guestFlips.load(std::memory_order_relaxed);
+             static double gameplayStart = -1.0;
+             if (gameplayStart < 0.0 && readGuest32(rdram, 0x29E560u) == 11u && readGuest32(rdram, 0x29E574u) == 0u)
+             {
+                 gameplayStart = seconds;
++                firstGameplayFrame = totalFrames;
+                 std::fprintf(stderr, "[gow-pad2:test] gameplay start at %.2f s\n", seconds);
+             }
+-            auto parseTime = [](const std::string &text) {
+-                return !text.empty() && text[0] == 'g' ? kGameplayTime + std::strtod(text.c_str() + 1, nullptr)
+-                                                       : std::strtod(text.c_str(), nullptr);
++            const uint64_t gameplayFrames = gameplayStart >= 0.0 ? totalFrames - firstGameplayFrame : 0;
++            auto parseTime = gow_test_time::parse;
++            auto reached = [&](double when) {
++                return gow_test_time::reached(when, seconds, gameplayStart, gameplayFrames);
+             };
+-            auto reached = [&](double when) {
+-                if (when < kGameplayTime)
+-                    return seconds >= when;
+-                return gameplayStart >= 0.0 && seconds - gameplayStart >= when - kGameplayTime;
+-            };
++            // Frame-aligned boundaries are observed on the EE thread, without changing
++            // simulation time or skipping work. The helper stops only its owned child.
++            static const uint64_t frameBegin = std::getenv("GOW_TEST_FRAME_BEGIN") ?
++                std::strtoull(std::getenv("GOW_TEST_FRAME_BEGIN"), nullptr, 10) : 0;
++            static const uint64_t frameEnd = std::getenv("GOW_TEST_FRAME_END") ?
++                std::strtoull(std::getenv("GOW_TEST_FRAME_END"), nullptr, 10) : 0;
++            static unsigned framePhase = 0;
++            static GowTestFrameProbe frameProbe;
++            static uint64_t audioBeginPlayed = 0, audioBeginMissing = 0;
++            if (gameplayStart >= 0.0 && frameEnd > frameBegin && frameEnd <= 1000000u)
++            {
++                if (framePhase == 0 && gameplayFrames >= frameBegin) {
++                    std::fprintf(stderr, "[gow-scene] phase=begin frame=%llu t=%.6f\n",
++                                 static_cast<unsigned long long>(gameplayFrames), seconds);
++                    frameProbe.begin(gameplayFrames, seconds);
++                    audioBeginPlayed = g_gowAudioFramesPlayed.load(std::memory_order_relaxed);
++                    audioBeginMissing = g_gowAudioFramesMissing.load(std::memory_order_relaxed);
++                    framePhase = 1;
++                }
++                if (framePhase == 1) frameProbe.observe(gameplayFrames, seconds);
++                if (framePhase == 1 && gameplayFrames >= frameEnd) {
++                    std::fprintf(stderr, "[gow-scene] phase=end frame=%llu t=%.6f\n",
++                                 static_cast<unsigned long long>(gameplayFrames), seconds);
++                    frameProbe.intervals.sort();
++                    std::fprintf(stderr, "[gow-scene-frame] intervals=%llu skipped=%llu p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f over_100=%llu\n",
++                        static_cast<unsigned long long>(frameProbe.intervals.count), static_cast<unsigned long long>(frameProbe.skipped),
++                        frameProbe.intervals.percentile(50), frameProbe.intervals.percentile(95), frameProbe.intervals.percentile(99),
++                        frameProbe.intervals.maximum, static_cast<unsigned long long>(frameProbe.intervals.over100));
++                    std::fprintf(stderr, "[gow-scene-audio] requested=%llu missing=%llu\n",
++                        static_cast<unsigned long long>(g_gowAudioFramesPlayed.load(std::memory_order_relaxed) - audioBeginPlayed),
++                        static_cast<unsigned long long>(g_gowAudioFramesMissing.load(std::memory_order_relaxed) - audioBeginMissing));
++                    framePhase = 2;
++                }
++            }
+             // GOW-Port: GOW_RAM_DUMP=<time>:<file> writes the 32 MB EE RAM once (time as in GOW_PAD_CAPTURAS,
+             // e.g. g5:ram.bin), to compare with eeMemory.bin from a PCSX2 save state at the same point.
+             // GOW-Port: GOW_THREAD_DUMP=<t>: lists the EE threads once (entry, priorities, status, wait).
+@@ -407,9 +443,12 @@
+                 }
+             static const bool playerTrace = std::getenv("GOW_PLAYER_TRACE") != nullptr;
+             static double nextPlayerReport = 0;
+-            if (playerTrace && seconds >= nextPlayerReport)
++            static uint64_t nextFrameReport = 0;
++            const bool frameTrace = frameEnd > frameBegin && gameplayStart >= 0.0;
++            if (playerTrace && (frameTrace ? gameplayFrames >= nextFrameReport : seconds >= nextPlayerReport))
+             {
+                 nextPlayerReport = seconds + 1;
++                if (frameTrace) nextFrameReport = gameplayFrames + 60;
+                 const uint32_t player = readGuest32(rdram, 0x29E5CCu) & 0x01FFFFFFu;
+                 // 0x2C7790: a world position vector that follows Kratos's walk (found by RAM diffs while walking).
+                 float pos[3]{};
+@@ -418,10 +457,10 @@
+                 float health = 0;
+                 if (creature >= 0x100000u)
+                     std::memcpy(&health, rdram + creature + 0x198u, 4);
+-                std::fprintf(stderr, "[gow-player] t=%.1f g=%.1f obj=%x pos=%.1f,%.1f,%.1f hp=%.0f state=%u movie=%u zone=%s\n", seconds,
++                std::fprintf(stderr, "[gow-player] t=%.1f g=%.1f obj=%x pos=%.1f,%.1f,%.1f hp=%.0f state=%u movie=%u zone=%s frame=%llu\n", seconds,
+                              gameplayStart >= 0.0 ? seconds - gameplayStart : -1.0, player, pos[0], pos[1], pos[2], health,
+                              readGuest32(rdram, 0x29E560u), readGuest32(rdram, 0x29C838u),
+-                             gowCurrentZone(rdram, ctx, runtime).c_str());
++                             gowCurrentZone(rdram, ctx, runtime).c_str(), static_cast<unsigned long long>(gameplayFrames));
+             }
+             static double nextStateReport = 0;
+             static const bool primDiag = [] { const char *diag=std::getenv("GOW_EE_PRIM_DIAG"); return diag && std::strcmp(diag,"1")==0; }();
+@@ -460,7 +499,7 @@
+                     if (colon == std::string::npos)
+                         continue;
+                     std::string name = item.substr(colon + 1);
+-                    double hold = 0.7;
++                    double hold = item[0] == 'f' ? 42.0 : 0.7;
+                     if (const size_t star = name.find('*'); star != std::string::npos)
+                     {
+                         hold = std::strtod(name.c_str() + star + 1, nullptr);
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_test_time.h
+@@ -0,0 +1,36 @@
++#pragma once
++#include <cstdint>
++#include "runtime/gow_frame_metrics.h"
++#include <cstdlib>
++#include <string>
++
++// Test-only timestamps: wall seconds, g<seconds> since gameplay, f<guest frames>.
++// Durations use the same unit as the timestamp. Normal player input never uses this.
++namespace gow_test_time {
++inline constexpr double gameplay = 1.0e6, frame = 2.0e6;
++inline double parse(const std::string &text) {
++    if (!text.empty() && text[0] == 'f') return frame + std::strtod(text.c_str() + 1, nullptr);
++    if (!text.empty() && text[0] == 'g') return gameplay + std::strtod(text.c_str() + 1, nullptr);
++    return std::strtod(text.c_str(), nullptr);
++}
++inline bool reached(double when, double wall, double start, uint64_t frames) {
++    if (when >= frame) return start >= 0.0 && frames >= when - frame;
++    if (when >= gameplay) return start >= 0.0 && wall - start >= when - gameplay;
++    return wall >= when;
++}
++}
++
++// Intervals between pad observations of consecutive guest frames, not display latency.
++struct GowTestFrameProbe {
++    gow_diagnostics::FrameWindow intervals;
++    uint64_t lastFrame = 0, skipped = 0;
++    double lastTime = 0;
++    void begin(uint64_t frame, double time) { intervals = {}; lastFrame = frame; lastTime = time; skipped = 0; }
++    void observe(uint64_t frame, double time) {
++        if (frame == lastFrame) return;
++        if (frame < lastFrame) { ++skipped; return; }
++        skipped += frame - lastFrame - 1;
++        intervals.add((time - lastTime) * 1000);
++        lastFrame = frame; lastTime = time;
++    }
++};
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -47,6 +47,8 @@
+ // has played (including silence fill) and frames the sound engine produced (= GOW_AUDIO_PCM file position).
+ std::atomic<uint64_t> g_gowAudioFramesPlayed{0};
+ std::atomic<uint64_t> g_gowAudioFramesProduced{0};
++// Monotonic missing-device-frame count for bounded test-window snapshots.
++std::atomic<uint64_t> g_gowAudioFramesMissing{0};
+ // GOW-Port: funciones de Tobiichi Port (gow_integracion.cpp).
+ void gowVentanaAbrir(const char *title);
+ int gowVentanaFps();
+@@ -74,6 +76,8 @@
+             produced = source->drainAudio(out, frames, kSpu2MaxLatencyFrames);
+         g_gowAudioFramesPlayed.fetch_add(frames, std::memory_order_relaxed);
+         g_gowAudioFramesProduced.fetch_add(produced, std::memory_order_relaxed);
++        if (produced < frames)
++            g_gowAudioFramesMissing.fetch_add(frames - produced, std::memory_order_relaxed);
+         // GOW-Port: GOW_AUDIO_PCM=<archivo> guarda las muestras emuladas (s16le, estéreo, 48 kHz) sin los
+         // silencios de relleno, para comprobar el audio aunque la emulación vaya más lenta que el tiempo real.
+         static std::FILE *pcm = []() -> std::FILE *

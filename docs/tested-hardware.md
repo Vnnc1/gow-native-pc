@@ -1,5 +1,29 @@
 # Tested hardware and results
 
+## Frame-aligned arrival and VU1 chain (2026-11-04, i5-8265U / UHD 620)
+
+Patch 70 stabilizes the first 360 rendered ship-arrival frames with frame-indexed
+input, trajectory gates and bounded interval/audio measurements. It does not yet
+stabilize combat. All three initial hybrid pairs and three final JIT-only pairs
+passed the arrival scene gates; all used private cards and verified unchanged
+original saves. Tests ran in hidden windows with audio, fixed 1x and 1280x720.
+
+Patch 71 is an optional JIT adapter (`GOW_VU1X_CHAIN_INLINE=1`), default off. The
+hybrid arrival uses AOT and did not exercise it; the final gameplay comparison
+explicitly forced JIT-only in both variants. Mean FPS was **52.263 -> 52.621 (+0.68%)**,
+but median per-run p95 worsened **26.981 -> 28.440 ms**, with a candidate p99 outlier
+of **56.288 ms**. The tail gate failed. Same-binary 32-task CPU replay measured
+**460.4 -> 458.6 us (-0.39%)**, within observed variation; this did not reproduce
+the initial unconditional experiment's 4.08%. No default promotion or significant
+FPS/resource-consumption improvement is established.
+
+All short arrival windows had zero missing audio frames; this does not fix or
+validate long-combat sound. GPU load remained near saturation. `fetch,build,verify`
+passed with 13 CTest groups, VU1 backend/self-loop equivalence including the optional
+adapter, and task replay. The methodology and final explicit-mode replay checks
+also passed. Final runner: `bbf74abfb8971e3b8d526a92fdedb5aeac4640b788a19601729734d7272bee7b`.
+See [complete results, rejected attempts and remaining gates](research/render-delivery-2026-11-04/vu1-chain.md).
+
 ## Oscillation/audio follow-up (2026-11-04, background sessions under competing load)
 
 i5-8265U, 24 GiB, Intel UHD 620 / driver 27.20.100.9664, AC, portable Clang Release -O3,
