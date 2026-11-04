@@ -62,6 +62,7 @@ Pinned replay controls scheduling; it does not emulate a slower computer.
 | GS-01 / 2026-11-03 | Reuse `tryShuffle` scratch vectors | Synthetic geometry -23.15% elapsed time and zero warm allocations, same digest; initial game variant 59.008 → 58.413 FPS. Visible smoke/parity passed but no FPS benefit. Rejected. | H “Rejected shuffle scratch experiment”; `data/experiments/gs60/`. See GS-02 for second layout. |
 | GS-02 / 2026-11-03 | Append shuffle scratch fields after hot members | Second `fps-layout` series incomplete: fourth run lacked complete `gow-perf` windows and required forced termination while `gow-frame` continued. Cause unknown. No valid gain; not shipped. | Same H section; `data/experiments/gs60/fps-layout/`. Do not use incomplete averages or claim the synthetic win as gameplay speedup. |
 | GS-03 / 2026-11-03 | Texture byte budget only, initial member layout | 59.145 → 58.596 FPS (-0.93%); rejected variant. This is not the retained patch-60 implementation with storage reuse and preserved hot-member offsets. | H “Default GS texture storage update”; `data/experiments/gs61/ab/`. |
+| GS-04 / historical 2026-10-25 record | Waffle batching commits `00bda7f`, `09ea6cb`, `91ac954`, `c558c21` | RX580 game ~62 FPS but window 0.2–2 Hz, GPU queue saturation / SwapBuffers blocking. Excluded from patch 04. Do not reintroduce as an untested batching win. | H historical performance table; [handoff §8](handoff-2026-10-25-performance-phases.md). Not a reproduction of the new RX5500 XT report. |
 | BUILD-01 / 2026-10-30 | Train PGO with `-O1` to shorten installation | Training compiled 2.2x faster, but final game 49.7 → 45.0 FPS, worse 3/3 pairs. Rejected; keep training at `-O3`. | H “Build time and the tune stage”; V §9.3. |
 | CPU-01 / 2026-10-30 | PGO `x86-64-v3` instead of portable v2 | 52.91 → 52.11 mean FPS in three pairs, no gain; portable kept. | H “PGO, CPU target and patch 38”. Not the same test as VU-only AVX2. |
 
@@ -105,7 +106,30 @@ limited evidence to whole-game correctness, stable 60 FPS, or notebook support.
 | OPEN-04 | ThinLTO gameplay gain, fast-mode PGO training, idle timing in fast mode, parallel VU1 tasks and superblocks remain proposals in R/N. | Validated wins or already rejected implementations. Require a concrete new hypothesis; do not repeat the chain variants above under a new name. |
 | OPEN-05 | Notebook reports showed complete native coverage for recorded blocks and long waits/memory spikes. | Proof that more JIT/AOT coverage fixes those stalls, or that waits are pure VU/GPU compute time. See H and the diagnostic reports; root cause and updated-kit result remain open. |
 
+**GPU-03 — rejected for adoption**: [Official FSR 1 experiment](fsr1-experiment-2026-11-03.md).
+Actual EASU/RCAS FP32 implemented in the isolated build; real-GPU orientation,
+visible gameplay and full verify passed. Nine valid RX580 runs: current 2x
+59.65 FPS, current 1x 59.39, FSR 1x 59.34. Scaler GPU cost ~0.107 -> ~0.243 ms;
+no reliable FPS/pacing or quality advantage. Source/build restored, prototype
+archived privately. One invalid no-FSR control stall and stale exit-metadata
+recovery remain documented. Weak GPUs and Hydra attack unvalidated; retest needs
+a changed GPU-bound workload/hardware or implementation, not another identical
+opening-route comparison. The existing legacy `filtro=fsr` remains bicubic.
+
 ## Required record for a new experiment or retest
+
+**GPU-02**: [LK report and presentation contention](shared-present-input-2026-11-03.md).
+Retained patch 61 fixes a deterministic CPU-lock stall; six RX580 runs averaged
+59.05 -> 59.40 FPS, 2/3 pairs positive (not a reliable FPS gain);
+distinct from queue batching. RX7600 log identifies late guest FPS dips but contains
+neither GPU utilization nor input latency. Candidate validation/retention is recorded
+in that report; do not treat the synthetic stall reduction as a gameplay FPS claim.
+
+Active source investigation **GPU-01**: [RX 5500 XT saturation / Hydra report](gpu-saturation-2026-11-03.md).
+Launcher 0.5.0, default settings, VSync off, above/below deck; no target-GPU reproduction
+or fix yet. Records per-triangle blend fallback, real-draw counter gaps, presentation
+and bounded-queue behavior, and missing measurements. The new hardware/workload is
+the reason to investigate; it does not reopen rejected queue experiments without evidence.
 
 Record: ID/date; hypothesis and affected symbols/flags; previous ID and retest
 reason; source/patch and runner hashes; hardware/driver/compiler/PGO; scene/card

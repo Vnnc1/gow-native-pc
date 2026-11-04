@@ -48,3 +48,9 @@ dois modos de teste. O modo detalhado também registra `[gs-cache]`: bytes de
 texturas residentes, orçamento, descartes e atualizações que reutilizaram espaço.
 Esse contador não representa toda a memória do processo ou do driver.
 Os 60 FPS em notebooks e máquinas mais fracas ainda precisam ser validados nesses PCs.
+
+A revisão com o patch 61 evita uma espera da janela pelo publicador de imagens
+quando essa trava está ocupada. A imagem anterior permanece válida até haver uma
+nova pronta. Isso corrige uma fonte de atraso; não comprova a solução de todas as
+quedas ou do input lag. O kit não inclui FSR da AMD. Para comparar placas, mantenha
+a mesma escala e cena nos dois testes e marque o trecho da queda.

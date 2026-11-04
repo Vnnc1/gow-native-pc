@@ -130,6 +130,13 @@ with sound before claiming a tier ready. Preserve portable CPU fallbacks and acc
 The laptop has not yet met the 60 fps target. Follow the hardware-tier acceptance gates in
 `docs/research/roadmap-2026-10-27.md`; do not promise universal performance or classify an untested tier as supported.
 
+Patch 61 keeps shared presentation acquisition nonblocking when the GS publisher
+holds its mutex. The host-thread snapshot owns the existing reading slot; never
+recycle it until normal host release, and reset it on host lifecycle changes.
+`gow_shared_present_tests` exercises production acquisition with fake fences and
+is part of `verify`. This removes one lock wait, not all host/backend/driver waits;
+see GPU-02 in the performance ledger before extending its performance claims.
+
 ## Player diagnostic reports
 
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data

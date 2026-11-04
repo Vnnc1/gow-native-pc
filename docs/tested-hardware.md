@@ -1,5 +1,14 @@
 # Tested hardware and results
 
+## RX 5500 XT player observation (2026-11-03; not locally validated)
+
+Player reports drastic FPS drops near full GPU utilization during Hydra attacks
+above and below the ship deck, launcher 0.5.0, defaults and VSync off. No target
+runner hash, driver, exact FPS range or trace supplied yet. This is an observation,
+not an RX5500 XT benchmark, confirmed root cause or performance-support claim.
+The [source investigation](research/gpu-saturation-2026-11-03.md) records the
+destination-blending fallback, presentation/queue mechanisms and required measurements.
+
 For prior hypotheses, rejected changes and incomplete gains, start with the
 [performance experiment ledger](research/performance-experiments.md). Consult its
 retest rules before repeating a performance investigation; detailed evidence follows here.
@@ -948,3 +957,78 @@ capture, completed with exit 0 and exported its summary/metrics. The installed l
 the game and recorded frame windows; it was stopped early to deliver the kit to the user.
 These are functional checks on the Xeon/RX 580, not notebook performance acceptance or an FPS gain.
 No new optimization is adopted. Notebook diagnostics and reproduction of the 28-minute scene are pending.
+
+## Shared presentation contention — 2026-11-03 (GPU-02)
+
+Read-only LK report (`E:/doc/lk`): Ryzen 5 5500 / RX7600, launcher 0.4.0,
+patches through 55, 2x/FXAA on/VSync off. Late-session guest windows averaged
+56.22 FPS while host stayed 59.91 Hz. No GPU-utilization, queue or input-latency
+measurements; this is not the RX5500 XT / 0.5.0 report and does not identify a cause.
+
+Patch 61 removes an unconditional host wait on the shared-image publisher mutex.
+The production-code synthetic test failed on the old implementation (2.007 s)
+and passed on the candidate. Full verify passed. Xeon/RX580 alternating comparison
+(3 pairs, 100 s each, 40 s warmup, 2x, FXAA off): 59.05 -> 59.40 guest FPS,
+2/3 pairs positive; small variable difference, not a confirmed general FPS gain.
+Retained for the demonstrated lock-stall fix; no stable 60 or physical input-lag
+claim. See [GPU-02](research/shared-present-input-2026-11-03.md) for hashes,
+pacing, route/settings, limits and artifact paths. RX7600/RX5500 XT/NVIDIA and
+notebook gameplay validation are pending. Real AMD FSR remains a documented
+proposal (GPU-03); the existing scaler is bicubic plus sharpening.
+
+The separate visible 100-second 2x/FXAA-on smoke passed all 11 checks, with
+2000 VU1 parity runs (zero differences), audio/IOP metrics and graceful report
+export. The 80-second GS capture was visually inspected (ship combat and HUD).
+Artifact: `data/gow1/logs/session-game-20261103-215811`. This is functional
+coverage, not a default-FXAA performance comparison or physical latency test.
+
+Packaged 100-second light game smoke also reached `state=11 levelReady=1`,
+recorded the candidate runner hash and exited zero without forced termination.
+Evidence: `data/experiments/present61/packaged-smoke.json`.
+
+## FSR 1 isolated experiment — 2026-11-03 (GPU-03, rejected)
+
+Xeon E5-2666 v3 / RX580 2048SP, driver 31.0.21924.61, portable Release O3/PGO.
+Official AMD EASU/RCAS FP32 prototype passed actual OpenGL orientation/resizing,
+visible 1x/FXAA gameplay and 2000 VU1 parity checks. Full verify passed. Nine valid
+100-second runs (40 s warmup, 1280x720, FXAA on, cap 60, VSync off): current 2x
+59.6545 FPS; current 1x 59.3880; FSR 1x 59.3395. No reliable FPS or pacing benefit.
+The isolated identical-input GPU scaler timing increased ~0.107 -> ~0.243 ms.
+FSR output was softer; no clear quality advantage established. Original source
+and build restored, preserving patch 61; no new public setting/patch/package.
+
+One no-FSR 2x control stalled in presentation/host reporting and required forced
+termination; excluded, evidence retained. Its replacement exited zero but left
+stale session metadata; actual exit was cross-checked with the event and collector
+result, without rewriting raw files. Details, hashes, exact sequence and artifacts:
+[FSR 1 experiment](research/fsr1-experiment-2026-11-03.md),
+`data/experiments/fsr62/comparison.json`. Weaker GPUs, NVIDIA and Hydra attack
+remain unvalidated; this result must not be generalized into a universal FSR loss.
+
+## Notebook installer delivery — 2026-11-03
+
+Rebuilt the normal launcher/collector/diagnostic frontend and packaged both
+installers from current sources through runtime patch 61, without the rejected
+FSR prototype. Normal: `build.cmd -Stages launcher,installer -NoReleaseProfile`;
+no compatible freshly trained release PGO manifest was available, so no stale
+profile was shipped. The normal installer uses the standard game installation/
+compilation workflow; the diagnostic kit embeds the previously validated restored
+runner (`07e5cedfe449e9776efb0fc3c3845b917c2bbdbe419069c7cb5f11ab2a463dd8`).
+These are different installation workflows, not a notebook performance comparison.
+
+Both installers are in `data/_package/notebook-p61-20261103/` with SHA256SUMS.txt.
+Normal payload: 1,571 members / 6 LZMS blocks; diagnostic: 1,358 / 12. Every member
+matched its staging directory. Current runtime patches matched byte-for-byte;
+normal staging contains no PGO profile, ISO, card or generated data directory.
+Normal and diagnostic UI captures passed and were inspected; 11 deployed-collector
+tests and launcher language validation passed. Artifacts:
+`data/experiments/delivery61/`. No clean full game installation or physical notebook
+performance validation is claimed by these packaging checks.
+
+`gow-native-pc-setup.exe`: 28899958 bytes, SHA-256 `885501c3dec5fe096eec31390ead92d456b9b43e47d41279e827c49fb22641e4`.
+
+`gow-native-pc-diagnostic-setup.exe`: 50073886 bytes, SHA-256 `fceb85867262c7d477261e419c2cbc7f0e637974f57dfe80f61880c623f46ab5`.
+
+The newly packaged diagnostic kit also passed a 100-second gameplay smoke:
+state=11/levelReady=1, matching runner hash, exit zero and no forced termination.
+Evidence: `data/experiments/delivery61/game-smoke.json`.

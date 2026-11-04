@@ -9,6 +9,9 @@ and retest rules, so the next maintainer does not repeat completed investigation
 
 | Document | Subject |
 |---|---|
+| [fsr1-experiment-2026-11-03.md](fsr1-experiment-2026-11-03.md) | Rejected FSR 1 EASU/RCAS prototype: higher scaler GPU cost, no measured FPS benefit; restored baseline, archived evidence |
+| [shared-present-input-2026-11-03.md](shared-present-input-2026-11-03.md) | RX7600 LK log analysis; reproduced shared-publication lock stall and nonblocking acquisition candidate |
+| [gpu-saturation-2026-11-03.md](gpu-saturation-2026-11-03.md) | RX5500 XT Hydra saturation report: source findings, historical AMD failure, measurement gaps; not reproduced or fixed |
 | [performance-experiments.md](performance-experiments.md) | Decision index: prior VU1/GS/synchronization/PGO experiments, outcomes, incomplete gains and justified retests |
 | [vu1-sync-2026-11-03.md](vu1-sync-2026-11-03.md) | Three rejected VU1/synchronization candidates, 18 game runs, parity checks and restored baseline |
 | [texture-replacement.md](texture-replacement.md) | Planned runtime patch: texture dump and replacement (texture packs): how PCSX2 does it, hook points in the GS renderer, content-hash ids, indexed textures, tests, legal limits. Design only |
