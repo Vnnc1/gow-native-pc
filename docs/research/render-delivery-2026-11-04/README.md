@@ -155,3 +155,6 @@ target on the laptop, and they do not establish a percentage gain or universal h
 Next execution: [scene-controlled CPU/GPU investigation and opt-in countdown](scene-bottlenecks.md).
 
 Follow-up: [frame-aligned arrival, isolated VU1 chain tests and promotion gates](vu1-chain.md).
+
+Latest state: [paused checkpoint, experimental scalar outline and encounter-anchor work](resume-checkpoint.md)
+([Portuguese handoff](retomada.pt-BR.md)). No automatic restart while the maintainer uses the notebook.

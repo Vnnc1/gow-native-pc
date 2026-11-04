@@ -412,3 +412,9 @@ Patch 71's JIT chain adapter is opt-in (`GOW_VU1X_CHAIN_INLINE=1`), default off.
 `gs-run-ab.py --compare vu1-inline` forces JIT-only in both variants and checks effective markers;
 do not present those results as the shipped hybrid mode. Preserve the original chain/AOT/DLL path.
 Run the methodology tests, full verify and identical-task replay for changes to these contracts.
+
+Performance continuation checkpoint (2026-11-04):
+`docs/research/render-delivery-2026-11-04/resume-checkpoint.md` records the user-requested pause,
+unaccepted scalar-outline/encounter-anchor drafts, evidence and pending validation. Read it before
+resuming this investigation. Drafts under that report's `drafts/` are not ordinal runtime patches;
+never apply/package them automatically. A later explicit user request to resume supersedes the pause.

@@ -1,0 +1,12 @@
+# Rejected for scene drift; retained for reproduction, not an accepted benchmark.
+
+[diagnostics.scenes.ship_combat_corner]
+# Candidate: move after arrival, then guard against the active first encounter.
+# The trajectory gate must pass before any timing is accepted.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,f0:l1*600,f600:lleft*180,f600:ldown*180,f780:l1*100000"
+god_mode = true
+position_tolerance = 25.0
+zones = ["Athn01A", "Athn01B"]
+frame_begin = 1200
+frame_end = 1800
+trajectory_tolerance = 25.0

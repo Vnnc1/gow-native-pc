@@ -1,5 +1,23 @@
 # Tested hardware and results
 
+## Paused VU1/combat investigation (2026-11-04, i5-8265U / UHD 620)
+
+The new private-card combat-corner pilot reached an active rendered encounter and
+exited gracefully in both runs, with original saves unchanged, but failed the
+same-scene trajectory gate. It included screenshots and one intrusive sampler;
+its FPS is not an accepted comparison. VU1 wall samples again concentrated on
+chain bookkeeping (29.14%) and block timing (2.69%); actual worker CPU time was
+32.97% of one logical core, a different metric.
+
+A source-only scalar-loop outline built the isolated replay/fuzz executables.
+Five paired JIT replays of the same 32 tasks measured median summed warm costs
+561.8 -> 507.8 us (-9.61%), with all record baselines/block counts matching.
+The fuzz executable was built but not run in this follow-up. Full equivalence,
+shipped hybrid gameplay, frame tails and audio acceptance remain pending.
+The installed runner is unchanged; runtime sources were restored and drafts
+saved outside the ordinal chain at the user's pause request. No game/sampler
+process remained running. See [checkpoint and exact evidence](research/render-delivery-2026-11-04/resume-checkpoint.md).
+
 ## Frame-aligned arrival and VU1 chain (2026-11-04, i5-8265U / UHD 620)
 
 Patch 70 stabilizes the first 360 rendered ship-arrival frames with frame-indexed
