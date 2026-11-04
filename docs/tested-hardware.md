@@ -1,5 +1,15 @@
 # Tested hardware and results
 
+## Translation movie preparation review (2026-11-04)
+
+On the local compatible PT-BR standalone disc (`D95720D3`), confirmed ten 114,692-byte SEMO widescreen placeholders
+matching the submitted SHA-256. Private-TOC normalization maps 15 entries after fixing the stale tuple lookup;
+adding only the fingerprint leaves four part-1 duplicates uncorrected. Source media and installed TOC were preserved.
+Three preparation tests (including three new regression subcases), eight import tests, the offscreen import QML
+check and 17 pipeline tests pass. Six real CHD cases were skipped without `chdman`.
+This validates preparation, not full movie playback, subtitles, audio synchronization or FPS. See the
+[investigation](research/movie-placeholder-review-2026-11-04.md) for evidence and unresolved report claims.
+
 ## Supplied Asia disc and Europe code generation (2026-11-02)
 
 The supplied `God of War (Asia).iso` boots `SCUS_973.99` and has the same complete
