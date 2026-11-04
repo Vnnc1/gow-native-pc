@@ -1,6 +1,7 @@
 // Sampling profiler for the running game (Windows x64): every millisecond it suspends each thread of the process,
 // reads its instruction pointer and resumes it; at the end it resolves the addresses with the executable's PDB
-// (build with build.cmd -Pdb) and prints, per thread, the functions where the samples landed (self time).
+// (build with build.cmd -Pdb) and prints wall-time instruction samples per thread, including waits.
+// CPU time is reported separately. Without symbols, module-relative addresses can be resolved with llvm-nm.
 //
 // build (pinned llvm-mingw bin on PATH): clang++ -O2 -std=c++20 -static tools/profile/sampler.cpp -ldbghelp -lwinmm -o sampler.exe
 // usage: sampler.exe <pid | exe name> <seconds> [delay seconds] [top N]
@@ -63,6 +64,15 @@ static std::string threadName(HANDLE h, DWORD id)
     return name.empty() ? "thread " + std::to_string(id) : name + " (" + std::to_string(id) + ")";
 }
 
+static bool cpuTime(HANDLE thread, uint64_t &value)
+{
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetThreadTimes(thread, &created, &exited, &kernel, &user)) return false;
+    value = (uint64_t(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) +
+            (uint64_t(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3)
@@ -98,6 +108,11 @@ int main(int argc, char **argv)
         std::unordered_map<DWORD64, unsigned> hits;
         std::unordered_map<DWORD64, unsigned> callers; // return addresses seen in the walked frames
         unsigned samples = 0;
+        uint64_t cpuStart = 0;
+        bool cpuAvailable = false;
+        std::chrono::steady_clock::time_point cpuStartAt;
+        uint64_t cpuEnd = 0;
+        bool cpuEndAvailable = false;
     };
     std::map<DWORD, Thread> threads;
     const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
@@ -108,7 +123,11 @@ int main(int argc, char **argv)
             for (DWORD id : threadsOf(pid))
                 if (!threads.count(id))
                     if (HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, id))
+                    {
                         threads[id] = Thread{h, threadName(h, id)};
+                        threads[id].cpuStartAt = std::chrono::steady_clock::now();
+                        threads[id].cpuAvailable = cpuTime(h, threads[id].cpuStart);
+                    }
         for (auto &[id, t] : threads)
         {
             if (SuspendThread(t.h) == static_cast<DWORD>(-1))
@@ -135,7 +154,11 @@ int main(int argc, char **argv)
         }
         Sleep(1);
     }
+    const auto cpuEndAt = std::chrono::steady_clock::now();
     timeEndPeriod(1);
+    // Resolve symbols only after stopping CPU accounting; symbol work can take seconds.
+    for (auto &[id, t] : threads)
+        t.cpuEndAvailable = cpuTime(t.h, t.cpuEnd);
 
     SymRefreshModuleList(proc);
     std::vector<Thread *> order;
@@ -167,7 +190,13 @@ int main(int argc, char **argv)
             else
             {
                 IMAGEHLP_MODULE64 mod{sizeof(mod)};
-                name = SymGetModuleInfo64(proc, addr, &mod) ? std::string(mod.ModuleName) + "!?" : "?";
+                char relative[64];
+                if (SymGetModuleInfo64(proc, addr, &mod))
+                {
+                    std::snprintf(relative, sizeof(relative), "+0x%llx", (unsigned long long)(addr - mod.BaseOfImage));
+                    name = std::string(mod.ModuleName) + relative;
+                }
+                else name = "?";
             }
             byFunc[name] += n;
         }
@@ -176,6 +205,10 @@ int main(int argc, char **argv)
             rows.emplace_back(n, name);
         std::sort(rows.rbegin(), rows.rend());
         std::printf("\n== %s: %u samples\n", t->name.c_str(), t->samples);
+        if (t->cpuAvailable && t->cpuEndAvailable && t->cpuEnd >= t->cpuStart)
+            std::printf("cpu_ms=%.3f observed_ms=%.3f (separate from wall-time samples, which include waits)\n",
+                        (t->cpuEnd - t->cpuStart) / 10000.0,
+                        std::chrono::duration<double, std::milli>(cpuEndAt - t->cpuStartAt).count());
         for (int i = 0; i < top && i < static_cast<int>(rows.size()); ++i)
             std::printf("%6.2f%%  %s\n", 100.0 * rows[i].first / t->samples, rows[i].second.c_str());
         if (!byCaller.empty())

@@ -143,6 +143,19 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings. TOBIICHI_PANTALLA = completa | sin_bordes |
   ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
+- **GS primitive grouping (patch 66)**: integrated directly after 58, without the delivery's 59–65 changes.
+  Individual submissions remain the default (`PS2X_GS_RUN=0`); `=1` opts into equal-state groups of up to 64 primitives.
+  The laptop A/B improved mean FPS but regressed p95/p99 in its last pair; do not promote the default on that evidence.
+  Patch 67's empty alpha-pass elimination is also opt-in (`GOW_GS_ALPHA_PRUNE=1`): the notebook comparison favored
+  its reference in all three pairs. Keep the default off and the exhaustive `gow_gs_alpha_tests` in verify.
+  `gs-run-ab.py --compare grouping|alpha|scaler --gpu-samples` uses private disc/card roots and optional Windows PDH
+  engine counters. GPU busy time is not power draw; report the busiest engine, not a sum of independent engines.
+  Timing/capture runs are not FPS benchmarks; scaler comparisons change output filtering and must disclose that.
+  Preserve flush ordering at state/transfer/CLUT/TEXFLUSH/FINISH/presentation/readback boundaries and GIF packet ends.
+  Inactive vertex tails must use `GSVertex{}` defaults (`q=1`), never read multiple vertices from a single local.
+  `gow_gs_run_tests` in `verify` compares the production frontend and worker queue against the individual path.
+  `tools/test/gs-run-ab.py` uses one executable, frames-only timing and private disc/card roots for visible A/B tests.
+  Window percentile medians are not pooled frame-time percentiles. Keep captures separate from FPS runs.
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16),
   GOW_QTE_HOLD / _HZ (accessibility: a held button becomes the presses the minigames ask for, engine/patches/53; the
@@ -375,3 +388,17 @@ and write `standalone.log` beside the executable (patch 25). Never package this 
 The Performance diagnostics toggle enables audio buffer/rate, IOP drift, VU1 and performance counters.
 `tools/test/sound_regression.cpp` covers positive/negative SPU2 master-volume overflow (patch 24).
 See `docs/research/audio-standalone-mods-2026-10-26.md` for unresolved scene, HUD and mod acceptance criteria.
+
+Patch 68 is an opt-in CPU countdown candidate (`GOW_FINISH_COUNTDOWN=1`, default off).
+It wraps only USA GoW resume PCs 0x17A328/0x17A32C and batches existing quiet
+checkpoints; retain generated polling/calls and full timer/IOP/event checkpoints.
+`tools/test/finish-countdown-tests.py` extracts the owned `engine/runtime/src/gow_overrides.cpp`,
+not the generated runner copy, and is part of verify. `gs-run-ab.py --scene ship_guard`
+checks encounter state, zone and cross-run position bounds; it is not a frozen replay.
+Do not equate sampler RIP occupancy (which includes waits) with thread CPU utilization.
+
+Patch 69 gates the timed GS dump clock read; keep its first-draw origin and eligible
+first-batch trigger. `gs-run-ab.py --task-capture` is an intrusive diagnostic mode
+with a 32-record cap; never present those session FPS as a benchmark or export its
+local game-derived task files. See the scene-bottleneck report for rejected combat
+comparisons and the separately validated exact-input VU1 corpus.

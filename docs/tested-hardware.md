@@ -1,5 +1,87 @@
 # Tested hardware and results
 
+## Oscillation/audio follow-up (2026-11-04, background sessions under competing load)
+
+i5-8265U, 24 GiB, Intel UHD 620 / driver 27.20.100.9664, AC, portable Clang Release -O3,
+1x internal rendering, 1280x720, audio enabled. Original player cards were never supplied;
+every session used a private disc/card root and verified unchanged original save inventories.
+
+- A separate intrusive diagnostic pair measured 98% peak GPU engine utilization even with
+  primitive grouping off. Process CPU averaged about 1.6 cores, not the whole eight-thread CPU.
+- Patch 67's provably empty alpha-pass elimination passed the exhaustive 16,777,216-case oracle,
+  but three paired hidden tests favored the reference: 43.552 vs 36.124 mean guest FPS.
+  The feature remains opt-in, like patch 66. No stable 60 FPS or resolved-audio claim.
+- The existing bilinear output filter reduced observed average GPU busy time (58.50% to 45.65%),
+  but also had lower observed FPS (28.394 to 22.379) and more missing audio frames. No player
+  filter setting was changed. These runs had competing system load; the final pair measured
+  83.0% / 81.2% mean total CPU, reaching 100%, and real-time scene alignment is not guaranteed.
+- The final runner is `6635147d6d41398e020b21d2e2dcef2ba837ae4f0306ba42b443aa41e343942b`.
+  `fetch,build,verify` passed with 12 CTest groups plus codegen, memory, sound, VU1 equivalence
+  and task replay checks. Python methodology checks and live Windows PDH collection passed.
+
+These results reject default promotion; they do not isolate a universal renderer regression or
+measure watts/temperature. The earlier firmware-limit event predates these runs. Visible play,
+listening assessment, stable scene/clock evidence and other GPU tiers remain open.
+See [every run, metrics and next gates](research/render-delivery-2026-11-04/followup.md).
+
+## Patch 66 laptop A/B (2026-11-04, background sessions, experimental)
+
+i5-8265U, about 24 GiB RAM, Intel UHD 620 (driver 27.20.100.9664), Windows 11 Pro 22631, AC power.
+The user requested hidden-window testing. Same binary, PT-BR disc, audio enabled, fixed 1x/1280x720, optional VU1
+fast arithmetic off; three alternating pairs of 120 seconds, complete windows after 60 seconds only.
+
+Mean guest FPS: **32.107 off → 34.101 on (+6.213%)**. Every pair improved FPS, but the last pair regressed p95
+50.243 → 63.274 ms, p99 68.690 → 86.469 ms, maximum interval 176.359 → 215.599 ms, and missing audio frames
+7,026 → 14,628. There was substantial slowdown in both modes across the session; its cause was not isolated.
+Grouping remains opt-in (`PS2X_GS_RUN=1`), and neither stable 60 FPS nor visible-play/tier acceptance is claimed.
+
+All six sessions reached gameplay, exited gracefully with code 0, and preserved the original project save inventory.
+Only private card/save roots were used. Separate off/on ship-combat captures showed no obvious corruption; they are
+not animated-frame byte equivalence. Full verification, production queue/frontend parity and ASan checks passed.
+See the [complete results and next gates](research/render-delivery-2026-11-04/integration.md).
+
+## Renderer delivery review (2026-11-04, CPU-only checks)
+
+On this laptop, the supplied renderer's extracted `SubmitRun` and `ringAppend` implementations were compiled with
+pinned Clang 23.1.4 and AddressSanitizer. The original passed 3/11 cases; two review overlays passed 11/11, covering
+default vertex tails, records split at 64 primitives, and current-generation fence completion/error handling.
+GL completion was mocked; no GPU, gameplay FPS or frame-pacing improvement was measured. The installed runtime
+and saves were unchanged. See the [review and promotion gates](research/render-delivery-2026-11-04/README.md).
+
+## Installed SEMO movie fallback validation (2026-11-04, i5-8265U laptop)
+
+Applied the corrected standalone PT-BR TOC to `data/gow1/discs/translation-pt-br-d95720d3` after preserving the
+previous index. Exactly 15 widescreen entries changed; all now point to their matching part-0 PSS payloads.
+Installed TOC SHA-256: `c586396bcbedfa6ef375b05fc76a6f686327ea05150a0667c74e94995b29bc57`.
+The source ISO/PAKs and `.orig` were not rewritten.
+
+Tested the existing installed Clang runner from 2026-10-28, SHA-256
+`515a5bdbf91d6fdda3fee5f953d231d33119da8fdbc1d5ff49b3996ad738d682`; this is not a new v0.5.0 runtime build.
+Intel UHD 620, fixed 1x rendering, hidden window, audio enabled, FMV skipping disabled. Each movie was started by
+`GOW_MOVIE_OVERRIDE` through the bonus-menu diagnostic path, without scripted skip input. Each run used a private
+ELF/disc root with an identical corrected TOC, shared read-only PAK inputs, separate mc0/mc1 directories, and private
+`GOW_MC0` / `GOW_SAVES_DIR` paths. No player card or save directory was supplied to the game.
+
+| Movie | Pictures served at decoder end | Whole test session, including boot/shutdown | Result |
+| --- | ---: | ---: | --- |
+| SEMO02 | 4,229 | 158.25 s | Sequence end, movie state 11 to 0, exit 0 |
+| SEMO05 | 3,340 | 128.98 s | Sequence end, movie state 11 to 0, exit 0 |
+| SEMO10 | 6,731 | 241.72 s | Sequence end, movie state 11 to 0, exit 0 |
+
+All three recorded `ended=1 failed=0 seqEnd=1`, returned to the menu and closed gracefully. No guest budget error,
+missing branch target, access violation or forced termination was logged. Picture 300 was dumped and visually
+checked for each movie; SEMO05 includes the translation's burned-in subtitle. These are complete playback tests
+of the replacement movie streams, not just a first-picture check. There was one run per movie; normal story entry,
+audible synchronization and a rebuilt v0.5.0 runner were not tested.
+
+The installed TOC still matches the corrected hash after testing. The checked installed mc0/save directories and
+disc-card inventory were unchanged (no existing save files were present in those project paths). Test cards and
+HLE save paths remained isolated even if the runtime used its ELF-relative fallback.
+
+Evidence: `data/gow1/logs/movie-installed-20261104-123510/validated-results.json`, `installation.json`,
+`GODOFWAR.TOC.before`, and each movie's session logs/metadata/events and local picture capture. These ignored
+artifacts contain game-derived media and are not packaged or committed.
+
 ## Translation movie preparation review (2026-11-04)
 
 On the local compatible PT-BR standalone disc (`D95720D3`), confirmed ten 114,692-byte SEMO widescreen placeholders
@@ -728,3 +810,31 @@ route, full screen, 3 alternating pairs: tune build 54.81 vs traditional PGO bui
 slower (45.0 vs 49.7, 3/3) and is not used. PGO retrained with early FINISH: neutral (51.9 vs 52.2). Intro movies with
 early FINISH: gameplay reached, no errors. 30-minute session from the save: 48.1 FPS mean after loading, 3 windows over
 100 ms (max 309 ms), memory stable over the last 8 minutes.
+
+
+## 2026-11-04: CPU/GPU scene-isolation follow-up
+
+Same i5-8265U / Intel UHD 620 notebook, private blank cards, audio enabled, hidden
+sessions. The new state/zone/position gate rejected the combat comparisons; do not
+report their FPS deltas as an optimization result. A rejected short run combined
+99.13% mean total-system CPU with 43.36% game GPU busy time, so GPU saturation alone
+does not explain every slowdown. No clocks/thermals attribution or RX 580 result.
+
+A separate intrusive 20-second profile measured GameThread CPU 61.80%, VU1 worker
+46.57%, GSThread 38.32% and GS-stage 34.16%, each relative to one logical CPU.
+The sampler now takes CPU end times before symbol resolution and retains module
+RVAs without a PDB. RIP sample percentages still include waits and are not CPU
+self-time. VU1 chaining, GS vertex conversion/view mapping, command parsing and EE
+FINISH waiting are concrete follow-up targets.
+
+Patch 68 is an opt-in countdown candidate, with 560 isolated equivalence cases;
+patch 69 removes the disabled GS dump's per-draw clock read. Neither establishes a
+measured gameplay FPS gain or resolved audible glitches. Original save/card inputs
+were never used as writable test roots. See [method and local evidence](research/render-delivery-2026-11-04/scene-bottlenecks.md).
+
+Final `fetch,build,verify` passed (12 CTest groups plus codegen/VU1/procedural replay).
+Two bounded diagnostic sessions reached gameplay and exited cleanly; both recorded
+32 VU1 tasks with private cards. Replay of one identical corpus passed on all five
+backends against their own baselines (native/exact differ in all 32 records).
+These are CPU isolation inputs, not a valid FPS comparison or audio-quality gate.
+Final runner SHA-256: `6476be39ceb5ef33e5f0594fc0c44cb01dedd41f4bb9d02c239579913b34da35`.

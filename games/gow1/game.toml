@@ -49,6 +49,15 @@ pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadra
 [diagnostics]
 frame_pc = "0x1837B8"          # vid::Flip: guest frames, distinct from host presentation rate
 
+[diagnostics.scenes.ship_guard]
+# Private blank-card benchmark: initial ship encounter, no movement/camera input.
+# A 50-unit envelope allows observed block/knockback motion; not a frozen replay.
+# Holding block and refilling health keep the initial arena active without deaths.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,g0:l1*600"
+god_mode = true
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+
 # Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
 # accepted as a translation, and its language is guessed from the words below.
 [[editions]]

@@ -1,0 +1,75 @@
+"""Protect measurement boundaries and keep player cards out of benchmark disc roots."""
+import importlib.util
+from pathlib import Path
+import tempfile
+
+spec = importlib.util.spec_from_file_location("gs_run_ab", Path(__file__).with_name("gs-run-ab.py"))
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+rows = [{"tag": "gow-frame", "elapsed_ms": t, "values": {
+    "window": 5, "intervals": 100, "p50_ms": 10, "p95_ms": 20, "p99_ms": 30,
+    "max_ms": 120, "over_33_33": 5, "over_50": 3, "over_100": 1}} for t in (62000, 65000, 70000)]
+s = m.frame_summary(rows, 60)
+assert s["frame_windows"] == 2 and s["intervals"] == 200 and s["over_100_per_1000"] == 10
+assert s["median_window_p99_ms"] == 30
+assert m.frame_summary([], 60)["median_window_p99_ms"] is None
+assert m.gameplay_before_warmup("[24347 ms] [gow-pad2:test] gameplay start at 20.20 s", 60)
+assert not m.gameplay_before_warmup("[64347 ms] [gow-pad2:test] gameplay start at 60.20 s", 60)
+assert not m.gameplay_before_warmup("[20000 ms] menu", 60)
+hosts = [{"type": "host_process", "elapsed_ms": t, "process_running": live,
+          "process_counters_available": True, "cpu_percent_one_core": cpu}
+         for t, live, cpu in [(58000, True, 999), (63000, True, 999), (68000, True, 100),
+                             (70000, True, 200), (71000, False, 999)]]
+assert m.host_cpu_summary(hosts, 60) == {"mean_cpu_percent_one_core": 900 / 7, "cpu_measured_seconds": 7}
+assert m.host_cpu_summary([], 60)["mean_cpu_percent_one_core"] is None
+gpu_spec = importlib.util.spec_from_file_location("gpu_sample", Path(__file__).with_name("windows_gpu_sample.py"))
+gpu = importlib.util.module_from_spec(gpu_spec)
+gpu_spec.loader.exec_module(gpu)
+engine = "luid_0x0_0x1_phys_0_eng_0_engtype_3D"
+copy = "luid_0x0_0x1_phys_0_eng_1_engtype_Copy"
+result = gpu.summarize_engines([(f"pid_10_{engine}", 0, 80), (f"pid_10_{copy}", 1, 70),
+                              (f"pid_100_{engine}", 0, 5), (f"pid_10_{engine}", 2, 100),
+                              (f"pid_10_{copy}", 0, float("nan")), ("invalid", 0, 100)], 10)
+assert result["available"] and result["child_busiest_engine_percent"] == 80
+assert result["system_busiest_engine_percent"] == 85
+assert result["child_engines_percent"][copy] == 70
+assert gpu.summarize_engines([], 10)["child_busiest_engine_percent"] is None
+assert gpu.summarize_engines([(f"pid_10_{engine}", 0, 0)], 10)["available"]
+with tempfile.TemporaryDirectory() as name:
+    root = Path(name)
+    source = root / "source"
+    source.mkdir()
+    for filename, content in (("disc.pak", b"asset"), ("ELF", b"elf"), ("TOC", b"toc"), ("Mcd001.ps2", b"never copy")):
+        (source / filename).write_bytes(content)
+    (source / "mc0").mkdir()
+    (source / "mc0/save").write_bytes(b"never copy")
+    (source / "mods").mkdir()
+    (source / "mods/module.irx").write_bytes(b"module")
+    profile = {"executable": {"name": "ELF"}, "disc": {"paks": ["disc.pak"], "toc": "TOC", "iop_modules_dir": "mods"}}
+    before = m.save_inventory(root, source)
+    target = root / "private"
+    m.private_disc(source, target, profile)
+    assert not (target / "Mcd001.ps2").exists() and not list((target / "mc0").iterdir())
+    assert (target / "ELF").read_bytes() == b"elf" and (target / "mods/module.irx").is_file()
+    assert m.save_inventory(root, source) == before
+print("PASS: frame windows, GPU engine accounting/unavailability, private disc excludes player cards/directories")
+
+# Reject different arenas, menus, missing samples and displacement across runs.
+log = "\n".join(f"[{t} ms] [gow-player] t=1 g=1 obj=1 pos={x},2,3 hp=100 state=11 movie=0 zone=ship" for t,x in [(59000,999),(60000,1),(61000,2),(62000,3)])
+scene = m.scene_summary(log, 60)
+assert scene["samples"] == 3 and scene["position_min"] == [1,2,3]
+assert m.same_scene([scene, scene], 2, ["ship"])
+assert not m.same_scene([scene], 1, ["ship"])
+assert not m.same_scene([scene], 2, ["other"])
+assert not m.same_scene([m.scene_summary(log.replace("state=11", "state=10"),60)], 2, ["ship"])
+assert not m.same_scene([m.scene_summary(log.replace("movie=0", "movie=1"),60)], 2, ["ship"])
+assert not m.same_scene([m.scene_summary(log,61)], 2, ["ship"])
+assert not m.same_scene([m.scene_summary("",60)], 2, ["ship"])
+assert not m.same_scene([scene, {**scene, "position_min":[10,2,3], "position_max":[12,2,3]}], 2, ["ship"])
+print("PASS: scene sample, state, movie, zone and cross-run position gates")
+
+paused = m.scene_summary(log.replace("state=11", "state=13"),60)
+assert not m.same_scene([paused], 2, ["ship"])
+assert m.same_scene([paused], 2, ["ship"], [13])
+assert not m.same_scene([scene, paused], 2, ["ship"], [13])
+print("PASS: paused scenes require an explicit state contract")

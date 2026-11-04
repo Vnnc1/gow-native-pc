@@ -1,5 +1,10 @@
 # Movie placeholder report investigation (2026-11-04)
 
+Follow-up: at the maintainer's request, the corrected TOC was applied to the installation and SEMO02, SEMO05 and
+SEMO10 were subsequently played to decoder sequence end and menu return with the existing installed runner.
+All three exited normally using isolated save paths. See [installed playback results](../tested-hardware.md).
+The original investigation below did not include those gameplay runs; its subtitle proposal remains unverified.
+
 Investigated the maintainer-supplied report written by Claude against checkout `d28a63d` on `fix-chore`.
 The attachment contains a proposed preparation diff and a subtitle feature description, but no
 `59-movie-subtitles.patch`, subtitle file, binary-format specification or raw runtime logs.

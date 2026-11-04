@@ -1,0 +1,54 @@
+Review-only overlay for the 2026-11-04 delivery, NOT the installed runtime patch chain.
+Fence the current mapped-buffer generation before reuse. Mock-GL ordering checked; GPU latency unmeasured.
+No gameplay FPS or driver validation is implied.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -590,7 +590,6 @@
+     static constexpr uint32_t kVertexRingBytes = 32u << 20;
+     GLuint vertexRingOffset = 0;
+     uint8_t *vertexRingMap = nullptr;
+-    GLsync vertexFence = nullptr;
+     bool vertexRing = false;
+     GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+           locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locRtClamp = -1, locPxScale = -1, locAniso = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
+@@ -2578,21 +2577,30 @@
+     }
+ 
+     // Copies a chunk into the persistent vertex ring and returns its offset. Shared by the draw batches and the shuffle
+-    // passes (patch 61); the caller binds binding 0 with its own stride. A wrap waits on the fence taken at the previous
+-    // wrap, so the memory reused there has long been consumed.
++    // passes (patch 61); the caller binds binding 0 with its own stride. A mapped wrap fences all previous draws before
++    // reuse; completion must cover the current generation, not an earlier wrap.
+     uint32_t ringAppend(const void *data, size_t bytes)
+     {
+         const Api &g = gl();
+         const uint32_t need = static_cast<uint32_t>((bytes + 63u) & ~static_cast<size_t>(63u));
+         if (vertexRingOffset + need > kVertexRingBytes)
+         {
+-            if (vertexFence)
+-            {
+-                if (g.ClientWaitSync(vertexFence, 0, 0) == kTimeoutExpired)
+-                    g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, 1000000000ull);
+-                g.DeleteSync(vertexFence);
+-            }
+-            vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
++            if (vertexRingMap)
++            {
++                // Cover every draw before THIS wrap, including the first wrap.
++                // Coherent mapping makes writes visible; it does not finish GPU reads.
++                GLsync fence = g.FenceSync(kSyncGpuCommandsComplete, 0);
++                if (fence)
++                {
++                    const GLenum status = g.ClientWaitSync(fence, kSyncFlushCommandsBit, 1000000000ull);
++                    if (status != kAlreadySignaled && status != kConditionSatisfied)
++                        g.Finish(); // Timeout/failure must not authorize overwriting a mapped range.
++                    g.DeleteSync(fence);
++                }
++                else
++                    g.Finish();
++            }
++            // BufferSubData on the unmapped fallback provides implicit synchronization.
+             vertexRingOffset = 0;
+         }
+         const uint32_t at = vertexRingOffset;

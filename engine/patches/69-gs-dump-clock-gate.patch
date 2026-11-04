@@ -1,0 +1,24 @@
+Avoid a per-draw steady_clock read when the timed GS dump is disabled.
+Keep the original first-draw time origin and first-batch trigger semantics.
+No draw, state, texture, GPU synchronization or audio-clock changes.
+This removes diagnostic work; no measured gameplay FPS gain is claimed.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -2399,9 +2399,13 @@
+             return;
+         static const double dumpAtSec = std::getenv("GOW_GS_HW_DUMPAT") ? std::atof(std::getenv("GOW_GS_HW_DUMPAT")) : -1.0;
+         static const auto t0 = std::chrono::steady_clock::now();
+-        const double nowSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+-        if (dumpAtSec >= 0.0 && nowSec >= dumpAtSec && dumpedAt == 0 && frameBatch == 1)
+-            dumpedAt = 1;
++        // The timestamp is only used by the optional first-batch dump trigger.
++        if (dumpAtSec >= 0.0 && dumpedAt == 0 && frameBatch == 1)
++        {
++            const double nowSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++            if (nowSec >= dumpAtSec)
++                dumpedAt = 1;
++        }
+         if (dumpedAt == 1 && dumped < dumpMax && dumpPresents < 0)
+             dumpPresents = 0, presentCount = 0;
+         if (dumpPresents >= 0 && presentCount >= dumpPresents && presentCount < dumpPresents + 3 && dumped < dumpMax && (dumpAll || c.frame.fbp == 208 || c.frame.fbp == 320 || dumped < 40 || dumpAfterSkip))
