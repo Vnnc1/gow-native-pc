@@ -462,3 +462,14 @@ outside this budget. `gow_texture_budget_tests` is in verify; `gow_texture_uploa
 run, real-OpenGL CT32/T8/T4 pixel check, not a headless test. `session-game-smoke.py --texture-cache`
 checks `[gs-cache]` counters. Keep reference validity during eviction and preserve cache-key dimensions/formats.
 Detailed private-kit reports enable `GOW_GS_HW_STATS`; normal FPS collection keeps it off.
+
+Experimental renderer patches 72–74 remain default-off: `GOW_GS_SAMPLER_CACHE`,
+`GOW_GS_FAST_SHADER`, `GOW_GS_ALPHA_BOUNDS`. Preserve reference paths, upload-time
+sampler invalidation, per-program uniform locations and optional shader fallback.
+Alpha bounds exclude texture-alpha-dependent draws. `verify` includes sampler
+state and alpha interval tests. `gow_renderer_variants_test` plus
+`tools/test/renderer-variants.py` is an explicit real-OpenGL color comparison,
+not headless GPU validation. Patch 75 `GOW_GS_VARIANT_DIAG` adds test-only counters.
+See GS-07/08/09 in the performance ledger before proposing default promotion.
+Future Vulkan/Direct3D and automatic launcher selection are proposals only in
+`docs/research/graphics-api-roadmap.md`; no such backend or selector is implemented.

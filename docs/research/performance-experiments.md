@@ -138,3 +138,53 @@ checks; guest FPS and pacing separately from replay/timing; failed or interrupte
 runs; artifact paths; retain/revert decision; missing hardware/scenes and acceptance
 criteria. Keep game-derived captures/cards under ignored `data/`, never in Git or
 diagnostic packages. If raw artifacts are unavailable, say so explicitly.
+
+## GS-05 / GS-06 — merged patch 66/67 RX580 retest (2026-11-04)
+
+Planned at the maintainer request. Prior patch-66 laptop comparison improved mean
+FPS but failed frame-tail/audio gates; patch 67 also failed default promotion.
+See [patch 66](render-delivery-2026-11-04/integration.md) and
+[patch 67](render-delivery-2026-11-04/followup.md). New material scope: physical
+RX580 2048SP / driver 31.0.21924.61 rather than Intel UHD 620, combined with
+patch 60 texture-budget/storage reuse and patch 61 nonblocking shared presentation.
+Use a separate portable Release build and same-binary switches, private cards,
+visible 1x/1280x720/audio, no simultaneous build/profiling. Start with the bounded
+360-frame arrival trajectory gate (not sustained combat), three alternating pairs
+for grouping, alpha alone and alpha with grouping. Record rejected runs and
+visual smoke separately. Defaults remain off pending consistent pacing/audio and
+visual evidence; no performance result exists at this planning point.
+Artifacts: `data/experiments/patch66-67-merged/`.
+
+Completed results: [RX580 report](patch66-67-rx580-2026-11-04.md). The bounded
+arrival comparisons are mostly at the 60-FPS cap; no default promotion. The long
+resource attempt failed scene alignment and the alpha resource series failed
+exit metadata validation. Preserve both as invalid/incomplete evidence.
+
+Resource follow-up requested during this retest: FPS cap alone is not an
+efficiency gate. Collect separate 100-second guarded-ship sessions (40-second
+warmup), Windows PDH GPU engine busy time and process CPU time, with identical
+settings and scene-position gates. Compare grouping and alpha independently;
+normalize CPU work by guest frames where valid. These are utilization/time
+metrics, not watts. Timing/capture sessions must remain separate from FPS evidence.
+Prior notebook resource observations are in the patch-67 follow-up and
+scene-bottlenecks reports; changing to RX580 and the merged texture/presentation
+paths supplies the material retest reason. Failed scene gates remain invalid
+comparisons; do not loosen them to manufacture a saving.
+
+## GS-07 / GS-08 / GS-09 — renderer efficiency candidates (2026-11-04)
+
+Implemented isolated candidates for sampler-state caching (patch 72), a specialized
+shader with full-program fallback (73), and conservative vertex-alpha intervals
+(74). Patch 75 exposes test-only path coverage. These are new implementations,
+not re-runs of the rejected FSR or stage-spin experiments. Reference switches
+preserve the old paths. The alpha extension intentionally excludes texture-alpha
+dependent draws; it does not claim full texture/CLUT range analysis.
+
+Evaluate CPU time per guest frame and GPU engine busy time as well as FPS; capped
+FPS is not an efficiency verdict. Synthetic interval/state tests and differential
+real-GL pixels precede default promotion. Reference and candidate use one binary,
+private cards, matching frame trajectories and separate diagnostic samples.
+Initial solid-color pixels passed but were insufficient to validate filtering;
+the stronger nonuniform texture fixture supersedes that limited coverage.
+Detailed results, negative evidence and retained/default decisions are recorded
+in [the implementation report](patch66-67-rx580-2026-11-04.md).

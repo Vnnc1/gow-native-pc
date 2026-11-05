@@ -141,6 +141,17 @@ def aligned_metrics(log, frames):
             "max_ms":float(f[6]),"over_100":int(f[7]),"audio_requested":int(a[1]),"audio_missing":int(a[2])}
 
 
+
+EFFICIENCY_FLAGS = {"sampler": "GOW_GS_SAMPLER_CACHE", "shader": "GOW_GS_FAST_SHADER", "alpha-bounds": "GOW_GS_ALPHA_BOUNDS"}
+
+def efficiency_environment(mode, variant):
+    return {flag: str(variant if mode in (name, "efficiency") else 0) for name, flag in EFFICIENCY_FLAGS.items()}
+
+def completed_child(meta, events, helper_code):
+    exits = [e for e in events if e.get("type") == "process_exit"]
+    return (helper_code == 0 and meta.get("exit_code", 0) == 0 and len(exits) == 1 and
+            exits[0].get("state") == "completed" and exits[0].get("code") == 0)
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runner", required=True, type=Path)
@@ -152,7 +163,7 @@ def main():
     p.add_argument("--pairs", type=int, default=3)
     p.add_argument("--capture", action="store_true", help="Functional screenshots only; not a benchmark")
     p.add_argument("--timing", action="store_true", help="Intrusive section timing; not an FPS benchmark")
-    p.add_argument("--compare", choices=("grouping", "alpha", "scaler", "scale", "countdown", "vu1", "vu1-inline"), default="grouping",
+    p.add_argument("--compare", choices=("grouping", "alpha", "scaler", "scale", "countdown", "vu1", "vu1-inline", "sampler", "shader", "alpha-bounds", "efficiency"), default="grouping",
                    help="vu1 compares binaries; vu1-inline uses one binary and forces JIT-only in both variants")
     p.add_argument("--task-capture", action="store_true", help="Intrusive, bounded VU1 task recording for exact input replay; not an FPS benchmark")
     p.add_argument("--scene", help="Scene contract from the selected game's diagnostics.scenes profile")
@@ -217,6 +228,7 @@ def main():
         env.update(PS2X_GS_RUN=str(grouped), GOW_GS_EARLY_FINISH="1", GOW_GS_HW_RING="0", GOW_GS_TEXREUSE="0",
                    GOW_VU1_FAST="0", GOW_MC0=str(disc / "Mcd001.ps2"), GOW_SAVES_DIR=str(disc / "saves"),
                    TOBIICHI_PANTALLA="ventana", GOW_AUDIO_STATS="1")
+        env.update(efficiency_environment(a.compare, variant))
         if a.compare == "alpha":
             env["GOW_GS_ALPHA_PRUNE"] = str(variant)
         elif a.compare == "scaler":
@@ -237,7 +249,7 @@ def main():
             env.update(GOW_PAD_GUION=scene["pad_script"], GOW_PLAYER_TRACE="1")
             if scene.get("god_mode"):
                 env["GOW_GOD_MODE"] = "1"
-        if a.timing or a.compare == "alpha":
+        if a.timing or a.compare in ("alpha", "sampler", "shader", "alpha-bounds", "efficiency"):
             # Existing bounded counters; no per-draw timers or GPU readbacks.
             env["GOW_GS_HW_STATS"] = "1"
         if a.task_capture:
@@ -307,6 +319,10 @@ def main():
             stats["scene"] = scene_summary(log, warmup, end, (scene["frame_begin"], scene["frame_end"]) if window else None)
         audio = [r["values"] for r in rows if r.get("tag") == "audio-stats" and r["elapsed_ms"] / 1000 - 5 >= warmup]
         gpu_rows = [r for r in samples if r.get("available") and r["interval_start_ms"] / 1000 >= warmup]
+        cpu_rows = [r for r in gpu_rows if r.get("child_cpu_percent_one_core") is not None and r.get("child_cpu_interval_seconds", 0)]
+        cpu_duration = sum(r["child_cpu_interval_seconds"] for r in cpu_rows)
+        stats["sampled_cpu_percent_one_core"] = sum(r["child_cpu_percent_one_core"] * r["child_cpu_interval_seconds"] for r in cpu_rows) / cpu_duration if cpu_duration else None
+        stats["sampled_cpu_seconds"] = cpu_duration
         system_cpu = [r["system_cpu_percent"] for r in gpu_rows if r.get("system_cpu_percent") is not None]
         stats.update(mean_system_cpu_percent=statistics.mean(system_cpu) if system_cpu else None,
                      peak_system_cpu_percent=max(system_cpu, default=None))
@@ -315,11 +331,19 @@ def main():
                      gpu_valid_samples=len(gpu_rows),
                      mean_gpu_busiest_engine_percent=statistics.mean(r["child_busiest_engine_percent"] for r in gpu_rows) if gpu_rows else None,
                      max_gpu_busiest_engine_percent=max((r["child_busiest_engine_percent"] for r in gpu_rows), default=None))
-        checks = {"exit_zero": meta.get("exit_code") == 0, "graceful": not any(e["type"] == "forced_termination" for e in events),
+        checks = {"exit_zero": completed_child(meta, events, proc.returncode), "graceful": not any(e["type"] == "forced_termination" for e in events),
                   "gameplay_before_warmup": gameplay_before_warmup(log, warmup), "windows": stats["windows"] >= (1 if window else 3),
                   "frames": stats["frame_windows"] >= (1 if window else 3), "effective_setting": f"[gs-run-config] enabled={grouped}" in log,
                   "queue_healthy": "[gs-run] queue record issue:" not in log,
                   "player_saves_unchanged": save_inventory(root / "data" / a.game, elf.parent) == original_saves}
+        stats["helper_exit_code"] = proc.returncode
+        stats["exit_metadata_recovered"] = "exit_code" not in meta and checks["exit_zero"]
+        if a.compare in (*EFFICIENCY_FLAGS, "efficiency"):
+            configured = efficiency_environment(a.compare, variant)
+            checks["effective_efficiency_settings"] = all(marker in log for marker in (
+                f"[gs-sampler-config] cache={configured['GOW_GS_SAMPLER_CACHE']}",
+                f"[gs-alpha-bounds-config] enabled={configured['GOW_GS_ALPHA_BOUNDS']}",
+                f"[gs-fast-config] requested={configured['GOW_GS_FAST_SHADER']} available={configured['GOW_GS_FAST_SHADER']}"))
         if window:
             checks["windows"] = checks["frames"] = stats["aligned_metrics"]["intervals"] == window["guest_frames"]
             stats["audio_requested"] = stats["aligned_metrics"]["audio_requested"]

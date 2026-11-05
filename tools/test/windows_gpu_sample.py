@@ -9,6 +9,7 @@ from ctypes import wintypes as wt
 import math
 import os
 import re
+import time
 
 
 def child_pid(parent, executable):
@@ -57,6 +58,30 @@ def summarize_engines(items, pid):
             "system_busiest_engine_percent": max(total.values(), default=None)}
 
 
+def cpu_rate(previous, current):
+    if previous is None or current is None or previous[0] != current[0]: return None
+    elapsed, used = current[1] - previous[1], current[2] - previous[2]
+    if elapsed <= 0 or used < 0: return None
+    return used * 10000.0 / elapsed  # 100-ns process ticks / monotonic nanoseconds, percent of one core.
+
+
+def process_cpu_snapshot(pid):
+    kernel = ct.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    kernel.OpenProcess.restype = wt.HANDLE
+    kernel.GetProcessTimes.argtypes = [wt.HANDLE] + [ct.POINTER(wt.FILETIME)] * 4
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle: return None
+    try:
+        created, exited, system, user = (wt.FILETIME() for _ in range(4))
+        if not kernel.GetProcessTimes(handle, ct.byref(created), ct.byref(exited), ct.byref(system), ct.byref(user)): return None
+        ticks = lambda value: (value.dwHighDateTime << 32) | value.dwLowDateTime
+        return ((pid, ticks(created)), time.monotonic_ns(), ticks(system) + ticks(user))
+    finally:
+        kernel.CloseHandle(handle)
+
+
 class GpuSampler:
     def __init__(self):
         if os.name != "nt":
@@ -64,6 +89,7 @@ class GpuSampler:
         self.dll = ct.WinDLL("pdh")
         self.query, self.counter, self.cpu_counter = wt.HANDLE(), wt.HANDLE(), wt.HANDLE()
         self.primed = False
+        self.previous_cpu = None
         signatures = {
             "PdhOpenQueryW": [wt.LPCWSTR, ct.c_size_t, ct.POINTER(wt.HANDLE)],
             "PdhAddEnglishCounterW": [wt.HANDLE, wt.LPCWSTR, ct.c_size_t, ct.POINTER(wt.HANDLE)],
@@ -94,6 +120,10 @@ class GpuSampler:
             self.query = wt.HANDLE()
 
     def sample(self, pid):
+        current_cpu = process_cpu_snapshot(pid)
+        cpu_percent = cpu_rate(self.previous_cpu, current_cpu)
+        cpu_seconds = (current_cpu[1] - self.previous_cpu[1]) / 1e9 if current_cpu and self.previous_cpu and cpu_percent is not None else None
+        self.previous_cpu = current_cpu
         status = self.dll.PdhCollectQueryData(self.query)
         if status:
             return {"available": False, "reason": f"collect: 0x{status:08x}"}
@@ -124,5 +154,7 @@ class GpuSampler:
             cpu = Value()
             cpu_status = self.dll.PdhGetFormattedCounterValue(self.cpu_counter, fmt_double, None, ct.byref(cpu)) if self.cpu_counter else 1
             result["system_cpu_percent"] = cpu.value if not cpu_status and cpu.status in (0, 1) and math.isfinite(cpu.value) and 0 <= cpu.value <= 100 else None
+            result["child_cpu_percent_one_core"] = cpu_percent
+            result["child_cpu_interval_seconds"] = cpu_seconds
             return result
         return {"available": False, "reason": "counter instances changed repeatedly"}

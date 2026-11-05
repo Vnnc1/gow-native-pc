@@ -21,13 +21,13 @@ if ($Stages -contains 'verify') {
         "-DPython3_EXECUTABLE=$(Barra $python)",
         "-DCMAKE_PROJECT_PS2RetroX_INCLUDE=$(Barra (Join-Path $root 'tools/test/guest-calls.cmake'))") + (Clang-CMakeArgs)
     Native $cmakeExe $testArgs 'regression configure'
-    Native $cmakeExe @('--build', $testBuild, '--target', 'gow_guest_calls', 'gow_codegen_tests', 'gow_memory_tests', 'gow_texture_budget_tests', 'gow_shared_present_tests', 'gow_gs_run_tests', 'gow_gs_alpha_tests', 'gow_frame_metrics', 'gow_test_time', 'gow_vu1_x64_fuzz_test', 'gow_dma_worker_tests', 'gow_sound_regression', 'gow_qte_hold_test', 'gow_qte_input_test', 'gow_vu1_tasks', 'ps2_recomp', '--parallel', "$jobs") 'regression build'
+    Native $cmakeExe @('--build', $testBuild, '--target', 'gow_guest_calls', 'gow_codegen_tests', 'gow_memory_tests', 'gow_texture_budget_tests', 'gow_sampler_state_tests', 'gow_alpha_bounds_tests', 'gow_shared_present_tests', 'gow_gs_run_tests', 'gow_gs_alpha_tests', 'gow_frame_metrics', 'gow_test_time', 'gow_vu1_x64_fuzz_test', 'gow_dma_worker_tests', 'gow_sound_regression', 'gow_qte_hold_test', 'gow_qte_input_test', 'gow_vu1_tasks', 'ps2_recomp', '--parallel', "$jobs") 'regression build'
     Write-CompilerCacheStats 'verify'
     Native $python @('-I', (Join-Path $root 'tools/test/recompile-smoke.py'), $testBuild) 'synthetic ELF generation regression'
     Native $python @('-I', (Join-Path $root 'tools/test/launcher-languages.py')) 'launcher language files'
     Native $python @('-I', (Join-Path $root 'tools/test/guest-calls.py'), (Join-Path $testBuild 'gow_guest_calls.exe'),
         (Join-Path $logs 'guest-calls')) 'guest-call regression tests'
-    Native (Join-Path (Split-Path $cmakeExe) 'ctest.exe') @('--test-dir', $testBuild, '-R', '^gow_(codegen_tests|memory_tests|texture_budget_tests|shared_present_tests|test_time|gs_run_tests|gs_alpha_tests|frame_metrics|dma_worker_tests|sound_regression|qte_hold_test|qte_input_off|qte_input_shake|qte_input_rotate|qte_input_smoke)$', '--output-on-failure') 'codegen, memory, GS run, frame-metric, sound and hold-to-mash regression tests'
+    Native (Join-Path (Split-Path $cmakeExe) 'ctest.exe') @('--test-dir', $testBuild, '-R', '^gow_(codegen_tests|memory_tests|texture_budget_tests|sampler_state_tests|alpha_bounds_tests|shared_present_tests|test_time|gs_run_tests|gs_alpha_tests|frame_metrics|dma_worker_tests|sound_regression|qte_hold_test|qte_input_off|qte_input_shake|qte_input_rotate|qte_input_smoke)$', '--output-on-failure') 'codegen, memory, GS run, frame-metric, sound and hold-to-mash regression tests'
     Native $python @('-I', (Join-Path $root 'tools/test/vu1-equivalence.py'),
         (Join-Path $testBuild 'gow_vu1_x64_fuzz_test.exe'), $rt, $python,
         (Join-Path $script:llvmBin 'clang++.exe'), (Join-Path $logs 'vu1-equivalence')) 'VU1 backend equivalence'

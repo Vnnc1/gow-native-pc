@@ -25,5 +25,10 @@ and retest rules, so the next maintainer does not repeat completed investigation
 | [handoff-2026-10-25-performance-phases.md](handoff-2026-10-25-performance-phases.md) | Performance phases 1-5 (patches 10-13), frame timeline, how to measure |
 | [ps2-ports-review-2026-10-25.md](ps2-ports-review-2026-10-25.md) | Review of other PS2 ports (rac-rs, PS2Recomp, SpartanPort) that produced the phases |
 
+Additional investigations:
+
+- [RX580 renderer candidates and validation](patch66-67-rx580-2026-11-04.md): patches 66/67 and experimental 72–75; capped FPS, resource uncertainty and rejected comparisons.
+- [Future graphics APIs and automatic launcher selection](graphics-api-roadmap.md): Vulkan/Direct3D evaluation, compatibility gates and OpenGL fallback; proposal only.
+
 Rules that hold for all of them: runtime changes are new `engine/patches/NN-*.patch` files (never edit an applied patch's
 context), game data never leaves `data/`, and measurements name the machine and the settings.

@@ -94,3 +94,24 @@ for bad in [a.replace("skipped=0","skipped=1"), a.replace("intervals=360","inter
     except ValueError: pass
     else: raise AssertionError("Incomplete aligned metrics accepted")
 print("PASS: aligned frame/audio availability and skipped-frame rejection")
+
+for mode in (*m.EFFICIENCY_FLAGS, "efficiency", "grouping"):
+    off, on = m.efficiency_environment(mode, 0), m.efficiency_environment(mode, 1)
+    assert all(v == "0" for v in off.values())
+    assert sum(v == "1" for v in on.values()) == (3 if mode == "efficiency" else 0 if mode == "grouping" else 1)
+events = [{"type":"process_exit", "code":0, "state":"completed"}]
+assert m.completed_child({"state":"running"}, events, 0)
+assert not m.completed_child({"exit_code":1}, events, 0)
+assert not m.completed_child({}, events, 1)
+assert not m.completed_child({}, [], 0)
+assert not m.completed_child({}, events * 2, 0)
+assert not m.completed_child({}, [{"type":"process_exit","code":1,"state":"completed"}], 0)
+print("PASS: efficiency switches isolated; stale exit metadata requires unique successful event and helper exit")
+
+assert gpu.cpu_rate(((10,1), 100, 0), ((10,1), 1000000100, 10000000)) == 100
+assert gpu.cpu_rate(((10,1), 100, 0), ((10,1), 1000000100, 20000000)) == 200
+assert gpu.cpu_rate(None, ((10,1), 100, 0)) is None
+assert gpu.cpu_rate(((10,1), 100, 1), ((10,2), 200, 2)) is None
+assert gpu.cpu_rate(((10,1), 100, 2), ((10,1), 200, 1)) is None
+assert gpu.cpu_rate(((10,1), 100, 1), ((10,1), 100, 2)) is None
+print("PASS: process CPU counter units, multicore time, unavailable/reset/reused PID handling")

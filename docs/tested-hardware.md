@@ -1204,3 +1204,16 @@ backend equivalence and task replay. Disc-preparation and Linux orchestration
 checks also passed. Patch 67 required context-only rebasing over patch 60.
 No combined FPS/GPU or notebook acceptance claim; the game runner was not rebuilt.
 See [integration evidence](research/merge-fix-chore-2026-11-04.md).
+
+## RX580 merged renderer candidates (2026-11-04)
+
+Xeon E5-2666 v3 / RX580 2048SP, driver 31.0.21924.61, separate
+`C:/gow-p6667-clang` build. Patches 66/67 reached approximately 60 guest FPS
+in bounded ship arrival comparisons, without a reliable general gain.
+Experimental patches 72–74 passed synthetic real-GL differential color checks
+and full verification (17 CTest groups plus VU1/task checks). Combined candidates
+showed 59.994→59.832 FPS, 323.733→322.047% one-core CPU and
+45.230→43.899% busiest GPU engine: short samples, inconclusive efficiency.
+Defaults remain off. Longer displaced-scene comparisons and stale exit metadata
+remain recorded as invalid/incomplete evidence. No weaker-hardware acceptance.
+See [methods, artifacts and decisions](research/patch66-67-rx580-2026-11-04.md).
