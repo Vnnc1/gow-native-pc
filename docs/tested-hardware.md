@@ -880,3 +880,13 @@ Two bounded diagnostic sessions reached gameplay and exited cleanly; both record
 backends against their own baselines (native/exact differ in all 32 records).
 These are CPU isolation inputs, not a valid FPS comparison or audio-quality gate.
 Final runner SHA-256: `6476be39ceb5ef33e5f0594fc0c44cb01dedd41f4bb9d02c239579913b34da35`.
+
+## 2026-11-05: scalar replay repetition
+
+The maintainer resumed testing on the i5-8265U. Five alternating pairs reproduced
+lower isolated scalar-candidate replay cost: 490.9 -> 468.2 us (-4.62%). All five
+backend replays passed their own captured baselines. No production optimization
+was installed; combat, audio and full equivalence acceptance remain open.
+See [reproduction and limits](research/render-delivery-2026-11-04/scalar-repeat-2026-11-05.md).
+
+Patch 72 follow-up: Release and full verify passed. Visible 100-second candidate gameplay passed 2000 VU1 comparisons and graceful exit, but smoke failed native/JIT metric checks (9/11). Both A/B attempts were rejected before candidate comparison. No FPS improvement established.
