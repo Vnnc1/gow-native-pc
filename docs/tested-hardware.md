@@ -1207,6 +1207,17 @@ See [integration evidence](research/merge-fix-chore-2026-11-04.md).
 
 ## RX580 merged renderer candidates (2026-11-04)
 
+Separate correctness follow-up: [Japanese post-intro tests](research/black-intro-tests-2026-11-04.md)
+rebuilt the preserved regional snapshot in `C:/gow-black-jpn`. Normal video reached
+visible ship gameplay and passed all 11 smoke checks. Skipping video reached
+visible combat, but the 150-second run needed forced termination on close.
+This does not reproduce or fix the reported Intel HD 4400 black screen, and is
+not a new FPS/support claim. Movie-transition audio deficits remain recorded.
+
+Related external report: [i3-4170 / Intel HD 4400 analysis](research/chin-delivery-followup-2026-11-04.md).
+This is a supplied-log review, not a locally tested or supported hardware tier.
+The log does not establish 60 guest FPS; no new physical Intel validation occurred.
+
 Xeon E5-2666 v3 / RX580 2048SP, driver 31.0.21924.61, separate
 `C:/gow-p6667-clang` build. Patches 66/67 reached approximately 60 guest FPS
 in bounded ship arrival comparisons, without a reliable general gain.

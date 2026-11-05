@@ -188,3 +188,39 @@ Initial solid-color pixels passed but were insufficient to validate filtering;
 the stronger nonuniform texture fixture supersedes that limited coverage.
 Detailed results, negative evidence and retained/default decisions are recorded
 in [the implementation report](patch66-67-rx580-2026-11-04.md).
+
+## GPU-04 — supplied i3-4170 / HD 4400 report (2026-11-04)
+
+[Delivery/log follow-up](chin-delivery-followup-2026-11-04.md): all 72 recorded
+source-patch hashes match the supplied delivery. Source snapshot does not prove
+runner provenance. Guest probe matches Japan; 25 later windows show zero guest
+flips while the host presents at 60.59–119.18 Hz. No controlled 60-FPS gameplay
+or GPU-saturation evidence. Original delivery ring ownership and vertex-tail
+defects reuse the prior correctness review; the current renderer excludes that
+ring and already fixes the tail. Disappearing bodies remain unlocalized.
+Deferred investigations: incident-correlated progress/render checks, host cap
+60/120 resource/latency comparison, and missing acceptance criteria of the
+notebook scalar-outline replay result. No runtime/default changes or new
+performance benchmark in this review.
+
+Clarification: the reported vanilla-launcher failure is black screen after the
+intro, distinct from the issue screenshot's missing bodies. Prioritize bounded
+movie-to-game transition diagnostics; no confirmed hardware incompatibility or
+ring-corruption attribution for this session.
+
+Authorized follow-up: reconstruct the available isolated Japanese source snapshot
+in `C:/gow-black-jpn` because the registered executable no longer exists. Its
+prepared ELF exactly matches the supplied session hash. Run visible, audio-enabled
+normal boot with/without only FMV skipping, using private cards and movie-state
+diagnostics. This is a new correctness workload (post-intro black screen), not
+a repeat of the capped performance experiments. The local RX580 and rebuilt
+regional baseline cannot substitute for the missing reported runner/Intel GPU.
+
+Executed evidence: [post-intro isolation](black-intro-tests-2026-11-04.md).
+The reconstructed Japanese runner reaches visible gameplay with normal and
+skipped `Semo01` on RX580. Normal-video smoke passes 11 gates and demonstrates
+zero guest-probe windows during progressing FMV; this is not alone a hang signal.
+The 150-second skip run reaches combat but fails graceful shutdown (collector
+forced termination), so it is not a passing full smoke. Preserve this failure.
+No post-intro root cause or hardware compatibility fix established; no runtime
+or default changed. The affected runner is unavailable per maintainer reply.

@@ -4,6 +4,7 @@ No source ISO, player saves, launcher preferences or boot profile are changed.
 This is a functional smoke test, not a performance benchmark.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,9 @@ parser.add_argument("--runner", type=Path, help="Isolated regional runner; requi
 parser.add_argument("--elf", type=Path, help="Prepared regional ELF; never changes the installed language manifest")
 parser.add_argument("--frame-pc", help="Validated guest frame probe for the explicit regional ELF")
 parser.add_argument("--normal-boot", action="store_true", help="Exercise the original startup and FMV path")
+parser.add_argument("--skip-fmv", action="store_true", help="Skip movies independently of fast boot, for transition isolation")
+parser.add_argument("--movie-diag", action="store_true", help="Collect bounded movie-state diagnostics; not a benchmark")
+parser.add_argument("--host-fps", type=int, choices=(60, 120), default=60, help="Host presentation cap for matched diagnostic runs")
 parser.add_argument("--pad-script", help="Override scripted input for regional menu conventions")
 parser.add_argument("--scale", type=int, choices=range(1, 9), default=1, help="GS internal resolution multiplier")
 parser.add_argument("--early-finish", action="store_true", help="Exercise the launcher's asynchronous GS finish setting")
@@ -62,7 +66,10 @@ session = output / "session"
 session.mkdir()
 (session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
     "test": "scripted input, private card, audio enabled", "visible": args.visible,
-    "normal_boot": args.normal_boot, "elf_name": Path(elf).name,
+    "normal_boot": args.normal_boot, "skip_fmv": args.skip_fmv or not args.normal_boot,
+    "movie_diag": args.movie_diag, "host_fps": args.host_fps, "elf_name": Path(elf).name,
+    "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+    "elf_sha256": hashlib.sha256(Path(elf).read_bytes()).hexdigest(),
     "scale": args.scale, "early_finish": args.early_finish, "fxaa": args.fxaa,
     "texture_pack": bool(args.texture_pack),
     "diagnostics": "detailed" if args.detailed else "frames", "seconds": args.seconds}}))
@@ -77,10 +84,14 @@ env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HID
            GOW_VU1_SIN_COMPILAR="1", GOW_VU1_CAPTURE_MISSES="0", PS2X_GS_HW="1", PS2X_GS_WORKER="1",
            GOW_GS_FINISH_ASINCRONO="1", PS2X_GS_HW_SCALE=str(args.scale), PS2X_GS_ESCALA=str(args.scale), PS2X_GS_ESCALA_DINAMICA="0",
            GOW_GS_EARLY_FINISH="1" if args.early_finish else "0", TOBIICHI_FXAA="1" if args.fxaa else "0",
-           TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720")
+           TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720", TOBIICHI_VENTANA_FPS=str(args.host_fps))
 if args.normal_boot:
     env.pop("GOW_FAST_BOOT")
     env.pop("GOW_SKIP_FMV")
+if args.skip_fmv:
+    env["GOW_SKIP_FMV"] = "1"
+if args.movie_diag:
+    env["GOW_MPEG_DIAG"] = "1"
 if args.texture_pack:
     env["GOW_TEXTURE_PACK"] = str(args.texture_pack.resolve())
     env["GOW_TEXTURE_PACK_STATS"] = "1"

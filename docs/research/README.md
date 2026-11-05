@@ -27,6 +27,10 @@ and retest rules, so the next maintainer does not repeat completed investigation
 
 Additional investigations:
 
+- [Post-intro black-screen isolation](black-intro-tests-2026-11-04.md): rebuilt Japanese snapshot, normal/skip-video tests, normal zero frame-probe windows during FMV and separate shutdown failure.
+
+- [i3-4170 / HD 4400 supplied log and disappearing-geometry report](chin-delivery-followup-2026-11-04.md): source identity, guest/host distinction, original ring defects and prioritized missing validation.
+
 - [RX580 renderer candidates and validation](patch66-67-rx580-2026-11-04.md): patches 66/67 and experimental 72–75; capped FPS, resource uncertainty and rejected comparisons.
 - [Future graphics APIs and automatic launcher selection](graphics-api-roadmap.md): Vulkan/Direct3D evaluation, compatibility gates and OpenGL fallback; proposal only.
 
