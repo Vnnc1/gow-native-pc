@@ -108,6 +108,21 @@ library without game data; Linux/Steam Deck performance remains unvalidated.
 
 ## Performance target for public builds
 
+Before proposing or rerunning performance experiments, read
+[`docs/research/performance-experiments.md`](docs/research/performance-experiments.md).
+It indexes regressions, neutral/invalid comparisons and gains with missing acceptance
+criteria. Reuse those results; do not repeat the same rejected experiment merely because
+a new agent/chat starts. A retest must cite the previous experiment ID and document a
+materially changed implementation, workload, hardware/toolchain or measurement flaw first.
+For partial gains, validate the missing criterion instead of repeating completed checks.
+Routine correctness regression tests still apply. Append new results and decisions to
+the ledger and `docs/tested-hardware.md`; never erase negative or interrupted evidence.
+
+Performance improvements must be part of the normal first-install build and launch defaults. Do not require
+players to toggle diagnostic flags, install external tuning tools or rerun optimization stages to activate a
+shipped improvement. Existing compiled installations still need a matching updated runner. RX 580 results are
+local evidence only; they do not establish a gain on the i3-10110U/Intel UHD or weaker PCs.
+
 Target stable 60 guest frames/s on modest and powerful supported PCs. The i5-8265U laptop and Xeon/RX 580 desktop
 are separate validation targets; compare revisions on the same hardware/settings and never transfer their FPS or
 build-time results between machines. Measure frame pacing and first-visit stalls, and require visible gameplay
@@ -115,7 +130,23 @@ with sound before claiming a tier ready. Preserve portable CPU fallbacks and acc
 The laptop has not yet met the 60 fps target. Follow the hardware-tier acceptance gates in
 `docs/research/roadmap-2026-10-27.md`; do not promise universal performance or classify an untested tier as supported.
 
+Patch 61 keeps shared presentation acquisition nonblocking when the GS publisher
+holds its mutex. The host-thread snapshot owns the existing reading slot; never
+recycle it until normal host release, and reset it on host lifecycle changes.
+`gow_shared_present_tests` exercises production acquisition with fake fences and
+is part of `verify`. This removes one lock wait, not all host/backend/driver waits;
+see GPU-02 in the performance ledger before extending its performance claims.
+
 ## Player diagnostic reports
+
+`launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
+identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
+per session, and invokes the same detached collector. `tools/pipeline/package_diagnostics.py` packages it with
+an explicitly supplied runner; `installer` option `GOW_DIAGNOSTIC_SETUP` gives it a separate uninstall key,
+folder and shortcuts. Never add disc files or cards to this package. The normal launcher's CMake ownership
+checks remain unchanged. `session_summary.h` derives human/JSON summaries only from bounded report files;
+unknown metrics stay absent, and queue/scoped timings must not be presented as GPU frame time. Validate with
+`tools/test/session_diagnostics.py`, packaged UI/game smoke and `tools/test/verify_setup.py`.
 
 `launcher/src/session_diagnostics.*` implements the independent `gow-session` collector and local report export.
 It must keep collecting when the launcher closes, preserve actual child exit codes, and stop only its own child.
@@ -429,3 +460,27 @@ Performance continuation checkpoint (2026-11-04):
 unaccepted scalar-outline/encounter-anchor drafts, evidence and pending validation. Read it before
 resuming this investigation. Drafts under that report's `drafts/` are not ordinal runtime patches;
 never apply/package them automatically. A later explicit user request to resume supersedes the pause.
+
+Queue backpressure diagnostics (patch 59): `GOW_SYNC_DIAG=1` also emits `[gow-queue]`
+for stage-ring capacity (queue 1, bytes) and backend capacity (queue 2, chunks).
+These producer waits include scheduling and can overlap existing VU/GS timers.
+Keep timing opt-in, preserve queue ordering/limits, and test the collector parser
+with `tools/test/session_diagnostics.py`. Semantics: `docs/reporting-bugs.md`.
+
+Patch 60 bounds decoded GS texture allocations by bytes (128 MiB, excluding the active oversized texture)
+and reuses existing storage after invalidation. Render targets, replacement packs and driver staging are
+outside this budget. `gow_texture_budget_tests` is in verify; `gow_texture_upload_test` is an explicitly
+run, real-OpenGL CT32/T8/T4 pixel check, not a headless test. `session-game-smoke.py --texture-cache`
+checks `[gs-cache]` counters. Keep reference validity during eviction and preserve cache-key dimensions/formats.
+Detailed private-kit reports enable `GOW_GS_HW_STATS`; normal FPS collection keeps it off.
+
+Experimental renderer patches 72–74 remain default-off: `GOW_GS_SAMPLER_CACHE`,
+`GOW_GS_FAST_SHADER`, `GOW_GS_ALPHA_BOUNDS`. Preserve reference paths, upload-time
+sampler invalidation, per-program uniform locations and optional shader fallback.
+Alpha bounds exclude texture-alpha-dependent draws. `verify` includes sampler
+state and alpha interval tests. `gow_renderer_variants_test` plus
+`tools/test/renderer-variants.py` is an explicit real-OpenGL color comparison,
+not headless GPU validation. Patch 75 `GOW_GS_VARIANT_DIAG` adds test-only counters.
+See GS-07/08/09 in the performance ledger before proposing default promotion.
+Future Vulkan/Direct3D and automatic launcher selection are proposals only in
+`docs/research/graphics-api-roadmap.md`; no such backend or selector is implemented.

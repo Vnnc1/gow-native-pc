@@ -4,6 +4,7 @@ No source ISO, player saves, launcher preferences or boot profile are changed.
 This is a functional smoke test, not a performance benchmark.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,10 +21,14 @@ parser.add_argument("--visible", action="store_true", help="Show gameplay with a
 parser.add_argument("--capture", action="store_true", help="Keep local GS captures at 10/80 seconds (never exported)")
 parser.add_argument("--texture-pack", type=Path, help="Read-only texture-pack A/B test; never changes launcher settings")
 parser.add_argument("--detailed", action="store_true", help="Enable intrusive per-call timing; not an FPS benchmark")
+parser.add_argument("--texture-cache", action="store_true", help="Validate GS texture budget and storage reuse counters")
 parser.add_argument("--runner", type=Path, help="Isolated regional runner; requires --elf and --frame-pc")
 parser.add_argument("--elf", type=Path, help="Prepared regional ELF; never changes the installed language manifest")
 parser.add_argument("--frame-pc", help="Validated guest frame probe for the explicit regional ELF")
 parser.add_argument("--normal-boot", action="store_true", help="Exercise the original startup and FMV path")
+parser.add_argument("--skip-fmv", action="store_true", help="Skip movies independently of fast boot, for transition isolation")
+parser.add_argument("--movie-diag", action="store_true", help="Collect bounded movie-state diagnostics; not a benchmark")
+parser.add_argument("--host-fps", type=int, choices=(60, 120), default=60, help="Host presentation cap for matched diagnostic runs")
 parser.add_argument("--pad-script", help="Override scripted input for regional menu conventions")
 parser.add_argument("--scale", type=int, choices=range(1, 9), default=1, help="GS internal resolution multiplier")
 parser.add_argument("--early-finish", action="store_true", help="Exercise the launcher's asynchronous GS finish setting")
@@ -61,7 +66,10 @@ session = output / "session"
 session.mkdir()
 (session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
     "test": "scripted input, private card, audio enabled", "visible": args.visible,
-    "normal_boot": args.normal_boot, "elf_name": Path(elf).name,
+    "normal_boot": args.normal_boot, "skip_fmv": args.skip_fmv or not args.normal_boot,
+    "movie_diag": args.movie_diag, "host_fps": args.host_fps, "elf_name": Path(elf).name,
+    "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+    "elf_sha256": hashlib.sha256(Path(elf).read_bytes()).hexdigest(),
     "scale": args.scale, "early_finish": args.early_finish, "fxaa": args.fxaa,
     "texture_pack": bool(args.texture_pack),
     "diagnostics": "detailed" if args.detailed else "frames", "seconds": args.seconds}}))
@@ -76,14 +84,20 @@ env.update(GOW_PAD_TEST="1", GOW_FAST_BOOT="1", GOW_SKIP_FMV="1", GOW_WINDOW_HID
            GOW_VU1_SIN_COMPILAR="1", GOW_VU1_CAPTURE_MISSES="0", PS2X_GS_HW="1", PS2X_GS_WORKER="1",
            GOW_GS_FINISH_ASINCRONO="1", PS2X_GS_HW_SCALE=str(args.scale), PS2X_GS_ESCALA=str(args.scale), PS2X_GS_ESCALA_DINAMICA="0",
            GOW_GS_EARLY_FINISH="1" if args.early_finish else "0", TOBIICHI_FXAA="1" if args.fxaa else "0",
-           TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720")
+           TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720", TOBIICHI_VENTANA_FPS=str(args.host_fps))
 if args.normal_boot:
     env.pop("GOW_FAST_BOOT")
     env.pop("GOW_SKIP_FMV")
+if args.skip_fmv:
+    env["GOW_SKIP_FMV"] = "1"
+if args.movie_diag:
+    env["GOW_MPEG_DIAG"] = "1"
 if args.texture_pack:
     env["GOW_TEXTURE_PACK"] = str(args.texture_pack.resolve())
     env["GOW_TEXTURE_PACK_STATS"] = "1"
     env["GOW_TEX_PCSX2_NAMES"] = str(output / "texture-names.txt")
+if args.texture_cache:
+    env["GOW_GS_HW_STATS"] = "1"
 process = subprocess.Popen([str(helper), str(session), str(runner), elf, str(output if args.capture else root)], cwd=output, env=env)
 try:
     for elapsed in range(args.seconds):
@@ -115,6 +129,12 @@ checks = {"exit_zero": meta["exit_code"] == 0, "gameplay": bool(re.search(r"stat
           "jit_metrics": any(r.get("tag") == "vu1x" and "compiled" in r.get("values", {}) for r in metrics),
           "player_marker": any(r.get("type") == "player_marker" for r in events),
           "graceful_stop": not any(r.get("type") == "forced_termination" for r in events)}
+if args.texture_cache:
+    cache = [dict((key, int(value)) for key, value in re.findall(r"(\w+)=(\d+)", line))
+             for line in log.splitlines() if "[gs-cache]" in line]
+    checks["texture_budget"] = bool(cache) and all(row["bytes"] <= row["budget"] for row in cache)
+    checks["texture_storage_reused"] = any(row["reuses"] > 0 for row in cache)
+    (output / "texture-cache.json").write_text(json.dumps(cache, indent=2))
 (output / "checks.json").write_text(json.dumps(checks, indent=2))
 print(json.dumps({"directory": str(output), "checks": checks}, indent=2))
 assert all(checks.values()), "Session gameplay validation failed"

@@ -1,0 +1,170 @@
+Measure producer capacity waits separately for the VU1-to-GS ring and GS backend chunk queue.
+GOW_SYNC_DIAG=1 enables bounded wall-time counts/maxima; disabled paths read no clocks.
+Queue 1 reports bytes; queue 2 reports chunks. These are not CPU/GPU utilization or frame time.
+Preserve queue limits, ordering, synchronization and rendering. No FPS gain claimed.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_stage.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/gs/gs_stage.h"
++#include "runtime/gow_queue_metrics.h"
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -69,6 +70,7 @@
+         std::atomic<int> idleWaiters{0};
+         std::atomic<bool> stop{false};
+         uint32_t spinUs = 50;
++        GowQueueMetrics capacityWait{1};
+         std::thread thread;
+         std::thread::id threadId;
+         ps2_gs_stage::ProcessFn process;
+@@ -164,16 +166,25 @@
+     void waitSpace(Stage &s, uint64_t target)
+     {
+         const auto fits = [&s, target] { return target - s.tail.load(std::memory_order_acquire) <= kRingBytes; };
++        if (fits()) return;
++        const bool measure = s.capacityWait.enabled;
++        const auto began = measure ? GowQueueMetrics::Clock::now() : GowQueueMetrics::Clock::time_point{};
++        const uint64_t queued = measure ? s.head.load(std::memory_order_relaxed) - s.tail.load(std::memory_order_acquire) : 0;
++        const auto record = [&] {
++            if (measure) s.capacityWait.add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                GowQueueMetrics::Clock::now() - began).count()), queued);
++        };
+         for (uint32_t n = 0; n < 4096u; ++n)
+         {
+             if (fits())
+-                return;
++            { record(); return; }
+             cpuRelax();
+         }
+         std::unique_lock<std::mutex> lock(s.mutex);
+         s.producerWaiting.store(true, std::memory_order_seq_cst);
+         s.space.wait(lock, fits);
+         s.producerWaiting.store(false, std::memory_order_relaxed);
++        record();
+     }
+ }
+ 
+@@ -193,6 +204,8 @@
+         // GOW_GS_STAGE_SPIN_US: how long the stage waits actively for the next packet before sleeping (0: at once)
+         if (const char *spin = std::getenv("GOW_GS_STAGE_SPIN_US"))
+             s.spinUs = static_cast<uint32_t>(std::strtoul(spin, nullptr, 10));
++        if (s.capacityWait.enabled) std::fprintf(stderr,
++            "[gow-queue] queue=1 enabled=1 spin_us=%u limit_bytes=%zu\n", s.spinUs, kMaxQueuedBytes);
+         s.thread = std::thread(loop);
+         s.threadId = s.thread.get_id();
+         std::fprintf(stderr, "[gs-stage] GS frontend on its own thread, pipelined behind VU1 (PS2X_GS_PIPELINE=0 disables)\n");
+@@ -209,6 +222,7 @@
+         }
+         s.work.notify_all();
+         s.thread.join();
++        s.capacityWait.flush();
+         s.threadId = {};
+     }
+ 
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -63,6 +63,8 @@
+     if (const char *limit = std::getenv("PS2X_GS_QUEUE_CHUNKS"))
+         m_queueChunkLimit = static_cast<size_t>(std::clamp(std::atoi(limit), 1, static_cast<int>(kMaxPendingChunks)));
+     m_open.reserve(kPublishBytes + 4096u);
++    if (m_capacityWait.enabled) std::fprintf(stderr,
++        "[gow-queue] queue=2 enabled=1 limit_chunks=%zu chunk_bytes=%zu\n", m_queueChunkLimit, kPublishBytes);
+     m_worker = std::thread([this]
+                            { WorkerLoop(); });
+ }
+@@ -79,6 +81,7 @@
+     m_workCv.notify_all();
+     if (m_worker.joinable())
+         m_worker.join();
++    m_capacityWait.flush();
+ }
+ 
+ std::unique_ptr<GSRasterBackend> GSThreadedBackend::MakeDefault()
+@@ -139,8 +142,13 @@
+     std::vector<uint8_t> next;
+     {
+         std::unique_lock<std::mutex> lock(m_queueMutex);
++        const bool measure = m_capacityWait.enabled && !m_stop && m_pending.size() >= m_queueChunkLimit;
++        const auto began = measure ? GowQueueMetrics::Clock::now() : GowQueueMetrics::Clock::time_point{};
++        const size_t queued = m_pending.size();
+         m_doneCv.wait(lock, [&]
+                       { return m_stop || m_pending.size() < m_queueChunkLimit; });
++        if (measure) m_capacityWait.add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            GowQueueMetrics::Clock::now() - began).count()), queued);
+         m_pending.push_back(std::move(m_open));
+         ++m_published;
+         if (!m_spare.empty())
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+@@ -1,6 +1,7 @@
+ // GOW-Port: adaptado de Taylor N. Albarnaz / LightVelox (GPL-3.0).
+ // Origen: PS2Recomp sotc-port, ac9efa070638ad3b3accd284de6f898d5ab271d1.
+ #pragma once
++#include "runtime/gow_queue_metrics.h"
+ 
+ #include "runtime/gs/gs_backend.h"
+ #include "runtime/gs/gs_backend_state.h"
+@@ -87,6 +88,7 @@
+     bool m_drawStateValid = false;
+     bool m_compactQueue = true;
+     size_t m_queueChunkLimit = 8u;
++    GowQueueMetrics m_capacityWait{2}; // serialized by m_producerMutex
+ 
+     mutable std::mutex m_queueMutex;
+     mutable std::condition_variable m_workCv;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_queue_metrics.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_queue_metrics.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_queue_metrics.h
+@@ -0,0 +1,46 @@
++#pragma once
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++
++// Producer-owned capacity-wait counters. Callers serialize access; flush after producers stop.
++// Wall time includes scheduling/spinning, not GPU time. No clocks on the disabled path.
++class GowQueueMetrics
++{
++public:
++    using Clock = std::chrono::steady_clock;
++    struct Entry { uint64_t waits = 0, ns = 0, maxNs = 0, queuedPeak = 0; };
++    explicit GowQueueMetrics(unsigned queue) : queue(queue) {}
++    const bool enabled = [] {
++        const char *v = std::getenv("GOW_SYNC_DIAG");
++        return v && v[0] == '1';
++    }();
++    void add(uint64_t ns, uint64_t queued)
++    {
++        if (!enabled) return;
++        for (Entry *e : {&total, &window}) {
++            ++e->waits; e->ns += ns;
++            e->maxNs = std::max(e->maxNs, ns);
++            e->queuedPeak = std::max(e->queuedPeak, queued);
++        }
++        const auto now = Clock::now();
++        if (now - start >= std::chrono::seconds(5)) emit(now, false);
++    }
++    Entry snapshot() const { return total; }
++    void flush() { if (enabled) emit(Clock::now(), true); }
++private:
++    unsigned queue; // 1: GS stage (queued bytes); 2: backend (queued chunks).
++    Entry total{}, window{};
++    Clock::time_point start = enabled ? Clock::now() : Clock::time_point{};
++    void emit(Clock::time_point now, bool final)
++    {
++        if (window.waits) std::fprintf(stderr,
++            "[gow-queue] queue=%u window=%.6f waits=%llu wait_ms=%.6f max_ms=%.6f queued_peak=%llu final=%u\n",
++            queue, std::chrono::duration<double>(now - start).count(),
++            (unsigned long long)window.waits, window.ns / 1e6, window.maxNs / 1e6,
++            (unsigned long long)window.queuedPeak, unsigned(final));
++        window = {}; start = now;
++    }
++};
