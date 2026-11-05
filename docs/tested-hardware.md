@@ -1,5 +1,25 @@
 # Tested hardware and results
 
+## Experimental high logic rate (2026-11-05, i5-8265U / UHD 620)
+
+Patch 73 adds opt-in 120/240 logic rates; original 60 Hz remains the default.
+Release build/full verify passed, including 41 synthetic adapter cases, 13 CTest
+groups and VU1 equivalence. A visible, audio-enabled private-card `ship_guard`
+pair at 1x/1280x720 passed the session and scene-envelope gates. With host cap 120
+in both variants, original 60 measured **21.06 guest FPS**, versus **15.60** for
+experimental 120. Median window p95 worsened **63.32 -> 115.20 ms**; game-time/wall-time
+ratio fell **0.980 -> 0.853**, and audio missing frames increased **5,125 -> 15,523**
+out of 2,400,000 requested. This single pair supports no default promotion or
+general performance claim. The scene envelope is not a frame-identical replay.
+
+A separate 240 pilot reached 22.79 guest FPS, not 240; its different host cap and
+unpaired execution prevent a performance comparison. Original saves remained
+unchanged. A separate capture verified rendered opening combat; after user-requested
+minimization that session required forced termination, so its exit check failed.
+An earlier original-60 run also had a presentation stall and was rejected.
+No gameplay above 60 FPS, 120 Hz scanout, QTE/combo parity or whole-game compatibility
+was validated. See [settings, evidence and limitations](research/experimental-logic-rate.md).
+
 ## Paused VU1/combat investigation (2026-11-04, i5-8265U / UHD 620)
 
 The new private-card combat-corner pilot reached an active rendered encounter and

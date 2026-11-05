@@ -374,6 +374,17 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 ## Direct launch and diagnostics
 
+Patch 73 is a USA-only high logic-rate experiment: `GOW_EXPERIMENTAL_LOGIC_FPS=120|240`,
+unset/60/invalid means the original 60 Hz path. It changes the measured timestep
+and the frame-end wait only; fixed steps, movies and other callers retain their
+original waits. Presentation follows game flips in the experimental mode, while
+VBlank/audio clocks stay unchanged. `EeScheduler::currentEeCycle()` is EE-executor-only.
+Never enable it for regional overlays or add it to default boot profiles.
+`logic-rate-tests.py` is part of verify; `gs-run-ab.py --compare logic-rate` uses
+real-time input/windows, private cards and `GOW_DELTA_DIAG`. A speed ratio near
+one does not validate frame-counted QTEs, combos or collision behavior. See
+`docs/research/experimental-logic-rate.md` for evidence and limitations.
+
 Patches 36–37 add opt-in `GOW_SYNC_DIAG=1` worker/GS-stage wait aggregates and bounded isolated MSCAL task replay.
 `tools/test/worker-ab.py` separates FPS, intrusive timing and capture modes; it uses private cards and stops only its
 own child. `tools/test/vu1-task-replay.py` validates local task corpora with `gow_vu1_tasks` from the verify build.

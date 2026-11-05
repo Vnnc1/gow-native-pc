@@ -274,9 +274,13 @@ tela de carregamento, coloque imagens PNG, JPG ou WebP em `data/gow1/loading/`.
 
 ## Desempenho
 
-O jogo é limitado a 60 quadros por design (a lógica segue o VBlank de 60 Hz do PS2). Todas as medições, com o código e
+Por padrão, o jogo mantém o ritmo original de 60 Hz. Todas as medições, com o código e
 os ajustes usados: [`docs/tested-hardware.md`](docs/tested-hardware.md). Os resultados variam entre máquinas — use-os
 como referência.
+
+Há um **experimento de lógica a 120/240** para testes de desenvolvimento, desativado por padrão.
+Os testes locais no notebook não atingiram essas taxas de jogabilidade; a frequência de apresentação do host não é o FPS do jogo.
+Veja [instruções, resultados e validações pendentes](docs/research/experimental-logic-rate.md).
 
 No PC de testes do projeto, **Xeon E5-2666 v3 / 16 GB / Radeon RX 580 2048SP** (tela cheia 1080p, resolução interna 2×,
 PGO, Early FINISH), o navio inicial fica em **cerca de 55 fps de média**, com trechos de combate pesado em torno de

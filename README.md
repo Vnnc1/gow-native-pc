@@ -269,9 +269,13 @@ screen, place PNG, JPG or WebP images in `data/gow1/loading/`.
 
 ## Performance
 
-The game is capped at 60 frames by design (its logic follows the PS2's 60 Hz VBlank). Every measurement, with the code
+By default, the game keeps its original 60 Hz frame pacing. Every measurement, with the code
 and settings used: [`docs/tested-hardware.md`](docs/tested-hardware.md). Results vary between machines — treat them as
 a reference.
+
+An opt-in **120/240 logic-rate experiment** is available for development tests, disabled by default.
+The local laptop tests did not reach these gameplay rates; host presentation frequency is not guest FPS.
+See [instructions, results and remaining validation](docs/research/experimental-logic-rate.md).
 
 On the project's **Xeon E5-2666 v3 / 16 GB / Radeon RX 580 2048SP** test PC (full screen 1080p, internal resolution 2×,
 PGO, Early FINISH), the opening ship averages **about 55 fps**, with heavy-combat windows around **50–53 fps**; a

@@ -16,6 +16,14 @@ assert m.frame_summary([], 60)["median_window_p99_ms"] is None
 assert m.gameplay_before_warmup("[24347 ms] [gow-pad2:test] gameplay start at 20.20 s", 60)
 assert not m.gameplay_before_warmup("[64347 ms] [gow-pad2:test] gameplay start at 60.20 s", 60)
 assert not m.gameplay_before_warmup("[20000 ms] menu", 60)
+speed = m.logic_speed_summary("\n".join([
+    "[60500 ms] [gow-speed] frames=60 wall=1.00 game=99.000 speed=99.000",
+    "[62000 ms] [gow-speed] frames=120 wall=1.00 game=1.000 speed=1.000",
+    "[64000 ms] [gow-speed] frames=180 wall=2.00 game=2.000 speed=1.000",
+    "[65000 ms] [gow-speed-hist] ignored=1",
+]), 60)
+assert speed["windows"] == 2 and speed["wall_seconds"] == 3 and speed["game_seconds_per_wall_second"] == 1
+assert m.logic_speed_summary("", 60)["game_seconds_per_wall_second"] is None
 hosts = [{"type": "host_process", "elapsed_ms": t, "process_running": live,
           "process_counters_available": True, "cpu_percent_one_core": cpu}
          for t, live, cpu in [(58000, True, 999), (63000, True, 999), (68000, True, 100),

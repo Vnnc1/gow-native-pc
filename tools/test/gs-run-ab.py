@@ -82,6 +82,21 @@ def gameplay_before_warmup(log, warmup):
     return bool(match and int(match[1]) / 1000 <= warmup)
 
 
+def logic_speed_summary(log, warmup):
+    """Whole post-warmup speed windows; timestep totals do not prove action parity."""
+    windows = []
+    for match in re.finditer(r"\[(\d+) ms\] \[gow-speed\] ([^\r\n]+)", log):
+        values = {k: float(v) for k, v in re.findall(r"(\w+)=([-\d.]+)", match[2])}
+        if values.get("wall", 0) > 0 and int(match[1]) / 1000 - values["wall"] >= warmup:
+            windows.append(values)
+    wall = sum(v["wall"] for v in windows)
+    return {"windows": len(windows), "wall_seconds": wall,
+            "game_seconds": sum(v["game"] for v in windows),
+            "game_seconds_per_wall_second": sum(v["game"] for v in windows) / wall if wall else None,
+            "min_window_speed": min((v["speed"] for v in windows), default=None),
+            "max_window_speed": max((v["speed"] for v in windows), default=None)}
+
+
 def scene_summary(log, warmup, end=float("inf"), frame_range=None):
     samples = []
     for match in re.finditer(r"\[(\d+) ms\] \[gow-player\].*?pos=([-\d.]+),([-\d.]+),([-\d.]+).*?state=(\d+) movie=(\d+) zone=(\S+)", log):
@@ -152,8 +167,9 @@ def main():
     p.add_argument("--pairs", type=int, default=3)
     p.add_argument("--capture", action="store_true", help="Functional screenshots only; not a benchmark")
     p.add_argument("--timing", action="store_true", help="Intrusive section timing; not an FPS benchmark")
-    p.add_argument("--compare", choices=("grouping", "alpha", "scaler", "scale", "countdown", "vu1", "vu1-inline"), default="grouping",
+    p.add_argument("--compare", choices=("grouping", "alpha", "scaler", "scale", "countdown", "vu1", "vu1-inline", "logic-rate"), default="grouping",
                    help="vu1 compares binaries; vu1-inline uses one binary and forces JIT-only in both variants")
+    p.add_argument("--logic-fps", type=int, choices=(120, 240), default=120, help="Experimental candidate for --compare logic-rate; reference is original 60 Hz")
     p.add_argument("--task-capture", action="store_true", help="Intrusive, bounded VU1 task recording for exact input replay; not an FPS benchmark")
     p.add_argument("--scene", help="Scene contract from the selected game's diagnostics.scenes profile")
     p.add_argument("--grouping", type=int, choices=(0, 1), default=0, help="Fixed grouping for alpha/scaler comparisons")
@@ -171,6 +187,8 @@ def main():
     scene = profile.get("diagnostics", {}).get("scenes", {}).get(a.scene) if a.scene else None
     if a.scene and not scene:
         p.error("Unknown profile scene")
+    if a.compare == "logic-rate" and scene and "frame_begin" in scene:
+        p.error("Logic-rate comparisons require real-time input/windows, not equal frame numbers")
     if scene and "frame_begin" in scene:
         begin, end = scene["frame_begin"], scene.get("frame_end", 0)
         if not (0 <= begin < end <= 1000000 and end - begin <= 4096):
@@ -190,6 +208,7 @@ def main():
               "scope": "Audio enabled, private blank cards. Recorded binary identities, profile input; scene bounds are checked when selected, animation is not a frame-identical replay. Percentiles are medians of complete-window percentiles, not pooled percentiles.",
               "visible": not a.hidden,
               "compare": a.compare, "gpu_samples": a.gpu_samples, "jit_only": a.compare == "vu1-inline",
+              "logic_fps": a.logic_fps if a.compare == "logic-rate" else None,
               "scene": a.scene, "scene_contract": scene,
               "seconds": a.seconds, "warmup": a.warmup, "runs": []}
     original_saves = save_inventory(root / "data" / a.game, elf.parent)
@@ -231,6 +250,10 @@ def main():
             # Isolate the JIT adapter in both variants; hybrid arrival may use only AOT.
             # This comparison is not the shipped hybrid configuration.
             env.update(GOW_VU1X_CHAIN_INLINE=str(variant), GOW_VU1X_ONLY="1", GOW_GS_ALPHA_PRUNE="0", GOW_FINISH_COUNTDOWN="0")
+        if a.compare == "logic-rate":
+            env.update(GOW_EXPERIMENTAL_LOGIC_FPS=str(a.logic_fps if variant else 60),
+                       GOW_DELTA_DIAG="1", TOBIICHI_VENTANA_FPS=str(a.logic_fps),
+                       GOW_GS_ALPHA_PRUNE="0", GOW_FINISH_COUNTDOWN="0")
         if scene:
             if "frame_begin" in scene:
                 env.update(GOW_TEST_FRAME_BEGIN=str(scene["frame_begin"]), GOW_TEST_FRAME_END=str(scene["frame_end"]))
@@ -341,6 +364,11 @@ def main():
             checks["effective_jit_only"] = "[vu1x] JIT-only validation: AOT registry cleared" in log
         if a.compare == "countdown":
             checks["effective_countdown"] = f"[gow-finish-wait] countdown={variant}" in log
+        if a.compare == "logic-rate":
+            stats["logic_fps"] = a.logic_fps if variant else 60
+            stats["simulation_speed"] = logic_speed_summary(log, warmup)
+            checks["effective_logic_rate"] = f"[gow-logic-config] fps={stats['logic_fps']} experimental={variant} vblank=60" in log
+            checks["speed_windows"] = stats["simulation_speed"]["windows"] >= 3
         if scene:
             checks["same_scene"] = same_scene([r["scene"] for r in report["runs"]] + [stats["scene"]], scene["position_tolerance"], scene.get("zones"), scene.get("states", [11]))
         if scene and "trajectory_tolerance" in scene:
