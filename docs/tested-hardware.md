@@ -1290,3 +1290,19 @@ validation remain open. Evidence: `data/experiments/audit-20261105/` and
 `data/gow1/logs/session-game-20261105-{180405,180745}`. Candidate SHA-256:
 `fb7c21ac35ebc7f1c1cecb073186a399bb4fe236a6e47addf731dc205064b045`.
 The active build root was restored to `C:/gow-q59` after testing.
+
+## 2026-11-05 - bounded audio trace follow-up
+
+Same Xeon/RX 580 target. Patch 78 and its shutdown flush passed the full build and
+verify (18 CTest groups, VU1 differential/replay checks). A 120-second visible
+normal-boot session passed all 12 functional gates, including complete bounded
+audio trace. Startup still lacked 6605 stereo frames; the transition lacked 1340.
+The latter records continued but insufficient production, no reset, and <=1 us
+acquisition in its deficit events. This is diagnostic evidence, not an improvement
+in FPS or audible-quality acceptance. The earlier destructor-only trace failed
+completeness and remains preserved. See [AUDIO-01 details](research/audio-transition-2026-11-05.md).
+
+The regional overlay mismatch was traced to using newer USA sources: reconstructing
+the exact historical pre-overlay baseline reproduced all stored hashes and both
+overlays passed. No regional runner was rebuilt or gameplay revalidated. Strict
+hash checks remain unchanged. Intel/NVIDIA and weaker machines remain untested.

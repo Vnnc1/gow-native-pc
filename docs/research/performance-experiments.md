@@ -249,3 +249,22 @@ recorded 6605 startup and 1036 transition missing audio frames. Captures are not
 the sole cause. A later gameplay window was 57.18 guest Hz / p99 35.263 ms; no
 stable-60 or audio-quality acceptance. Preserve both runs without attributing the
 variation to any patch. The active PGO runner remains selected after testing.
+
+## AUDIO-01 — local FMV-to-game undersupply investigation (2026-11-05)
+
+Continuation of AUDIT-01, authorized by the maintainer. New measurement: patch 78
+adds opt-in bounded output events (reset generation, producer publication count/
+age, callback deficit/gap and mutex/drain duration). No buffer size or playback
+rate change. The previous five-second audio windows could not distinguish these
+mechanisms; the new event timestamps are the reason for repeating this route.
+Use the same isolated unprofiled runner settings, private card, normal boot,
+2x/FXAA/early FINISH and audio, without captures or simultaneous compilation.
+This is diagnostic work, not an FPS benchmark. Preserve overflow/failed-exit cases.
+Evidence: `data/experiments/audio-transition-20261105/` and
+[complete results](audio-transition-2026-11-05.md). The first destructor-only trace
+failed completeness because normal exit uses `_Exit`; preserved, not accepted.
+Explicit shutdown flush then passed all 12 smoke gates in a 120-second visible run.
+The complete trace recorded 6605 startup and 1340 transition missing stereo frames.
+Transition deficits had no reset, acquisition <=1 us and producer age <=95 us:
+publication continued but supplied only 320 frames across the observed 30.132 ms
+endpoint interval. Upstream cause remains open; no audio-policy or FPS gain claim.

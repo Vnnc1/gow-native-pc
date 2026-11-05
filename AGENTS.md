@@ -145,6 +145,11 @@ GS raster shader links and releases temporary shader objects; `gow_shader_progra
 injects creation/compile/link failures in verify. Patch 77 resets audio resampling
 phase with its output queue; `gow_sound_regression` checks reset/fresh-stream parity.
 Neither patch establishes a gameplay FPS or audio-dropout improvement.
+Patch 78 adds bounded `GOW_AUDIO_TRACE=1` events for transition diagnosis. Normal
+`main` uses `_Exit`, so flush explicitly after joining the producer and stopping
+audio; a destructor alone is insufficient. Dumps must remain outside callbacks.
+`session-game-smoke.py --audio-trace` rejects missing end markers or overflow.
+Event `t_us` is relative to the begin marker; collector dump time is not event time.
 
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
 identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card

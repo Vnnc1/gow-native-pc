@@ -28,6 +28,7 @@ parser.add_argument("--frame-pc", help="Validated guest frame probe for the expl
 parser.add_argument("--normal-boot", action="store_true", help="Exercise the original startup and FMV path")
 parser.add_argument("--skip-fmv", action="store_true", help="Skip movies independently of fast boot, for transition isolation")
 parser.add_argument("--movie-diag", action="store_true", help="Collect bounded movie-state diagnostics; not a benchmark")
+parser.add_argument("--audio-trace", action="store_true", help="Trace bounded audio supply/underrun events; not a benchmark")
 parser.add_argument("--host-fps", type=int, choices=(60, 120), default=60, help="Host presentation cap for matched diagnostic runs")
 parser.add_argument("--pad-script", help="Override scripted input for regional menu conventions")
 parser.add_argument("--scale", type=int, choices=range(1, 9), default=1, help="GS internal resolution multiplier")
@@ -67,7 +68,7 @@ session.mkdir()
 (session / "session.json").write_text(json.dumps({"schema": 1, "id": output.name, "state": "prepared", "settings": {
     "test": "scripted input, private card, audio enabled", "visible": args.visible,
     "normal_boot": args.normal_boot, "skip_fmv": args.skip_fmv or not args.normal_boot,
-    "movie_diag": args.movie_diag, "host_fps": args.host_fps, "elf_name": Path(elf).name,
+    "movie_diag": args.movie_diag, "audio_trace": args.audio_trace, "host_fps": args.host_fps, "elf_name": Path(elf).name,
     "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
     "elf_sha256": hashlib.sha256(Path(elf).read_bytes()).hexdigest(),
     "scale": args.scale, "early_finish": args.early_finish, "fxaa": args.fxaa,
@@ -92,6 +93,8 @@ if args.skip_fmv:
     env["GOW_SKIP_FMV"] = "1"
 if args.movie_diag:
     env["GOW_MPEG_DIAG"] = "1"
+if args.audio_trace:
+    env["GOW_AUDIO_TRACE"] = "1"
 if args.texture_pack:
     env["GOW_TEXTURE_PACK"] = str(args.texture_pack.resolve())
     env["GOW_TEXTURE_PACK_STATS"] = "1"
@@ -129,6 +132,13 @@ checks = {"exit_zero": meta["exit_code"] == 0, "gameplay": bool(re.search(r"stat
           "jit_metrics": any(r.get("tag") == "vu1x" and "compiled" in r.get("values", {}) for r in metrics),
           "player_marker": any(r.get("type") == "player_marker" for r in events),
           "graceful_stop": not any(r.get("type") == "forced_termination" for r in events)}
+if args.audio_trace:
+    trace = [r.get("values", {}) for r in metrics if r.get("tag") == "gow-audio-trace"]
+    starts = [r for r in trace if r.get("begin") == 1]
+    ends = [r for r in trace if r.get("end") == 1]
+    checks["audio_trace_complete"] = bool(starts) and len(starts) == len(ends) and all(
+        r.get("overflow") == 0 for r in ends) and sum(r.get("events", 0) for r in ends) == sum(
+        "kind" in r for r in trace)
 if args.texture_cache:
     cache = [dict((key, int(value)) for key, value in re.findall(r"(\w+)=(\d+)", line))
              for line in log.splitlines() if "[gs-cache]" in line]

@@ -1,5 +1,6 @@
 // Standalone deterministic mixer tests; link the patched runtime's sound_engine.cpp.
 #include "sound_engine.h"
+#include "sound_output_trace.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +8,40 @@
 using ps2x::iop::detail::SoundEngine;
 static void require(bool ok, const char *message) { if (!ok) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); } }
 int main() {
+  {
+    ps2x::iop::detail::SoundOutputTrace trace;
+    trace.reset(0,0);
+    trace.publish(100,64);
+    trace.drained(120,150,180,64,80,64);
+    require(trace.count==2 && trace.events[1].kind==1,"trace records a missing-frame event");
+    const auto &event=trace.events[1];
+    require(event.requested-event.produced==16 && event.wait==30 && event.drain==30,
+            "trace separates deficit, mutex wait and drain time");
+    require(event.producerKnown && event.producerAge==50 && event.lastBatch==64 &&
+            event.resets==1 && event.publications==1 && event.totalPublished==64,
+            "trace captures production and reset identity");
+    trace.drained(200,200,210,16,4,4);
+    require(trace.count==2,"healthy callbacks do not fill the bounded trace");
+    trace.drained(1200,2250,2260,12,4,4);
+    require(trace.events[2].kind==2 && trace.events[2].callbackGap==1000 && trace.events[2].wait==1050,
+            "trace records callback gap separately from contention");
+    trace.reset(2300,8);
+    trace.drained(2400,2400,2410,0,4,0);
+    require(trace.events[3].available==8 && trace.events[4].resets==2 &&
+            !trace.events[4].producerKnown && trace.events[4].totalPublished==64,
+            "reset invalidates producer age without losing lifetime production count");
+    const size_t before=trace.count;
+    for (size_t i=0;i<trace.Capacity;++i) trace.drained(3000+i*3,3000+i*3,3001+i*3,0,1,0);
+    require(trace.count==trace.Capacity && trace.overflow==before,"trace capacity and overflow are explicit");
+    std::FILE *traceFile=std::tmpfile();
+    require(traceFile!=nullptr,"trace test temporary output");
+    trace.dump(traceFile);
+    const long traceBytes=std::ftell(traceFile);
+    trace.dump(traceFile);
+    require(traceBytes>0 && std::ftell(traceFile)==traceBytes,"explicit shutdown and destructor dump are idempotent");
+    std::fclose(traceFile);
+    std::puts("PASS: bounded audio trace, reset/publication identity and separate wait/underrun timing");
+  }
   // Reset after drift compensation must discard the previous stream's fractional sample position.
   {
     SoundEngine reused, fresh;

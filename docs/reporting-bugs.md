@@ -127,6 +127,26 @@ overlap other scoped times and must not be added to VU/GS buckets as frame time.
 Detailed runs diagnose bottlenecks; compare FPS separately with diagnostics off.
 The collector retains these records and the explicit stage-spin/chunk-limit values
 without changing the report file allowlist.
+
+# Developer audio trace
+
+For developer-only audio transition diagnosis, patch 78 enables `GOW_AUDIO_TRACE=1`
+(`session-game-smoke.py --audio-trace`). It stores up to 512 events per sound engine
+and emits `[gow-audio-trace]` records after audio shutdown. Normal playback does not
+enable it. `kind=0` is a reset (available frames discarded), `kind=1` a partial/empty
+drain, and `kind=2` an acquisition or drain lasting at least 1 ms. Reset/publication
+counters and `total_published` are lifetime totals for that engine.
+For drain events, `available` is the queue after latency trimming; `total_published`
+also includes samples later discarded by queue limits or reset.
+
+Use each event's `t_us`, relative to its `begin=1` marker, for event timing: the
+collector's `elapsed_ms` on dumped events is their late emission time. Acquisition
+`wait_us` includes thread scheduling as well as mutex acquisition; `drain_us` includes
+existing audio-stat logging when enabled. Neither is pure CPU execution time.
+`producer_age_us` is valid only when `producer_known=1`. Require matching begin/end
+markers, zero overflow and complete event counts; forced termination can lose the
+trace. These diagnostics do not establish clean FPS or audible quality.
+
 # Private diagnostic kit
 
 `gow-diagnostics` is a separate Windows frontend for a precompiled test runner.
