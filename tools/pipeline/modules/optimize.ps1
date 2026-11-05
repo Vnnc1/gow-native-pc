@@ -2,8 +2,8 @@
 # An instrumented copy of the game (its own build folder) plays the [optimize] pad script with the hardware renderer and
 # the sound path running, like a player, but hidden and silent (GOW_WINDOW_HIDDEN, engine/patches/15; GOW_AUDIO=0 with
 # GOW_AUDIO_PCM=NUL keeps the audio stream paced at volume 0); closing its window writes the profile (engine/patches/12),
-# which is merged into gow.profdata and used by every later clang build. A new recompile leaves it partly stale (those
-# functions are just not profiled).
+# which is merged into gow.profdata and used by later clang builds with a matching manifest. Unmatched profiles stay
+# on disk but are not applied automatically; a fitting shipped profile or new training restores PGO.
 # A launcher update that changed the runtime patches marks the profile stale (data\pgo-stale.txt, tools/pipeline/update.ps1;
 # the launcher then recommends this step again). A new profile clears it when it was trained on the current runtime: this
 # run fetched it, or no rebuild after an update is pending.

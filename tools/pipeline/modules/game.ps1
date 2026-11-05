@@ -40,8 +40,10 @@ function Get-ProfileIdentity {
 # $true when the manifest's identity is this installation's (no prepared disc yet: $false)
 function Test-ProfileManifest([string]$manifest) {
     if (-not (Test-Path $manifest)) { return $false }
-    try { $id = Get-ProfileIdentity } catch { return $false }
-    $m = Get-Content $manifest -Raw | ConvertFrom-Json
+    try {
+        $id = Get-ProfileIdentity
+        $m = Get-Content $manifest -Raw | ConvertFrom-Json
+    } catch { return $false }
     return ($m.runtime -eq $id.runtime) -and ($m.patches -eq $id.patches) -and ($m.game -eq $id.game) -and ($m.code -eq $id.code)
 }
 function Write-ProfileManifest([string]$source) {
@@ -69,9 +71,18 @@ function Use-ReleaseProfile {
 # glob (recorded microcode, runtime and IOP native sources) changes. The only configure-time input outside those is whether
 # vu1n_heads.txt exists (the VU1 generator rule depends on it only then). The explicit configure stage always runs.
 function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip) {
+    $script:configuredGameProfile = $null
     Use-Toolchain
     Need (Join-Path $rec 'CMakeLists.txt') 'runtime (run the fetch stage)'
-    if ($dir -eq $bld -and $pgo -eq 'auto') { [void](Use-ReleaseProfile) }
+    $profileReady = $false
+    if ($pgo -eq 'auto') {
+        $profileReady = if ($dir -eq $bld) { Use-ReleaseProfile } else {
+            (Test-Path $pgoProfile) -and (Test-ProfileManifest "$pgoProfile.json")
+        }
+        if (-not $profileReady -and (Test-Path $pgoProfile)) {
+            Write-Host '@@status local PGO profile has no matching manifest; building without it (profile preserved)'
+        }
+    }
     $ltcgValue = if ($Ltcg) { 'ON' } else { 'OFF' }
     $pdbValue = if ($Pdb) { 'ON' } else { 'OFF' }
     $extra = @()
@@ -112,7 +123,7 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
         # Keep the configuration's -O3 here. A -O1 training build (2.2x faster to compile) gave a profile whose final
         # build was measured slower: 45.0 vs 49.7 FPS mean on the save route, 3 of 3 alternating pairs (2026-10-30).
     }
-    elseif ($pgo -eq 'auto' -and (Test-Path $pgoProfile)) {
+    elseif ($profileReady) {
         $profileHash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash
         Write-Host "profile-guided: $pgoProfile ($profileHash)"
         # The digest changes Ninja commands and cache keys when the same profile path gets new contents.
@@ -138,6 +149,7 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
     }
     $cmakeArgs = @('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
+        '-DPS2X_ENABLE_FFMPEG=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
         "-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=$(if ($prof.build -and $prof.build.unity_batch -and $ramGb -ge 14) { $prof.build.unity_batch } else { 8 })") + $extra
     $sigFile = Join-Path $dir 'gow-configure.sig'
@@ -145,14 +157,18 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
     $sha = [Security.Cryptography.SHA256]::Create()
     $sig = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sigText))) -replace '-', '').ToLower()
     $sha.Dispose()
+    $configuredProfile = [ordered]@{buildRoot=$dir; mode=$(if ($pgo -eq 'generate') { 'generate' } elseif ($profileReady) { 'use' } else { 'off' });
+        pgoApplied=[bool]$profileReady; appliedPgoHash=$(if ($profileReady) { $profileHash } else { $null })}
     if ($MaySkip -and (Test-Path (Join-Path $dir 'build.ninja')) -and (Test-Path (Join-Path $dir 'CMakeCache.txt')) -and
         (Test-Path $sigFile) -and ((Get-Content $sigFile -Raw).Trim() -eq $sig)) {
         Write-Host 'cmake configure: inputs unchanged, skipped (Ninja re-runs CMake itself when CMake files or globbed sources change)'
+        $script:configuredGameProfile = $configuredProfile
         return
     }
     Remove-Item $sigFile -ErrorAction SilentlyContinue # a failed configure must not leave the old signature behind
     Native 'cmake' $cmakeArgs 'cmake configure'
     [IO.File]::WriteAllText($sigFile, $sig)
+    $script:configuredGameProfile = $configuredProfile
 }
 if ($Stages -contains 'configure') { Step "configure ($Config, $bld)"; Configure }
 
@@ -181,6 +197,7 @@ function Build-Game([string]$dir = $bld) {
     Need (Join-Path $dir 'CMakeCache.txt') 'configured build folder (run the configure stage)'
     $profileMode = if ($dir -eq "$bld-pgogen") { 'generate' } else { 'auto' }
     Configure $dir $profileMode -MaySkip
+    $buildProfile = $script:configuredGameProfile
     $log = Join-Path $logs 'build.log'
     Write-Host "$jobs compilers in parallel"
     $ErrorActionPreference = 'Continue'
@@ -204,6 +221,7 @@ function Build-Game([string]$dir = $bld) {
     $ErrorActionPreference = 'Stop'
     if ($profileMode -ne 'generate') { Write-CompilerCacheStats 'game' }
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
+    if ($null -ne $buildProfile) { $script:gameBuildProfiles.Add($buildProfile) }
     if ($dir -eq $bld) {
         [IO.File]::WriteAllText($toolchainFile, 'clang')
         [IO.File]::WriteAllText($buildRootFile, $BuildRoot)

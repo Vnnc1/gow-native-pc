@@ -224,3 +224,28 @@ The 150-second skip run reaches combat but fails graceful shutdown (collector
 forced termination), so it is not a passing full smoke. Preserve this failure.
 No post-intro root cause or hardware compatibility fix established; no runtime
 or default changed. The affected runner is unavailable per maintainer reply.
+
+## AUDIT-01 — source, build and audio correctness (2026-11-05)
+
+[System audit](system-audit-2026-11-05.md): patches 76/77 fix shader lifecycle/link
+failure handling and stale fractional audio phase after reset. Launcher reset,
+PGO eligibility/provenance and persisted FFmpeg configuration were corrected.
+Full fetch/verify passed, including 18 CTest groups and VU1 equivalence. Release
+game and launcher built; old/new real-GL fixtures match in seven 384-frame variants.
+No experimental renderer default was promoted and no FPS gain is claimed.
+
+The 150-second normal-boot, 2x/FXAA/early-FINISH/audio smoke passed 11 functional
+gates and inspected menu/ship captures. It still recorded missing audio frames:
+7085 in the startup window ending 7.702 s and 1646 in the transition window ending
+87.702 s. Capture occurred at 83.610 s; correlation does not establish cause.
+Repeat the same functional route without captures to test that specific diagnostic
+cost. This is not a clean performance benchmark or an acceptance of audio quality.
+The new runner has no matched PGO; never compare it as a performance A/B against
+the preserved PGO executable. Detailed evidence and follow-up results stay in
+the linked audit and ignored `data/experiments/audit-20261105/`.
+
+Follow-up completed: the no-capture route also passed all functional gates but
+recorded 6605 startup and 1036 transition missing audio frames. Captures are not
+the sole cause. A later gameplay window was 57.18 guest Hz / p99 35.263 ms; no
+stable-60 or audio-quality acceptance. Preserve both runs without attributing the
+variation to any patch. The active PGO runner remains selected after testing.

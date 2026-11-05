@@ -1258,3 +1258,35 @@ showed 59.994→59.832 FPS, 323.733→322.047% one-core CPU and
 Defaults remain off. Longer displaced-scene comparisons and stale exit metadata
 remain recorded as invalid/incomplete evidence. No weaker-hardware acceptance.
 See [methods, artifacts and decisions](research/patch66-67-rx580-2026-11-04.md).
+
+
+## 2026-11-05 ? system audit and shader/audio correctness
+
+Xeon E5-2666 v3, approximately 16 GiB RAM, RX 580 2048SP driver
+31.0.21924.61. [Full audit](research/system-audit-2026-11-05.md) records source
+findings, official vendor-tool limits, patches 76/77, PGO/default corrections
+and remaining acceptance work. No new FPS improvement is claimed.
+
+Complete fetch/verify passed (18 CTest groups, guest-call/codegen and VU1
+backend/self-loop/task checks). Release game and launcher built; old/new real-GL
+fixtures matched all seven variants x 384 color frames. The available old PGO
+profile was rejected, so this runner is unprofiled and cannot be compared as a
+performance A/B with the preserved PGO executable. Reused-environment sync/build/
+launcher took 706.974 s, not a cold installation result.
+
+Two visible 150-second normal-boot, 2x/FXAA/early-FINISH/audio sessions passed
+all 11 functional smoke gates, with private cards and graceful exit zero.
+Menu and ship captures were inspected. Audio missing-frame observations remain:
+7085 startup + 1646 transition with captures; 6605 + 1036 without captures.
+The transition issue therefore persists without capture, and no audible-quality
+or stable-60 acceptance is established. A later window reached only 57.18 guest
+Hz (p99 35.263 ms) in the no-capture functional run. Do not attribute that result
+to a patch without a controlled reference.
+
+Regional registration/launcher ownership tests passed, but Japan/Europe overlay
+source-baseline checks failed; their hashes were not weakened. Physical Intel,
+NVIDIA, weak-PC sustained combat, subjective sound and clean-install <20-minute
+validation remain open. Evidence: `data/experiments/audit-20261105/` and
+`data/gow1/logs/session-game-20261105-{180405,180745}`. Candidate SHA-256:
+`fb7c21ac35ebc7f1c1cecb073186a399bb4fe236a6e47addf731dc205064b045`.
+The active build root was restored to `C:/gow-q59` after testing.

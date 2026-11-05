@@ -82,6 +82,26 @@ Item {
         onTriggered: {
             try {
                 check(page.listo, "registered installations must be playable")
+                var settings = page.ajustesGuardados
+                var defaults = {}
+                var resetKeys = ["filtro", "nitidez", "fxaa", "anisotropico", "resolucionInterna",
+                    "fpsLimite", "vsync", "mostrarFps", "saltarVideos", "finAnticipado", "vuRapida",
+                    "diagnostics", "autoNative", "usarPacoteTexturas"]
+                for (var key of resetKeys) defaults[key] = settings[key]
+                settings.filtro = "fsr"
+                settings.anisotropico = "16"
+                settings.fpsLimite = 240
+                settings.saltarVideos = true
+                settings.finAnticipado = false
+                settings.vuRapida = true
+                settings.diagnostics = true
+                settings.autoNative = true
+                settings.usarPacoteTexturas = true
+                settings.pacoteTexturas = "/private/textures"
+                page.restablecer()
+                for (var key of resetKeys)
+                    check(settings[key] === defaults[key], "reset differs from first launch: " + key)
+                check(settings.pacoteTexturas === "/private/textures", "reset must preserve file paths")
                 for (var region of ["europe", "japan"]) {
                     page.ajustesGuardados.textoJuego = "region:" + region
                     page.jugar()

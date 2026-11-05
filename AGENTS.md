@@ -139,6 +139,13 @@ see GPU-02 in the performance ledger before extending its performance claims.
 
 ## Player diagnostic reports
 
+The 2026-11-05 [system audit](docs/research/system-audit-2026-11-05.md) records
+confirmed defects, test failures and vendor-tool limitations. Patch 76 validates
+GS raster shader links and releases temporary shader objects; `gow_shader_program_tests`
+injects creation/compile/link failures in verify. Patch 77 resets audio resampling
+phase with its output queue; `gow_sound_regression` checks reset/fresh-stream parity.
+Neither patch establishes a gameplay FPS or audio-dropout improvement.
+
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
 identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
 per session, and invokes the same detached collector. `tools/pipeline/package_diagnostics.py` packages it with
@@ -340,6 +347,8 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
   without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
   holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
+  Automatic configure also rejects missing, malformed or mismatched manifests; without a matching shipped profile,
+  it preserves the rejected local profile and configures without PGO. Never silently reuse stale optimization data.
 - Texture packs (runtime patch 52): PCSX2's replacement names, so PCSX2 packs work unchanged; the name code mirrors
   `GSTextureCache::HashCacheKey` (blocks or unswizzled rows, 32-bit palette, PSM/TW/TH/TEXA bits). Never commit or ship
   packs, dumps or screenshots of them. `GOW_TEX_PCSX2_NAMES=<file>` lists the names a session draws.

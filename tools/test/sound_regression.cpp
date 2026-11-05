@@ -7,6 +7,34 @@
 using ps2x::iop::detail::SoundEngine;
 static void require(bool ok, const char *message) { if (!ok) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); } }
 int main() {
+  // Reset after drift compensation must discard the previous stream's fractional sample position.
+  {
+    SoundEngine reused, fresh;
+    reused.advanceTo(200 * SoundEngine::CyclesPerSample);
+    std::array<int16_t,20> sink{};
+    require(reused.drainOutput(sink.data(),10,100)==10,"drift compensation drains ten frames");
+    require(reused.pendingFrames()==190,"1.05x playback leaves a half-frame phase");
+    reused.reset();
+    for (SoundEngine *sound : {&reused, &fresh}) {
+        std::array<unsigned char,16> block{};
+        block[1]=3;
+        for (size_t i=2;i<block.size();++i) block[i]=static_cast<unsigned char>(i);
+        sound->writeSampleRam(0,block.data(),block.size());
+        sound->setParam(0x900,0x3fff); sound->setParam(0xa00,0x3fff);
+        sound->setSwitch(0x1800,1); sound->setSwitch(0x1a00,1);
+        sound->setParam(0,0x3fff); sound->setParam(0x100,0x3fff);
+        sound->setParam(0x200,0x1000); sound->setParam(0x300,0xf);
+        sound->setSwitch(0x1500,1);
+        sound->advanceTo(64 * SoundEngine::CyclesPerSample);
+    }
+    std::array<int16_t,128> actual{}, expected{};
+    const auto count = reused.drainOutput(actual.data(),64);
+    require(fresh.drainOutput(expected.data(),64)==64,"fresh stream drains every frame");
+    require(count==64,"reset must clear fractional resampling phase");
+    require(actual==expected,"reset output must equal a fresh engine sample for sample");
+    require(reused.pendingFrames()==0,"reset stream leaves no stale interpolation frame");
+    std::puts("PASS: reset after fractional drift compensation matches a fresh stream");
+  }
   for (bool negative : {false,true}) {
   for (unsigned voices=1;voices<=24;++voices) {
     SoundEngine sound;
