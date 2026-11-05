@@ -75,7 +75,100 @@ One-frame publications do not identify which register/stream access flushed the
 mixer. The next discriminating measurement is producer-side attribution around
 low queue occupancy: granted cycles, soundBase, totalCycles, pending IOP cycles
 and flush reason, correlated with producer-thread sampling near the transition.
-This has not been implemented or measured. No speculative patch 79 was added.
+The subsequent patch-79 measurement below implements attribution only.
+
+## Producer attribution (patch 79)
+
+Patch 79 reuses the bounded buffer and records the last publication's IOP context
+and lifetime frames per flush reason. Pending producer state is never read by the
+callback. Reset invalidates the context. The default path adds a call/null check
+and reason arguments, not clocks, allocations or logging; its overhead is unmeasured.
+Full fetch/build/verify passed, including 18 CTest groups and VU1 comparisons/replay.
+
+The unsampled 120-second normal-boot run passed all 12 gates:
+`data/gow1/logs/session-game-20261105-190345`. Candidate SHA-256:
+`c3596a1e1a08ce8945312eac7f33c53b9d7f46da0345646879ecc44541e117a3`.
+There were 54 events, zero overflow and six resets, all before playback. Nine
+transition deficit events totaled 1570 missing stereo frames, with acquisition
+0-1 us. Across the first/last deficit timestamps (81.042413-81.081832 s),
+publication increased by 395 frames; every added frame was attributed to
+`streamPosition` (reason 6). All other reason totals stayed unchanged.
+Granted cycles increased by 303396 (8.230 ms of emulated IOP time) over 39.419 ms
+of host time. Total IOP cycles increased by 1025324; these include work excluded
+from the sound clock by design. This narrows the undersupply to stream-status
+polling and slow granted-clock progress; it is not evidence to remove the clamp.
+
+Artifacts: `data/experiments/audio-producer-20261105/`. A separate sampler run
+is deliberately excluded from any FPS or dropout-rate comparison.
+
+The sampled session `session-game-20261105-190705` also passed all 12 functional
+gates. The six-second sampler window collected 2636 GameThread instruction
+samples, including system waits and clock queries; module offsets were resolved
+against the exact executable's COFF symbols. This broad window is not a timed
+profile of the approximately 40 ms deficit interval, so it does not establish
+that a particular function caused the undersupply. Raw/resolved files remain in
+the experiment directory; no performance comparison uses this run.
+
+### Tail-loop coverage gap
+
+The generated USA movie routine at `0x189790` calls audio refill `0x189A88`
+(return address `0x18979C`), then queue-drain check `0x26CE98`, and loops until
+ready. Refill reaches `0x188380` -> `0x188688` -> `0x26C900` -> command `0x40`
+-> native stream-position query. The queue check reads `0x30A440`; the VBlank
+handler at `0x26CF20` decrements that same queue counter. This loop never calls
+`0x188B80`, whose existing override catches up already-due host events to avoid
+slow emulated-time progress during movies. Thus that correction does not cover
+the final display drain. The targeted candidate reuses the existing catch-up
+only on entry to `0x189A88` from `0x18979C`, capped at one field, before calling
+the original. It does not remove audio flushes or change global sound timing.
+
+The first intended patch-80 smoke (`session-game-20261105-191447`) exposed an
+integration mistake: `fetch,build,verify` tested the new wrapper source but did
+not synchronize profile overrides into the runner's owned source copies. Ninja
+reported no work, and the runner hash remained the patch-79 hash above. The run
+passed 12 gates and recorded 1497 transition missing frames, but is not a patch-80
+test. Its log remains `audio-tail-20261105/candidate-1.log`; the name describes
+the intended role, not the actual binary. Follow-up uses `sync,build` and checks
+the changed runner identity before gameplay. The source/runtime tests already
+passed; this failure demonstrates why they do not substitute for artifact checks.
+
+After synchronization exactly one `.cpp` changed, with no header changes/removals.
+The compiled override matches its source SHA-256
+`66fe9b35317f71d4d0ca0a05931e53091f927389d8e1056738540aad28fce97e`.
+The actual patch-80 runner is
+`ab55a7220205c72c61b265e460969110249af671e7bbab4edaf3794f056d86e1`.
+Its first unsampled 120-second run (`session-game-20261105-191947`) passed all
+12 gates and recorded zero post-startup deficits, including the movie transition.
+Startup still had 7437 missing stereo frames. The trace was complete (40 events,
+zero overflow). This is a local transition result, not a whole-game audio or FPS
+acceptance; the repeat below checks local repeatability.
+
+The second identical unsampled run (`session-game-20261105-192231`) also passed
+12/12 gates and recorded zero post-startup missing frames (36 trace events,
+zero overflow). Startup had 7085 missing frames. Both patch-80 runs reached
+gameplay and exited normally; no profiler, captures or concurrent compiler ran.
+
+| Actual runner | Session suffix | Transition missing stereo frames | Startup missing frames |
+| --- | --- | ---: | ---: |
+| Patch 79 | 190345 | 1570 | 9005 |
+| Patch 79 (stale intended candidate) | 191447 | 1497 | 7565 |
+| Patch 80, synchronized | 191947 | 0 | 7437 |
+| Patch 80, synchronized repeat | 192231 | 0 | 7085 |
+
+These are two reference runs followed by two candidate runs, not randomized
+performance pairs. The supported claim is elimination of the observed transition
+underrun in these two local runs. Startup undersupply, whole-game audible quality,
+other movies/regions, Intel/NVIDIA and weak-PC frame pacing remain unvalidated.
+The correction is registered by default for normal USA movie playback; it requires
+a matching synchronized runner and no player diagnostic flag. The installed PGO
+runner remains selected while this unprofiled candidate stays isolated.
+
+A separate 100-second visual run (`session-game-20261105-192513`, captures on)
+passed all 12 gates. The menu and ship images were inspected: expected menu text,
+Kratos, ship geometry and scene were present. It also recorded zero post-startup
+missing frames and 7085 startup missing frames. Captures make this a separate
+functional check, not a performance reference or a whole-game visual-equivalence
+claim. Images stay in ignored local data and are not packaged.
 
 ## Regional baseline clarification
 

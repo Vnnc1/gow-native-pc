@@ -147,6 +147,20 @@ existing audio-stat logging when enabled. Neither is pure CPU execution time.
 markers, zero overflow and complete event counts; forced termination can lose the
 trace. These diagnostics do not establish clean FPS or audible quality.
 
+Patch 79 adds `grant_cycles`, `sound_base`, `total_cycles`, `run_grant` and
+`pending_iop`: the producer's last service snapshot before the recorded publication,
+not scheduler values at callback time. Context is invalid after reset until the
+next publication (`producer_known=1`). `reason` identifies that publication:
+0 batch, 1 explicit flush, 2 other register read, 3 register write, 4 sample RAM,
+5 stream change, 6 stream position, 7 stream-half check, 8 envelope read,
+9 other parameter read. `frames_*` are cumulative published stereo frames by reason,
+not call counts or CPU timings. Their sum equals `total_published`, including frames
+later discarded. Default audio timing and buffering are unchanged.
+`pending_iop` is normally zero because the scheduling batch clears it before
+running the IOP; zero does not exclude a lack of upstream EE progress. Disabled
+tracing still adds a call/null check and reason arguments, but no trace clocks,
+allocation or logging.
+
 # Private diagnostic kit
 
 `gow-diagnostics` is a separate Windows frontend for a precompiled test runner.

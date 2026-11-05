@@ -268,3 +268,31 @@ The complete trace recorded 6605 startup and 1340 transition missing stereo fram
 Transition deficits had no reset, acquisition <=1 us and producer age <=95 us:
 publication continued but supplied only 320 frames across the observed 30.132 ms
 endpoint interval. Upstream cause remains open; no audio-policy or FPS gain claim.
+
+Producer-attribution follow-up: the new measurement adds publication reasons and
+the last publication's IOP grant/clock snapshot to the existing bounded trace.
+This addresses the missing distinction between one-frame flush causes and
+insufficient granted emulated time; it justifies another identical route under
+AUDIO-01. Keep any native-sampler run separate from the unsampled trace run.
+Reference patch-78 executable is preserved in
+`data/experiments/audio-producer-20261105/reference-78.exe`; results follow below.
+
+Patch 79's unsampled run passed all 12 gates and localized all 395 newly published
+frames over a 39.419 ms deficit interval to stream-position polling. Granted IOP
+time advanced only 8.230 ms. Source inspection found the final display-drain loop
+never reaches the existing movie service's host-deadline catch-up. Patch 80 extends
+that existing mechanism only to the proven USA entry/caller pair, with the same
+one-field cap and no mixer change. Full verify and the new production-wrapper
+fixture passed. Matched unsampled transition comparisons use the preserved
+patch-79 runner and patch-80 candidate, both without PGO; do not use the separate
+sampler run as a performance reference. Evidence: `data/experiments/audio-tail-20261105/`.
+
+Result: after correcting an omitted override synchronization, two patch-80
+120-second visible runs passed 12/12 gates and recorded zero post-startup deficits.
+The two preceding patch-79 references recorded 1570 and 1497 transition missing
+stereo frames. Same settings, no profiler/captures/concurrent builds, no matched PGO.
+This supports the targeted local transition fix, not a gameplay-FPS improvement.
+Startup undersupply remains (7437/7085 missing frames in the candidate runs).
+The initial intended candidate was still patch 79 by hash and is explicitly
+preserved as an integration failure. Full data, hashes and ordering are in the
+linked AUDIO-01 report; other movies/hardware remain open acceptance gates.

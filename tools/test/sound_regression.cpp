@@ -42,6 +42,27 @@ int main() {
     std::fclose(traceFile);
     std::puts("PASS: bounded audio trace, reset/publication identity and separate wait/underrun timing");
   }
+  {
+    ps2x::iop::detail::SoundOutputTrace trace;
+    trace.pendingContext = {1000, 512, 1400, 488, 7};
+    trace.publish(100, 8, static_cast<uint64_t>(SoundEngine::FlushReason::StreamPosition));
+    trace.pendingContext = {2000, 1000, 2500, 1000, 0};
+    trace.drained(120,120,121,8,16,8);
+    require(trace.events[0].context.granted==1000 && trace.events[0].context.soundBase==512 &&
+            trace.events[0].context.totalCycles==1400 && trace.events[0].context.runGrant==488 &&
+            trace.events[0].context.pending==7, "callback sees last publication context, not pending producer state");
+    trace.publish(150, 3, static_cast<uint64_t>(SoundEngine::FlushReason::EnvelopeRead));
+    trace.drained(160,160,161,3,16,3);
+    require(trace.events[1].context.granted==2000 && trace.events[1].reason==8 &&
+            trace.events[1].reasonFrames[6]==8 && trace.events[1].reasonFrames[8]==3 &&
+            trace.events[1].totalPublished==11 && trace.events[0].reasonFrames[8]==0,
+            "publication attribution accumulates frame counts and preserves prior events");
+    trace.reset(170,0);
+    trace.drained(180,180,181,0,16,0);
+    require(!trace.events[3].producerKnown && trace.events[3].context.granted==0 &&
+            trace.events[3].context.totalCycles==0 && trace.events[3].reasonFrames[6]==8,
+            "reset invalidates publication context but keeps lifetime reason totals");
+  }
   // Reset after drift compensation must discard the previous stream's fractional sample position.
   {
     SoundEngine reused, fresh;

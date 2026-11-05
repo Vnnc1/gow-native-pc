@@ -1306,3 +1306,30 @@ The regional overlay mismatch was traced to using newer USA sources: reconstruct
 the exact historical pre-overlay baseline reproduced all stored hashes and both
 overlays passed. No regional runner was rebuilt or gameplay revalidated. Strict
 hash checks remain unchanged. Intel/NVIDIA and weaker machines remain untested.
+
+## 2026-11-05 - movie-tail audio correction
+
+Same Xeon E5-2666 v3 / RX 580 2048SP target. Patch 79 attributed the transition
+undersupply to stream-position polling with slow granted IOP-clock progress.
+Patch 80 extends the existing bounded movie-clock catch-up to the exact USA
+final-display-drain call site. Full verify passed (18 CTest groups, VU1 parity and
+replay), plus a production-wrapper test of caller/entry gates and resume behavior.
+Linux pipeline tests ran on Windows: six passed, one platform-specific skip;
+this is not Linux gameplay validation.
+
+Two unsampled 120-second normal-boot sessions with 2x/FXAA/early FINISH and audio
+passed 12/12 gates and had zero post-startup missing audio frames. The preceding
+patch-79 references had 1570 and 1497 transition missing frames. Startup deficits
+persisted (7437/7085 on the corrected runner). The first intended candidate was
+actually the old executable because overrides had not been synchronized; its
+unchanged hash exposed the failure. `sync,build` changed exactly one source file.
+Corrected runner SHA-256:
+`ab55a7220205c72c61b265e460969110249af671e7bbab4edaf3794f056d86e1`.
+
+This validates the local transition correction, not stable 60 FPS or all-game
+sound quality. The candidate is unprofiled and remains isolated; the normal PGO
+runner stays selected. See [AUDIO-01](research/audio-transition-2026-11-05.md)
+for ordered sessions, artifacts and remaining hardware/movie gates.
+A separate 100-second captured run passed 12/12 gates, with menu/ship captures
+inspected and zero post-startup missing audio frames. It is a functional visual
+check, excluded from performance comparisons.

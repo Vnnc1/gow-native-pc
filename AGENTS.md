@@ -150,6 +150,13 @@ Patch 78 adds bounded `GOW_AUDIO_TRACE=1` events for transition diagnosis. Norma
 audio; a destructor alone is insufficient. Dumps must remain outside callbacks.
 `session-game-smoke.py --audio-trace` rejects missing end markers or overflow.
 Event `t_us` is relative to the begin marker; collector dump time is not event time.
+Patch 79 snapshots producer context only at publication under the output mutex;
+never read producer-only pending context from the callback. Reason totals count
+published audio frames, not call counts or execution time.
+Patch 80 extends movie-clock catch-up only to USA `0x189A88` entered from
+`0x18979C` in the final display-drain loop. Preserve both entry/caller gates,
+the existing one-field cap and original/resume delegation; do not generalize
+this to all sound RPC calls or regional overrides. `movie-tail-tests.py` is in verify.
 
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
 identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
@@ -278,6 +285,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **Runtime code**: edit in `engine/runtime/`, then turn the change into a new `engine/patches/NN-name.patch` (git diff
   in engine/runtime, with a header saying what/why/measured result). Patches apply in order; a later patch may depend
   on an earlier one. Keep each patch to one concern.
+  Changes to the profile's `runtime.overrides` also require `sync,build`: the runner compiles owned copies under
+  `ps2xRuntime/src/runner`, not `engine/runtime/src` directly. A successful `fetch,build` can leave the previous
+  override in the executable. Check synchronization and runner identity before accepting a gameplay comparison.
 - **Moving the patches to a newer runtime commit**: `tools/pipeline/patches.ps1 start -Onto <commit or ref>` turns
   engine/patches into a commit stack (branch gow-patches, worktree engine/runtime-patches) and rebases it with git's
   3-way merge; resolve conflicts there (`git add`, `git rebase --continue`), then `patches.ps1 export` rewrites only the

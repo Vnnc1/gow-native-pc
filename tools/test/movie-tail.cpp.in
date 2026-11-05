@@ -1,0 +1,46 @@
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+struct R5900Context { uint32_t pc = 0; std::array<uint64_t,32> lo{}, hi{}; };
+#define GPR_U32(ctx, i) static_cast<uint32_t>((ctx)->lo[i])
+void require(bool okay) { if (!okay) { std::fputs("FAIL movie-tail wrapper\n", stderr); std::exit(1); } }
+struct EeScheduler {
+    static constexpr uint64_t kEeClockHz = 294912000;
+    unsigned calls = 0;
+    uint64_t cap = 0;
+    void catchUpToHost(uint64_t limit) { ++calls; cap = limit; }
+};
+struct PS2Runtime {
+    EeScheduler scheduler;
+    unsigned original = 0, expectedCatchups = 0;
+    R5900Context before;
+    uint8_t *expectedRam = nullptr;
+    EeScheduler &eeScheduler() { return scheduler; }
+};
+void sub_00189A88_0x189a88(uint8_t *ram, R5900Context *ctx, PS2Runtime *rt) {
+    require(ram == rt->expectedRam && ctx->pc == rt->before.pc &&
+            ctx->lo == rt->before.lo && ctx->hi == rt->before.hi);
+    require(rt->scheduler.calls == rt->expectedCatchups); // catch-up precedes the guest read
+    ++rt->original;
+    ctx->lo[2] = 123;
+    ctx->pc = 0x189AC0; // simulate a guest yield/resume, which the wrapper must preserve
+}
+@WRAPPER@
+int main() {
+    uint8_t ram = 0;
+    for (uint32_t pc : {0x189A88u, 0x189AB8u, 0x189AC0u, 0x189AF8u})
+    for (uint32_t ra : {0x18979Cu, 0x189764u, 0x189500u, 0u}) {
+        R5900Context ctx;
+        ctx.pc = pc;
+        for (unsigned i=0; i<32; ++i) { ctx.lo[i]=0x1234567800000000ULL+i; ctx.hi[i]=0x8765432100000000ULL+i; }
+        ctx.lo[31] = ra;
+        PS2Runtime rt;
+        rt.before = ctx; rt.expectedRam = &ram;
+        rt.expectedCatchups = pc == 0x189A88u && ra == 0x18979Cu;
+        gowMovieTailAudio(&ram, &ctx, &rt);
+        require(rt.original == 1 && ctx.pc == 0x189AC0 && ctx.lo[2] == 123);
+        require(rt.scheduler.cap == (rt.expectedCatchups ? 4915200u : 0u));
+    }
+    std::puts("PASS: movie-tail entry/caller gating, one-field cap, guest registers and resume delegation");
+}

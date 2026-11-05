@@ -7,6 +7,7 @@ if ($Stages -contains 'verify') {
     Native $python @('-I', (Join-Path $root 'tools/test/worker-ab-tests.py')) 'worker comparison methodology tests'
     Native $python @('-I', (Join-Path $root 'tools/test/gs-run-ab-tests.py')) 'GS comparison methodology and save isolation tests'
     Native $python @('-I', (Join-Path $root 'tools/test/finish-countdown-tests.py'), '--runtime', (Join-Path $rec 'ps2xRuntime'), '--compiler', (Join-Path $script:llvmBin 'clang++.exe'), '--output', (Join-Path $logs 'finish-countdown')) 'EE countdown checkpoint equivalence'
+    Native $python @('-I', (Join-Path $root 'tools/test/movie-tail-tests.py'), '--runtime', (Join-Path $rec 'ps2xRuntime'), '--compiler', (Join-Path $script:llvmBin 'clang++.exe'), '--output', (Join-Path $logs 'movie-tail')) 'Movie tail clock catch-up'
     Native $python @('-I', (Join-Path $root 'tools/test/logic-rate-tests.py'), '--runtime', $rt, '--compiler', (Join-Path $script:llvmBin 'clang++.exe'), '--output', (Join-Path $logs 'logic-rate')) 'experimental logic-rate timestep and pacing'
     Native (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
         (Join-Path $root 'tools/test/pipeline-tests.ps1')) 'pipeline configure and process tests'
