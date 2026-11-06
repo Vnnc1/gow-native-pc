@@ -1,0 +1,167 @@
+# 64-gs-frontend-diag: measurement only. GOW_GS_COST=1 (the same switch patch 62 uses) splits the per-vertex GFIFO
+# path - the part of the GS frontend that runs inside XGKICK on the VU1 worker thread - into build / submit / other, and
+# reports how long the producer waits in PublishLocked for the render worker; off by default, one static branch per
+# vertex and per publish while unset.
+#
+# gs_frontend.cpp: [gs-fe] verts/s, build ns (buildDrawBatch: 3 vertices + the draw state), submit ns
+# (updatePreferredDisplaySourceForDraw + gowFogDiagDraw + m_backend->Submit) and other ns, per vertex and per 5 s.
+# gs_threaded_backend.cpp: [gs-pub] publishes/s, waits/s and the blocked / published wall time per 5 s.
+#
+# Measured (i3-4170 + HD 4400, Asia disc, scripted path, 0.5x, VU1 x64 fast, 2 runs per setting, same 5 s windows):
+#   queue depth 8 (default, PS2X_GS_QUEUE_CHUNKS unset): 1400 publishes/s, 1150-1450 of them wait, blocked 567-809 ms
+#   per 5 s, publish 794-923 ms; [gs-fe] build 45-52 ns, submit 407-499 ns, total 1.36-1.45 s per 5 s (0.86-1.24 us
+#   per draw with a large vertexCount). Queue depth 64: blocked 1-89 ms, publish 127-224 ms, build 46-58 ns, submit
+#   198-251 ns, total 0.74-0.88 s per 5 s. Guest fps and vu_ms did not move at all (41.2 vs 41.5 fps, vu_ms 4.44-4.53
+#   s in both): the producer stall is not on the critical path, it is the render worker being behind, so raising the
+#   depth only moves the wait. The submit cost therefore contains 40-50 % queue wait; the real per-vertex frontend
+#   cost is ~250-300 ns and 0.74-0.88 s per 5 s. The depth change was not kept (no fps gain).
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 1e2604b..f6f2801 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -13,6 +13,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <immintrin.h>
+ #include <iostream>
+ #include <map>
+ #include <sstream>
+@@ -1883,6 +1884,38 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+     recordRegisterDebugEventUnlocked(regAddr, value);
+ }
+ 
++// gow-native-pc (patch 64): GOW_GS_COST=1, every 5 s: per-vertex cost of the GFIFO path that runs on the VU1 worker
++// thread inside XGKICK. `other` covers updatePreferredDisplaySourceForDraw + gowFogDiagDraw.
++static void gsFeDiagAdd(uint64_t buildTicks, uint64_t submitTicks, uint64_t allTicks)
++{
++    static const double nsPerTick = []
++    {
++        const auto t0 = std::chrono::steady_clock::now();
++        const uint64_t c0 = __rdtsc();
++        while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
++        const uint64_t c1 = __rdtsc();
++        const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
++        return ns > 0.0 ? ns / static_cast<double>(c1 - c0) : 1.0;
++    }();
++    static uint64_t build = 0u, submit = 0u, all = 0u, count = 0u;
++    static auto last = std::chrono::steady_clock::now();
++    build += buildTicks;
++    submit += submitTicks;
++    all += allTicks;
++    ++count;
++    const auto now = std::chrono::steady_clock::now();
++    const double wall = std::chrono::duration<double>(now - last).count();
++    if (wall < 5.0)
++        return;
++    const double n = 1.0 / static_cast<double>(count);
++    std::fprintf(stderr, "[gs-fe] verts=%.0f/s build=%.1fns submit=%.1fns other=%.1fns total_ms=%.0f per_vertex_ns=%.1f\n",
++                 static_cast<double>(count) / wall, static_cast<double>(build) * n * nsPerTick,
++                 static_cast<double>(submit) * n * nsPerTick, static_cast<double>(all - build - submit) * n * nsPerTick,
++                 static_cast<double>(all) * nsPerTick / 1e6, static_cast<double>(all) * n * nsPerTick);
++    build = submit = all = count = 0u;
++    last = now;
++}
++
+ void GS::vertexKick(bool drawing)
+ {
+     // GOW-Port: PS2X_GS_TRACE_TBP=<tbp0> registra los vertices que llegan con esa textura activa (-2: abanicos sin textura, -3: abanicos con textura).
+@@ -1960,10 +1993,18 @@ void GS::vertexKick(bool drawing)
+ 
+     if (drawing && m_backend)
+     {
++        // gow-native-pc (patch 64): GOW_GS_COST=1 splits the per-vertex GFIFO cost (the part that runs on the VU1 worker
++        // thread inside XGKICK) into build / submit / other. Three rdtsc pairs per vertex, ~1 % of the thread.
++        static const bool feDiag = std::getenv("GOW_GS_COST") != nullptr;
++        const uint64_t fe0 = feDiag ? __rdtsc() : 0u;
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
++        const uint64_t fe1 = feDiag ? __rdtsc() : 0u;
+         updatePreferredDisplaySourceForDraw(batch);
+         gowFogDiagDraw(batch); // GOW-Port: PS2X_GS_FOG_DIAG.
+         m_backend->Submit(batch);
++        const uint64_t fe2 = feDiag ? __rdtsc() : 0u;
++        if (feDiag)
++            gsFeDiagAdd(fe1 - fe0, fe2 - fe1, fe2 - fe0);
+         recordDrawDebugEventUnlocked(needed);
+     }
+ 
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index e2d97b2..c8407dd 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <atomic>
+ #include <algorithm>
++#include <chrono>
+ #include <cstdlib>
+ #include <cstring>
+ #include <cstdio>
+@@ -20,6 +21,41 @@ namespace
+     constexpr size_t kMaxPendingChunks = 256u;
+     std::atomic<bool> s_enabledByDefault{false};
+ 
++    // gow-native-pc (patch 64): GOW_GS_COST=1, every 5 s: how often the producer (the VU1 worker inside XGKICK) finds
++    // the published-chunk limit full and has to wait for the render worker. This is the only unbounded producer stall
++    // in the queue path; with PS2X_GS_QUEUE_CHUNKS=8 the backlog is 512 KB of commands.
++    void publishDiagAdd(uint64_t waitTicks, uint64_t publishTicks)
++    {
++        static const double nsPerTick = []
++        {
++            const auto t0 = std::chrono::steady_clock::now();
++            const uint64_t c0 = __rdtsc();
++            while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
++            const uint64_t c1 = __rdtsc();
++            const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
++            return ns > 0.0 ? ns / static_cast<double>(c1 - c0) : 1.0;
++        }();
++        static uint64_t publishes = 0u, waits = 0u, waitTicksSum = 0u, publishTicksSum = 0u;
++        static auto last = std::chrono::steady_clock::now();
++        ++publishes;
++        if (waitTicks)
++        {
++            ++waits;
++            waitTicksSum += waitTicks;
++        }
++        publishTicksSum += publishTicks;
++        const auto now = std::chrono::steady_clock::now();
++        const double wall = std::chrono::duration<double>(now - last).count();
++        if (wall < 5.0)
++            return;
++        std::fprintf(stderr, "[gs-pub] publishes=%.0f/s waits=%.0f/s blocked_ms=%.0f publish_ms=%.0f\n",
++                     static_cast<double>(publishes) / wall, static_cast<double>(waits) / wall,
++                     static_cast<double>(waitTicksSum) * nsPerTick / 1e6,
++                     static_cast<double>(publishTicksSum) * nsPerTick / 1e6);
++        publishes = waits = waitTicksSum = publishTicksSum = 0u;
++        last = now;
++    }
++
+     bool discardDraws()
+     {
+         static const bool discard = []
+@@ -136,11 +172,15 @@ void GSThreadedBackend::PublishLocked()
+ {
+     if (m_open.empty())
+         return;
++    static const bool pubDiag = std::getenv("GOW_GS_COST") != nullptr; // patch 64
++    const uint64_t p0 = pubDiag ? __rdtsc() : 0u;
++    uint64_t waitTicks = 0u;
+     std::vector<uint8_t> next;
+     {
+         std::unique_lock<std::mutex> lock(m_queueMutex);
+         m_doneCv.wait(lock, [&]
+                       { return m_stop || m_pending.size() < m_queueChunkLimit; });
++        waitTicks = pubDiag ? __rdtsc() - p0 : 0u;
+         m_pending.push_back(std::move(m_open));
+         ++m_published;
+         if (!m_spare.empty())
+@@ -154,6 +194,8 @@ void GSThreadedBackend::PublishLocked()
+     m_open = std::move(next);
+     if (m_open.capacity() < kPublishBytes)
+         m_open.reserve(kPublishBytes + 4096u);
++    if (pubDiag)
++        publishDiagAdd(waitTicks, __rdtsc() - p0);
+ }
+ 
+ void GSThreadedBackend::Drain() const
+

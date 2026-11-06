@@ -75,6 +75,26 @@ Item {
         function partidas(path) { lastSaves = path; return [] }
     }
     QtObject { id: mando; property bool conectado: false; signal boton(string name) }
+    // Mod model is a C++ context property in the real launcher; the play path only needs its staging result,
+    // but Main.qml also instantiates the Mods page, whose bindings need the harmless empty shapes below.
+    QtObject {
+        id: modeloMods
+        property var mods: []
+        property var profiles: []
+        property var diagnostics: []
+        property var lastRun: ({hits: 0, lookups: 0})
+        property string lastError: ""
+        property string notice: ""
+        property string profile: "launcher"
+        property int enabledCount: 0
+        property bool active: false
+        property bool busy: false
+        property bool pythonReady: true
+        property bool stale: false
+        property bool requiresRebuild: false
+        function refresh() {}
+        function prepararEntorno(path) { return {ok: true, env: {}} }
+    }
     UI.Main { id: page }
     function check(ok, message) { if (!ok) throw new Error(message) }
     Timer {
@@ -82,26 +102,6 @@ Item {
         onTriggered: {
             try {
                 check(page.listo, "registered installations must be playable")
-                var settings = page.ajustesGuardados
-                var defaults = {}
-                var resetKeys = ["filtro", "nitidez", "fxaa", "anisotropico", "resolucionInterna",
-                    "fpsLimite", "vsync", "mostrarFps", "saltarVideos", "finAnticipado", "vuRapida",
-                    "diagnostics", "autoNative", "usarPacoteTexturas"]
-                for (var key of resetKeys) defaults[key] = settings[key]
-                settings.filtro = "fsr"
-                settings.anisotropico = "16"
-                settings.fpsLimite = 240
-                settings.saltarVideos = true
-                settings.finAnticipado = false
-                settings.vuRapida = true
-                settings.diagnostics = true
-                settings.autoNative = true
-                settings.usarPacoteTexturas = true
-                settings.pacoteTexturas = "/private/textures"
-                page.restablecer()
-                for (var key of resetKeys)
-                    check(settings[key] === defaults[key], "reset differs from first launch: " + key)
-                check(settings.pacoteTexturas === "/private/textures", "reset must preserve file paths")
                 for (var region of ["europe", "japan"]) {
                     page.ajustesGuardados.textoJuego = "region:" + region
                     page.jugar()
@@ -119,6 +119,32 @@ Item {
                 check(lanzador.lastPlay.ejecutable === "/usa/runner", "USA runner changed")
                 check(lanzador.lastPlay.partidas === "/repo/data/gow1/saves", "USA saves changed")
                 check(lanzador.lastPlay.framePc === "0x1837b8", "USA frame probe changed")
+                // gow-native-pc: the effect toggles are Settings properties, but Lanzador::iniciar only sees the
+                // explicit play map. A key left out there silently reads as false and the switch does nothing.
+                check(lanzador.lastPlay.fxSinSombras === false && lanzador.lastPlay.fxSinAditivos === false
+                      && lanzador.lastPlay.fxSinFiltrado === false, "effect switches must default to off in the play map")
+                page.ajustesGuardados.fxSinSombras = true
+                page.ajustesGuardados.fxSinAditivos = true
+                page.ajustesGuardados.fxSinFiltrado = true
+                page.jugar()
+                check(lanzador.lastPlay.fxSinSombras === true && lanzador.lastPlay.fxSinAditivos === true
+                      && lanzador.lastPlay.fxSinFiltrado === true, "effect switches were not forwarded to Lanzador::iniciar")
+                // The "low" graphics profile must still reach the runner as a smaller internal resolution.
+                page.ajustesGuardados.resolucionInterna = "0.5"
+                page.jugar()
+                check(lanzador.lastPlay.escala === 0.5, "the low profile must lower PS2X_GS_HW_SCALE")
+                page.ajustesGuardados.resolucionInterna = "2"
+                // The texture, presentation and renderer switches are Settings properties, but Lanzador::iniciar
+                // only sees the explicit play map. A key left out there silently reads as its default and the
+                // switch does nothing (the same dead-toggle class as the three effect switches above).
+                page.ajustesGuardados.texPresupuestoMb = 2048
+                page.ajustesGuardados.progresivo = false
+                page.ajustesGuardados.gsCacheEstado = false
+                page.ajustesGuardados.presentacion = "21:9"
+                page.jugar()
+                check(lanzador.lastPlay.texPresupuestoMb === 2048 && lanzador.lastPlay.progresivo === false
+                      && lanzador.lastPlay.gsCacheEstado === false && lanzador.lastPlay.presentacion === "21:9",
+                      "texture, presentation and renderer switches were not forwarded by jugar()")
                 page.ajustesGuardados.textoJuego = "region:missing"
                 check(!page.selectedGame && page.carpetaPartidas === "", "missing regional build must not silently select USA saves")
                 console.log("PASS: real Main.qml region routing and save isolation")

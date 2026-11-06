@@ -1,0 +1,320 @@
+# gow-native-pc (patch 71): mod resource layer, runtime half. A mod manager can hand the runner a read-only table of
+# guest-path -> host-path overrides (GOW_MOD_VFS_TABLE, TSV). PS2Vfs::resolveHostPath consults it after the native host
+# roots and before the device roots, so nothing changes for the didactic disc when the table is absent or empty. The
+# table canonicalises both sides (ASCII lowercase, '\\' -> '/', collapsed separators, ";1" dropped), rejects nothing at
+# runtime, and writes optional evidence (GOW_MOD_VFS_STATS/TRACE/LOG). The texture/environment half stays in patches
+# 52/55: the manager only points GOW_TEXTURE_PACK at staged files. Value parameters are not invented here: paths come
+# from the mod manager's manifest, and the hook is a lookup, not a new format.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_vfs.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_vfs.cpp
+index aff25e6..d39758f 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_vfs.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_vfs.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/ps2_vfs.h"
+ 
++#include "runtime/mod_vfs_table.h" // GOW-Port (patch 71): read-only guest path overrides from mods.
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_rom_device.h"
+ 
+@@ -277,6 +278,15 @@
+     {
+         result = std::filesystem::path(parsed.path).lexically_normal();
+         return !result.empty();
++    }
++
++    // GOW-Port (patch 71): an installed mod's override wins over the device's root. The table is empty when no mod
++    // is enabled, so this is a single failed probe and the original resolution below is unchanged.
++    std::filesystem::path modPath;
++    if (gow::mods::ModVfsTable::instance().lookup(path, modPath))
++    {
++        result = std::move(modPath);
++        return true;
+     }
+ 
+     std::filesystem::path base;
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+index 4564d5c..2f98fc0 100644
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -418,6 +418,7 @@
+     src/lib/ps2_pad_rumble_win.cpp # GOW-Port: Windows gamepad rumble (XInput, DualShock 4 / DualSense)
+     src/lib/ps2_rom_device.cpp
+     src/lib/ps2_vfs.cpp
++    src/lib/mod_vfs_table.cpp # GOW-Port (patch 71): read-only guest path overrides contributed by mods.
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
+     src/lib/vu/ps2_vu1_core.cpp
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/mod_vfs_table.h b/PS2Recomp/ps2xRuntime/include/runtime/mod_vfs_table.h
+new file mode 100644
+index 0000000..2818413
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/mod_vfs_table.h
+@@ -0,0 +1,75 @@
++#pragma once
++
++#include <atomic>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <unordered_map>
++#include <unordered_set>
++#include <utility>
++#include <vector>
++
++namespace gow::mods
++{
++// GOW-Port (patch 71): guest file overrides contributed by installed mods.
++//
++// A mod manager writes a TSV table and points GOW_MOD_VFS_TABLE at it before starting the runner:
++//
++//     # guest path <TAB> host path
++//     cdrom0:\LIBSD.IRX	<absolute host path>
++//     mc0:/BASLUS-.../SAVE	<absolute host path>
++//
++// The table is read once, on the first lookup, and then only read: it is a plain read-only map whose
++// keys are the canonical guest paths (see canonicalGuestPath). When GOW_MOD_VFS_TABLE is unset the map
++// is empty, so a lookup costs one canonicalisation plus one failed hash probe and the game behaves as
++// the unmodified runtime.
++//
++// Diagnostics, all optional and read once from the environment:
++//   GOW_MOD_VFS_STATS=<file>  JSON counters (overrides, lookups, hits), refreshed during the run and at exit.
++//   GOW_MOD_VFS_TRACE=<file>  every distinct guest path looked up, one per line, appended as it is first seen
++//                             (a killed run still leaves the table it used). Bounded; misses are included.
++//   GOW_MOD_VFS_LOG=1         print the first hits to stderr (the game reads them without a console).
++class ModVfsTable final
++{
++public:
++    static const ModVfsTable &instance();
++
++    bool active() const { return !m_table.empty(); }
++
++    // Resolves one guest path. Returns false when no mod overrides it; the caller then uses the mounts.
++    bool lookup(std::string_view guestPath, std::filesystem::path &result) const;
++
++private:
++    ModVfsTable();
++    ModVfsTable(const ModVfsTable &) = delete;
++    ModVfsTable &operator=(const ModVfsTable &) = delete;
++
++    void writeReports() const;
++    void writeStats() const;
++    void appendTrace(const std::string &key, bool hit) const;
++
++    std::unordered_map<std::string, std::string> m_table;
++    mutable std::atomic<uint64_t> m_lookups{0};
++    mutable std::atomic<uint64_t> m_hits{0};
++
++    bool m_trace = false;
++    bool m_stats = false;
++    bool m_log = false;
++    std::string m_statsPath;
++    std::string m_tracePath;
++
++    mutable std::mutex m_statsMutex;
++    mutable std::mutex m_traceMutex;
++    mutable std::ofstream m_traceOut;
++    mutable std::unordered_set<std::string> m_traceSeen;
++    mutable uint32_t m_traceCount = 0;
++    mutable std::atomic<uint32_t> m_logged{0};
++};
++
++// ASCII lowercase, '\' -> '/', leading separators removed, repeated separators collapsed and the
++// numeric version suffix of a PS2 path (";1") removed. The same function is used on both sides of the
++// table, so the exact spelling the game uses when opening the file does not have to match byte for byte.
++std::string canonicalGuestPath(std::string_view path);
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp b/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp
+new file mode 100644
+index 0000000..8df84a0
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp
+@@ -0,0 +1,187 @@
++#include "runtime/mod_vfs_table.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
++#include <string>
++
++namespace
++{
++    // Bound the diagnostics: a table or a trace pointing at the wrong game must not grow without limit.
++    constexpr size_t kMaxTraceEntries = 4096;
++    constexpr size_t kMaxTableEntries = 4096;
++    constexpr uint32_t kMaxLoggedHits = 64;
++
++    std::string readEnv(const char *name)
++    {
++        const char *value = std::getenv(name);
++        return value && *value ? std::string(value) : std::string();
++    }
++
++}
++
++namespace gow::mods
++{
++std::string canonicalGuestPath(std::string_view path)
++{
++    std::string out;
++    out.reserve(path.size());
++    bool previousSeparator = true; // a leading separator is dropped
++    for (const char raw : path)
++    {
++        char c = raw;
++        if (c == '\\')
++            c = '/';
++        if (c >= 'A' && c <= 'Z')
++            c = static_cast<char>(c - 'A' + 'a');
++        if (c == '/')
++        {
++            if (previousSeparator)
++                continue;
++            previousSeparator = true;
++            out.push_back('/');
++            continue;
++        }
++        previousSeparator = false;
++        out.push_back(c);
++    }
++    // "FILE.EXT;1" and "SAVE;1" name the same file as "FILE.EXT" and "SAVE".
++    const size_t semicolon = out.rfind(';');
++    if (semicolon != std::string::npos && semicolon + 1 < out.size())
++    {
++        const bool numeric = std::all_of(out.begin() + static_cast<std::ptrdiff_t>(semicolon) + 1, out.end(),
++                                        [](unsigned char c) { return c >= '0' && c <= '9'; });
++        if (numeric)
++            out.erase(semicolon);
++    }
++    return out;
++}
++
++ModVfsTable::ModVfsTable()
++{
++    m_stats = false;
++    m_trace = false;
++    m_log = false;
++
++    const std::string tablePath = readEnv("GOW_MOD_VFS_TABLE");
++    if (!tablePath.empty())
++    {
++        std::ifstream input(tablePath, std::ios::binary);
++        std::string line;
++        size_t loaded = 0;
++        while (std::getline(input, line) && loaded < kMaxTableEntries)
++        {
++            if (!line.empty() && line.back() == '\r')
++                line.pop_back();
++            if (line.empty() || line.front() == '#')
++                continue;
++            const size_t tab = line.find('\t');
++            if (tab == std::string::npos)
++                continue;
++            std::string host = line.substr(tab + 1);
++            while (!host.empty() && (host.front() == ' ' || host.front() == '\t'))
++                host.erase(host.begin());
++            while (!host.empty() && (host.back() == ' ' || host.back() == '\r'))
++                host.pop_back();
++            std::string key = canonicalGuestPath(line.substr(0, tab));
++            if (key.empty() || host.empty())
++                continue;
++            if (m_table.emplace(std::move(key), std::move(host)).second)
++                ++loaded;
++        }
++        if (!m_table.empty())
++            std::fprintf(stderr, "[mod-vfs] %zu overrides from %s\n", m_table.size(), tablePath.c_str());
++    }
++
++    m_statsPath = readEnv("GOW_MOD_VFS_STATS");
++    m_tracePath = readEnv("GOW_MOD_VFS_TRACE");
++    m_stats = !m_statsPath.empty();
++    m_trace = !m_tracePath.empty();
++    m_log = !readEnv("GOW_MOD_VFS_LOG").empty();
++
++    // The diagnostics are written while the game runs, not only at exit: a scripted run is stopped by killing the
++    // process, which does not run exit handlers, and the evidence has to survive that.
++    if (m_trace)
++    {
++        m_traceOut.open(m_tracePath, std::ios::binary | std::ios::trunc);
++        if (!m_traceOut)
++            m_trace = false;
++    }
++    if (m_stats || m_trace)
++        std::atexit([] { ModVfsTable::instance().writeReports(); });
++}
++
++const ModVfsTable &ModVfsTable::instance()
++{
++    static const ModVfsTable table;
++    return table;
++}
++
++bool ModVfsTable::lookup(std::string_view guestPath, std::filesystem::path &result) const
++{
++    const uint64_t lookups = m_lookups.fetch_add(1, std::memory_order_relaxed) + 1;
++    const std::string key = canonicalGuestPath(guestPath);
++    const auto found = m_table.find(key);
++    const bool hit = found != m_table.end();
++
++    if (hit)
++    {
++        m_hits.fetch_add(1, std::memory_order_relaxed);
++        result = std::filesystem::path(found->second);
++        if (m_log && m_logged.fetch_add(1, std::memory_order_relaxed) < kMaxLoggedHits)
++            std::fprintf(stderr, "[mod-vfs] %s -> %s\n", key.c_str(), found->second.c_str());
++    }
++
++    if (m_trace)
++        appendTrace(key, hit);
++    // Boot reads a handful of files; flushing the first 32 lookups keeps the counters complete even when a scripted
++    // run is killed, and beyond that the file is only written every 256 lookups or whenever an override is used.
++    if (m_stats && (lookups <= 32 || hit || lookups % 256 == 0))
++        writeStats();
++    return hit;
++}
++
++void ModVfsTable::writeReports() const
++{
++    writeStats();
++    if (m_trace)
++    {
++        std::lock_guard<std::mutex> lock(m_traceMutex);
++        m_traceOut.close();
++    }
++}
++
++void ModVfsTable::writeStats() const
++{
++    const uint64_t lookups = m_lookups.load(std::memory_order_relaxed);
++    const uint64_t hits = m_hits.load(std::memory_order_relaxed);
++    std::lock_guard<std::mutex> lock(m_statsMutex);
++    if (std::FILE *file = std::fopen(m_statsPath.c_str(), "wb"))
++    {
++        std::fprintf(file, "{\"schema\":1,\"overrides\":%zu,\"lookups\":%llu,\"hits\":%llu,\"misses\":%llu}\n", m_table.size(),
++                     static_cast<unsigned long long>(lookups), static_cast<unsigned long long>(hits),
++                     static_cast<unsigned long long>(lookups - hits));
++        std::fclose(file);
++    }
++}
++
++void ModVfsTable::appendTrace(const std::string &key, bool hit) const
++{
++    std::lock_guard<std::mutex> lock(m_traceMutex);
++    if (m_traceSeen.emplace(key).second)
++    {
++        if (m_traceCount++ >= kMaxTraceEntries)
++            return;
++        m_traceOut << (hit ? 'H' : 'M') << '\t' << key << '\n';
++        m_traceOut.flush();
++    }
++    else
++    {
++        // A path that was first looked up as a miss and is later overridden keeps its first line: the table does not
++        // change while the game runs, so the first classification is also the final one.
++    }
++}
++}

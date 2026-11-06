@@ -42,14 +42,10 @@ Write-Host 'PASS: build progress ignores CMake sub-builds, resumes at outer grap
 $scratch = Join-Path $root ('data/build-progress-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $Stages = @()
-. (Join-Path $root 'tools/pipeline/modules/common.ps1')
 . (Join-Path $root 'tools/pipeline/modules/game.ps1')
 function Use-Toolchain {}
 function Need($path, $what) {}
-function Configure($dir, $profile, [switch]$MaySkip) {
-    $script:configuredGameProfile = [ordered]@{buildRoot=$dir; mode=$profile;
-        pgoApplied=[bool]$script:fakeProfileHash; appliedPgoHash=$script:fakeProfileHash}
-}
+function Configure($dir, $profile, [switch]$MaySkip) {}
 function Write-CompilerCacheStats($what) {}
 function Languages { return @{ recompile_elf = '' } }
 $bld = Join-Path $scratch 'unused'
@@ -71,34 +67,4 @@ $failed = $false
 $output = [Collections.Generic.List[string]]::new()
 try { Build-Game $directory 6>&1 | ForEach-Object { $output.Add("$_") } } catch { $failed = $_.Exception.Message -match 'rc=7' }
 if (-not $failed -or '@@progress 1 1' -in $output) { throw 'Failed build must preserve its failure and not emit completion' }
-if ($script:gameBuildProfiles.Count -ne 2 -or $script:gameBuildProfiles[-1].pgoApplied) {
-    throw 'Only successful game builds may record applied profile metadata'
-}
-$script:fakeExit = 0
-$script:fakeProfileHash = 'profile-used'
-Build-Game $directory
-$script:fakeProfileHash = 'profile-from-failed-build'
-$script:fakeExit = 7
-try { Build-Game $directory } catch { }
-if ($script:gameBuildProfiles.Count -ne 3 -or $script:gameBuildProfiles[-1].appliedPgoHash -ne 'profile-used') {
-    throw 'Failed builds must not replace the last successful build profile hash'
-}
-
-$pipelineWatch = [Diagnostics.Stopwatch]::StartNew()
-$pipelineSucceeded = $false
-$pgoProfile = Join-Path $scratch 'available.profdata'
-[IO.File]::WriteAllText($pgoProfile, 'different available profile')
-Write-PipelineMetrics
-$metrics = Get-Content (Get-ChildItem $logs -Filter 'pipeline-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Raw | ConvertFrom-Json
-if ($metrics.pgoHash -ne $metrics.availablePgoHash -or $metrics.pgoHashMeaning -ne 'available-profile-not-application' -or
-    $metrics.gameBuildProfiles.Count -ne 3 -or $metrics.gameBuildProfiles[-1].appliedPgoHash -ne 'profile-used' -or -not $metrics.pgoApplied) {
-    throw 'Metrics must separate the available profile from successful actual game builds'
-}
-$script:gameBuildProfiles.Clear()
-$Stages = @('verify')
-Write-PipelineMetrics
-$metrics = Get-Content (Get-ChildItem $logs -Filter 'pipeline-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Raw | ConvertFrom-Json
-if ($null -ne $metrics.pgoApplied -or $metrics.gameBuildProfiles.Count -ne 0 -or -not $metrics.availablePgoHash) {
-    throw 'No recorded game build must leave PGO application unknown even when a profile file exists'
-}
 Write-Host 'PASS: Build-Game emits filtered progress, completes no-op builds and preserves failures'

@@ -1,0 +1,391 @@
+VU1 x86-64 JIT: the block that ends an edge emits chain()'s exit/entry bookkeeping and jumps straight into the
+successor (GOW_VU1_BLOCKCODE=1, off by default)
+
+Every transition between two native VU1 blocks left the block through VU1NativeAccess::chain: a C++ call, the
+successor's slot looked up again, the accounting, and emit()'s indirect jump into the successor. With
+GOW_VU1_BLOCKCODE=1 the block that ends the edge emits that accounting itself, checks chain()'s conditions first, writes
+the same values in the same order and jumps into the successor's body past its prologue, reusing the frame the chain
+already shares. Nothing is written before the last check passes; a failed check jumps to the ordinary chainFn sequence
+right below, which is the unmodified code, so the interpreter and the previous path stay as the fallback and the three
+paths are semantically equivalent.
+
+Left to chainFn: blocks whose first pair reads entry flags (their timing needs blockTiming), blocks that start an
+FDIV/EFU operation (finishBlockTiming's scalarStart), self loops (chain()'s fastSelf), successors that are not x64 JIT
+blocks, and GOW_VU1_OPSTAT (per-op statistics are counted in chain). VU1NativeEdgeOffsets (ps2_vu1_native.h) publishes
+the layout the emitted code reads; edgeOffsets() fills it with offsetof() of the private NativeState / Slot /
+VU1NativeCtx, so a layout change is a compile error and not silent corruption. The emitted code touches only the
+registers both ABIs treat as volatile (rax, rcx, rdx, r8-r11): rdi and rsi are callee-saved on Windows x64 and
+runNative / chainFn keep their state there.
+
+Measured, ship deck combat, GOW_VU1N_X64=1 plus GOW_VU1_COST=1, 63 s, four runs per side, the same four 5 s windows
+of t=45-60 s: vu_ms 4660.2 (4634.9 / 4667.3 / 4658.3 / 4680.5) -> 4631.3 (4612.3 / 4635.1 / 4648.9 / 4628.9), 0.6 %
+less and inside the +/-1 % run-to-run band; chain_ms 1794 -> 1012 (-44 %) while block_ns 177.5 -> 185.2 (+4 %) because
+the emitted edge is timed as part of the block; guest_flip_hz 16.0 -> 15.1 (noise). Bit-identical digest with the
+switch on and off: x64 and x64-calls, 4 images / 12 trials, 8e2c2f39b854d8fa; with GOW_FUZZ_SPECIAL=1 (Inf/NaN)
+9a9b264958dd8be2 both ways. anomalies=0 in every run.
+
+Why this does not reach 25 fps: the transition was never the wall. chain() is 35-45 % of the block time, but the part
+an inlined edge removes is one call, one slot lookup and one indirect jump - about 15-25 ns of the 59-87 ns per call;
+the history entry, the tail record, commitDue and the lane masks remain, and the emitted edge pays for re-deriving the
+same values from memory plus ~200 bytes per block (i-cache). The VU1 thread is busy 92-93 % of the wall (vu_ms 4.6 s
+of every 5 s window) and ~90 % of that window is blockcode itself (entry 1.5-2.6 %, exit 0.5-1.5 %, dispatch 0-11 %),
+so even a microprogram-wide compile that removed every entry, exit and dispatch could not gain the 1.6x that 25 fps
+needs. Switch kept, default off, not in the default path.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 1fdd000..de03539 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -373,6 +373,29 @@ struct VU1Interpreter::NativeState
+     std::vector<uint32_t> trace;     // pcs of the native blocks executed while bisecting
+ };
+ 
++// gow-native-pc (patch 88): the offsets and constants the x64 JIT's inlined chain edge (GOW_VU1_BLOCKCODE) reads. The
++// state it mirrors (VU1Interpreter::NativeState, its Slot / Hist, m_cycle, ...) is private to VU1Interpreter, so only
++// VU1NativeAccess (a friend) can take their offsets; they are published here instead of a second copy of the layout in
++// ps2_vu1_x64.inl. Keep every field in sync with VU1NativeAccess::edgeOffsets (ps2_vu1_x64.inl), which fills it.
++struct VU1NativeEdgeOffsets
++{
++    // VU1NativeCtx
++    uint32_t ctxVu, ctxChain, ctxContext, ctxDepth, ctxKnown0, ctxKnown1, ctxSlot, ctxCyc, ctxCycId, ctxStart, ctxPc,
++        ctxBlocks, ctxPairs, ctxTail;
++    // VU1Interpreter (m_cycle / m_nextCommitCycle / m_stopRequested / m_native when reached through ctx.vu)
++    uint32_t vuCycle, vuNextCommit, vuStop, vuNative;
++    // VU1State::pc, VU1Interpreter::StepContext
++    uint32_t statePc, scBudgetEnd, scCodeSize;
++    // NativeState: slots, history ring, counters, entry flags
++    uint32_t nsSlots, nsHist, nsHistNext, nsHistCount, nsLaneChecks;
++    // Slot: the first line (the edge entry work) and the clean-lane data of the second
++    uint32_t slFn, slIdle, slBt, slTail, slLaneReq, slLaneGen, slLaneKeep, slPairs, slIdleEnd, slKnown, slReadsEntryFlags,
++        slScalarCount;
++    // Hist: the entry chain() writes, and the tail record inside it
++    uint32_t histSize, histMask, hBt, hCyc, hCycId, hStart, hEnd, hTail, tDesc, tCyc, tStart;
++    uint32_t maxDepth; // chain()'s chain-length limit (compiler dependent)
++};
++
+ // Callouts into the exact engine for the rare instructions (defined in ps2_vu1_core.cpp).
+ struct VU1NativeAccess
+ {
+@@ -423,6 +446,8 @@ struct VU1NativeAccess
+     }
+     // gow-native-pc: chain() for the x64 JIT (ps2_vu1_x64.inl): the next block's function, nullptr = return to runNative
+     static VU1NativeFn chainFn(VU1NativeCtx &n, uint32_t next);
++    // gow-native-pc (patch 88): the layout of the state chain() touches, for the x64 JIT's inlined edge
++    static const VU1NativeEdgeOffsets &edgeOffsets();
+     static void callLower(VU1NativeCtx &n, uint32_t pc, uint32_t lower, uint32_t upper);
+     static void callUpper(VU1NativeCtx &n, uint32_t pc, uint32_t upper);
+     static void xgkick(VU1NativeCtx &n, uint32_t qwordAddress);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 277e458..7f2b357 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -80,6 +80,15 @@ namespace
+ #else
+ #define VU1N_COLD_FRAME
+ #endif
++
++// gow-native-pc (patch 88): chain()'s bound on the number of native blocks in one chain, shared with the x64 JIT's
++// inlined edge (VU1NativeEdgeOffsets::maxDepth) so both stop at the same depth.
++#if defined(__clang__)
++constexpr uint32_t kNativeMaxDepth = 4096u;
++#else
++constexpr uint32_t kNativeMaxDepth = 64u;
++#endif
++
+ #include "ps2_vu1_jit.inl" // gow-native-pc: background VU1 compiler (GOW_VU1N_JIT)
+ #include "ps2_vu1_x64.inl" // gow-native-pc: in-process x86-64 JIT (GOW_VU1N_X64)
+ 
+@@ -1103,11 +1112,7 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     if (chainCost)
+         ++vu1cost::counters.chainCalls;
+     const NS::Slot &cur = *static_cast<const NS::Slot *>(n.slot);
+-#if defined(__clang__)
+-    constexpr uint32_t kMaxDepth = 4096u;
+-#else
+-    constexpr uint32_t kMaxDepth = 64u;
+-#endif
++    constexpr uint32_t kMaxDepth = kNativeMaxDepth;
+     const uint32_t pc = next & 0x3FF8u;
+     // gow-native-pc (patch 76): the successor's slot is a 128-byte structure picked by a branch target, so its first line is
+     // often a level-2 miss that the bookkeeping below cannot hide. Start the load (and the hint) before the exit half of
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+index 1049634..d84ebb9 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -127,6 +127,22 @@ namespace vu1x
+ #endif
+     }
+ 
++    // GOW-Port (patch 88): GOW_VU1_BLOCKCODE=1 inlines the exit/entry bookkeeping of VU1NativeAccess::chain into the block
++    // that ends here (see emitBlockCodeEdge): the successor is entered by a direct jump, without the chainFn call and the
++    // second indirect jump. The interpreter and the unmodified chain path stay as the fallback; a failed check jumps to the
++    // ordinary chainFn sequence, which then does exactly what it does with the switch off. Off by default: the A/B on the
++    // ship deck is in the patch header (engine/patches/88-vu1-blockcode.patch).
++    // Any of them changes VU1 codegen, so an A/B needs a fresh build and the vu1 verify path (GOW_VU1N_VERIFY=1).
++    inline bool blockCode()
++    {
++        static const bool on = []
++        {
++            const char *v = std::getenv("GOW_VU1_BLOCKCODE");
++            return v && v[0] == '1';
++        }();
++        return on;
++    }
++
+     // ------------------------------------------------------------------------------------------------- decode (vu1n_gen.py)
+     constexpr uint32_t kFlat = 4u; // FLAT in vu1n_gen.py = VU1Interpreter::kFmacLatency (private there)
+     constexpr int kRev4[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+@@ -1555,6 +1571,20 @@ namespace vu1x
+         void alu64M(uint8_t op, int reg, const Mem &mm) { m(0, true, {op}, reg, mm); }
+         void testi(int reg, uint32_t v) { r(0, false, {0xF7}, 0, reg); a.d32(v); }
+         void shl32(int reg, uint8_t n) { r(0, false, {0xC1}, 4, reg); a.b(n); }
++        // gow-native-pc (patch 88): the encodings the inlined chain edge needs on top of the statement emitter's
++        void shr32(int reg, uint8_t n) { r(0, false, {0xC1}, 5, reg); a.b(n); }
++        void not64(int reg) { r(0, true, {0xF7}, 2, reg); }
++        void testAlAl() { a.b(0x84); a.b(0xC0); }
++        void imul64i(int dst, int src, int32_t v) { r(0, true, {0x69}, dst, src); a.d32(static_cast<uint32_t>(v)); }
++        void inc64(const Mem &mm) { m(0, true, {0xFF}, 0, mm); }
++        void inc32(const Mem &mm) { m(0, false, {0xFF}, 0, mm); }
++        void add64i(int reg, int32_t v) // 83 /0 imm8 (sign-extended)
++        {
++            a.rex(true, 0, reg);
++            a.b(0x83);
++            a.modrm(3, 0, reg);
++            a.b(static_cast<uint8_t>(v));
++        }
+         void setcc(uint8_t cc, int reg8) { r(0, false, {0x0F, static_cast<uint8_t>(0x90 | cc)}, 0, reg8); }
+         void cmov(uint8_t cc, int d, int s) { r(0, false, {0x0F, static_cast<uint8_t>(0x40 | cc)}, d, s); }
+         void movi32(int reg, uint32_t v) { if (reg & 8) a.b(0x41); a.b(static_cast<uint8_t>(0xB8 + (reg & 7))); a.d32(v); }
+@@ -2406,6 +2436,152 @@ namespace vu1x
+         return size;
+     }
+ 
++    // gow-native-pc (patch 88): GOW_VU1_BLOCKCODE=1 inlines the exit/entry bookkeeping of VU1NativeAccess::chain into the
++    // block that ends here, for the successor it is about to take, instead of calling chainFn: one C++ call, one slot
++    // lookup (ns.slots[pc >> 3], two cache lines) and a second indirect jump less per transition. The emitted code does
++    // the same stores with the same values, and checks all of chain()'s conditions first, so a failed check can fall
++    // back to chainFn with the state untouched (chainFn then runs exactly as without this switch). Emitted with r13d =
++    // next pc; on success control continues in the successor's body (the frame the chain already shares), on failure at
++    // the returned label (the caller's chainFn sequence).
++    //
++    // Left to chainFn: entry-flag readers (they need prepareBlockTiming), blocks that start an FDIV/EFU operation
++    // (scalarStart), self loops (chain()'s own fastSelf path), non-JIT successors (they need a normal call) and the
++    // diagnostic modes (per-op statistics).
++    size_t emitBlockCodeEdge(Ctx &cx, uint64_t arenaLo, uint32_t arenaSpan)
++    {
++        const VU1NativeEdgeOffsets &o = VU1NativeAccess::edgeOffsets();
++        Asm &a = cx.a;
++        E &e = cx.e;
++        const auto m = [](int base, uint32_t off) { return Mem{base, static_cast<int32_t>(off)}; };
++        // Only the scratch registers of both ABIs (rax, rcx, rdx, r8-r11): rdi / rsi are callee-saved on Windows x64 and
++        // the caller (runNative / chainFn) keeps its state in them, so a block must not touch them. r9 = the successor's
++        // slot, r10 = vu, r11 = ns; the pc / node values are recomputed from r13 after the two call-outs.
++        std::vector<size_t> slow; // jumps to the fallback entry (the ordinary chainFn sequence)
++        const auto bail = [&](uint8_t cc) { slow.push_back(a.jcc(cc)); };
++        // ---- checks: nothing is written before the last of them --------------------------------------------------
++        e.ld64(R10, m(RBX, o.ctxVu));                                                          // vu
++        e.movzx8(RAX, m(RBX, o.ctxChain)); a.testEaxEax(); bail(CC_E);         // n.chain
++        e.ld32(RAX, m(RBX, o.ctxDepth)); e.alu32i(7, RAX, static_cast<int32_t>(o.maxDepth));   // n.depth >= max
++        bail(0x3);
++        e.movzx8(RAX, m(R10, o.vuStop)); a.testEaxEax(); bail(CC_NE);          // stop requested
++        a.movRR32(R8, R13); e.alu32i(4, R8, 0x3FF8);                                           // pc = next & 0x3FF8
++        e.alu32M(0x3B, R8, m(RBX, o.ctxPc)); bail(CC_E);                       // same pc: fastSelf
++        e.ld64(RAX, m(RBX, o.ctxContext));
++        a.movRR32(RDX, R8); e.alu32i(0, RDX, 8);                                               // pc + 8
++        e.alu32M(0x3B, RDX, m(RAX, o.scCodeSize)); bail(0x7);                  // past the micro memory
++        // the successor slot and its entry preconditions
++        e.ld64(R11, m(R10, o.vuNative));                                                        // ns
++        a.lea(R9, R11, static_cast<int32_t>(o.nsSlots));
++        a.movRR32(RCX, R8); e.shl32(RCX, 4); e.alu32i(4, RCX, 0x3FF80);
++        e.alu64(0x01, R9, RCX);                                                                // &ns.slots[pc >> 3]
++        e.movzx8(RAX, m(R9, o.slKnown)); a.testEaxEax(); bail(CC_E);
++        e.ld64(RAX, m(R9, o.slFn)); a.testEaxEax(); bail(CC_E);
++        e.movzx8(RAX, m(R9, o.slReadsEntryFlags)); a.testEaxEax(); bail(CC_NE);
++        e.ld64(RAX, m(R9, o.slFn)); a.movRI64(RCX, arenaLo); e.alu64(0x29, RAX, RCX);           // fn - arena lo
++        e.movi32(RCX, arenaSpan); e.alu64(0x39, RAX, RCX); bail(0x3);          // JIT code only
++        // clean lanes: the exact check only when some requested lane is not known clean
++        e.ld64(RAX, m(R9, o.slLaneReq));
++        e.ld64(RDX, m(RBX, o.ctxKnown0)); e.not64(RDX); e.alu64(0x23, RAX, RDX);                // need0
++        e.ld64(RCX, m(R9, o.slLaneReq + 8u));
++        e.ld64(RDX, m(RBX, o.ctxKnown1)); e.not64(RDX); e.alu64(0x23, RCX, RDX);                // need1
++        a.movRR(RDX, RAX); e.alu64(0x09, RDX, RCX);
++        const size_t noLanes = a.jcc(CC_E);
++        // argument order: kArg0 is RCX on Windows, which holds need1 here, so it is loaded last
++        a.movRR(kArg1, RAX); a.movRR(kArg2, RCX); a.movRR(kArg0, R14);
++        a.call(reinterpret_cast<const void *>(&vu1n::lanesClean));
++        a.b(0x84); a.b(0xC0);                                                                  // test al, al
++        bail(CC_E);
++        // the call clobbered every scratch register: rebuild what the rest reads, and count the check like chain()
++        e.ld64(R10, m(RBX, o.ctxVu));
++        e.ld64(R11, m(R10, o.vuNative));
++        a.movRR32(R8, R13); e.alu32i(4, R8, 0x3FF8);
++        a.lea(R9, R11, static_cast<int32_t>(o.nsSlots));
++        a.movRR32(RCX, R8); e.shl32(RCX, 4); e.alu32i(4, RCX, 0x3FF80);
++        e.alu64(0x01, R9, RCX);
++        e.ld32(RAX, m(R11, o.nsLaneChecks)); e.alu32i(0, RAX, 1); e.st32(m(R11, o.nsLaneChecks), RAX);
++        a.patch(noLanes, a.c.size());
++        // the ending block's own exit facts: its idle timing and no FDIV/EFU start (finishBlockTiming then is one add)
++        e.ld64(RAX, m(RBX, o.ctxSlot));
++        e.ld64(RDX, m(RBX, o.ctxCyc));
++        e.alu64M(0x3B, RDX, m(RAX, o.slIdle)); bail(CC_NE);
++        e.movzx8(RCX, m(RAX, o.slScalarCount)); e.alu32(0x85, RCX, RCX); bail(CC_NE);
++        e.ld64(RDX, m(RBX, o.ctxStart));
++        e.movzx16(RCX, m(RAX, o.slIdleEnd));
++        e.alu64(0x01, RDX, RCX);                                                               // end = start + idleEnd
++        e.ld64(RAX, m(RBX, o.ctxContext));
++        e.alu64M(0x3B, RDX, m(RAX, o.scBudgetEnd)); bail(0x3);                 // end >= budgetEnd
++        // ---- the history entry finishBlockTiming writes, then m_cycle --------------------------------------------
++        e.ld32(RAX, m(R11, o.nsHistNext));
++        e.imul64i(RAX, RAX, static_cast<int32_t>(o.histSize));
++        a.lea(RCX, R11, static_cast<int32_t>(o.nsHist));
++        e.alu64(0x01, RAX, RCX);                                                               // &hist[histNext]
++        e.ld64(RCX, m(RBX, o.ctxSlot));
++        e.ld64(R8, m(RCX, o.slBt)); e.st64(m(RAX, o.hBt), R8);
++        e.ld64(R8, m(RBX, o.ctxCyc)); e.st64(m(RAX, o.hCyc), R8);
++        e.ld32(R8, m(RBX, o.ctxCycId)); e.st32(m(RAX, o.hCycId), R8);
++        e.ld64(R8, m(RBX, o.ctxStart)); e.st64(m(RAX, o.hStart), R8);
++        e.st64(m(RAX, o.hEnd), RDX);
++        e.ld32(RAX, m(R11, o.nsHistNext)); e.alu32i(0, RAX, 1); e.alu32i(4, RAX, static_cast<int32_t>(o.histMask));
++        e.st32(m(R11, o.nsHistNext), RAX);
++        e.ld32(RAX, m(R11, o.nsHistCount)); e.alu32i(0, RAX, 1); e.st32(m(R11, o.nsHistCount), RAX);
++        e.st64(m(R10, o.vuCycle), RDX);
++        e.ld64(RAX, m(R10, o.vuNextCommit));
++        e.alu64(0x39, RDX, RAX);
++        const size_t noCommit = a.jcc(0x2);                                                    // jb: end < nextCommit
++        a.movRR(kArg0, R10);                                                                   // commitDue(VU1Interpreter &)
++        a.call(reinterpret_cast<const void *>(&VU1NativeAccess::commitDue));
++        e.ld64(R10, m(RBX, o.ctxVu));
++        e.ld64(R11, m(R10, o.vuNative));
++        a.movRR32(R8, R13); e.alu32i(4, R8, 0x3FF8);
++        a.lea(R9, R11, static_cast<int32_t>(o.nsSlots));
++        a.movRR32(RCX, R8); e.shl32(RCX, 4); e.alu32i(4, RCX, 0x3FF80);
++        e.alu64(0x01, R9, RCX);
++        e.ld64(RCX, m(RBX, o.ctxSlot));
++        e.ld64(RDX, m(RBX, o.ctxStart)); e.movzx16(R8, m(RCX, o.slIdleEnd)); e.alu64(0x01, RDX, R8);
++        a.patch(noCommit, a.c.size());
++        // ---- counters and the successor's ctx, in chain()'s order -------------------------------------------------
++        e.ld64(RCX, m(RBX, o.ctxSlot));
++        e.movzx16(R8, m(RCX, o.slPairs));
++        e.ld64(RAX, m(RBX, o.ctxPairs)); e.alu64(0x01, RAX, R8); e.st64(m(RBX, o.ctxPairs), RAX);
++        e.inc64(m(RBX, o.ctxBlocks));
++        e.inc32(m(RBX, o.ctxDepth)); // uint32: inc64 would also bump the bool/known0 that follow it
++        a.movRR32(RAX, R13); e.alu32i(4, RAX, 0x3FFF); e.st32(m(R14, o.statePc), RAX);
++        // known lanes: chain's "known |= need" then keep / gen; known | need is known | laneReq
++        e.ld64(RAX, m(RBX, o.ctxKnown0));
++        e.alu64M(0x0B, RAX, m(R9, o.slLaneReq)); e.alu64M(0x23, RAX, m(R9, o.slLaneKeep));
++        e.alu64M(0x0B, RAX, m(R9, o.slLaneGen)); e.alu32i(1, RAX, 0xF);
++        e.st64(m(RBX, o.ctxKnown0), RAX);
++        e.ld64(RAX, m(RBX, o.ctxKnown1));
++        e.alu64M(0x0B, RAX, m(R9, o.slLaneReq + 8u)); e.alu64M(0x23, RAX, m(R9, o.slLaneKeep + 8u));
++        e.alu64M(0x0B, RAX, m(R9, o.slLaneGen + 8u));
++        e.st64(m(RBX, o.ctxKnown1), RAX);
++        e.ld64(RAX, m(R9, o.slIdle)); e.st64(m(RBX, o.ctxCyc), RAX);
++        e.st32i(m(RBX, o.ctxCycId), 0u);
++        e.st64(m(RBX, o.ctxStart), RDX);
++        e.st64(m(RBX, o.ctxSlot), R9);
++        a.movRR32(RAX, R13); e.alu32i(4, RAX, 0x3FF8); e.st32(m(RBX, o.ctxPc), RAX);
++        // the flag tail chain() allocates at entry, when the successor has one
++        e.ld64(RAX, m(R9, o.slTail));
++        a.testRaxRax();
++        const size_t noTail = a.jcc(CC_E);
++        e.ld32(RCX, m(R11, o.nsHistNext)); e.imul64i(RCX, RCX, static_cast<int32_t>(o.histSize));
++        a.lea(R8, R11, static_cast<int32_t>(o.nsHist)); e.alu64(0x01, RCX, R8);
++        a.lea(RCX, RCX, static_cast<int32_t>(o.hTail));
++        e.st64(m(RCX, o.tDesc), RAX);
++        e.ld64(R8, m(R9, o.slIdle)); e.st64(m(RCX, o.tCyc), R8);
++        e.st64(m(RCX, o.tStart), RDX);
++        e.st64(m(RBX, o.ctxTail), RCX);
++        a.patch(noTail, a.c.size());
++        // ---- into the successor's body, past its prologue ---------------------------------------------------------
++        e.ld64(RAX, m(R9, o.slFn));
++        e.add64i(RAX, static_cast<int32_t>(prologueSize()));
++        a.jmpR(RAX);
++        const size_t slowAt = a.c.size();
++        for (size_t at : slow)
++            a.patch(at, slowAt);
++        return slowAt;
++    }
++
+     // arena: the reserved code range (lo, span) for the JIT -> JIT jump past the prologue
+     std::vector<uint8_t> emit(const Block &blk, uint32_t workingClipOff, uint64_t arenaLo, uint32_t arenaSpan)
+     {
+@@ -2511,6 +2687,10 @@ namespace vu1x
+         else
+         {
+             // r13d = next pc; the next block's code when chain() allows it, as a tail jump
++            // gow-native-pc (patch 88): with GOW_VU1_BLOCKCODE=1 the common transition is emitted here; its failed checks
++            // fall through to the chainFn sequence right below, which is the unmodified path.
++            if (blockCode() && arenaSpan != 0u && !vu1op::enabled())
++                emitBlockCodeEdge(cx, arenaLo, arenaSpan);
+             a.movRR(kArg0, RBX);
+             a.movRR32(kArg1, R13);
+             a.call(reinterpret_cast<const void *>(&VU1NativeAccess::chainFn));
+@@ -2695,6 +2875,68 @@ VU1NativeFn VU1NativeAccess::chainFn(VU1NativeCtx &n, uint32_t next)
+     return sl ? sl->fn : nullptr;
+ }
+ 
++// gow-native-pc (patch 88): the state layout VU1NativeAccess::chain touches, for the x64 JIT's inlined edge. Computed
++// here because VU1Interpreter::NativeState and its fields are private (VU1NativeAccess is a friend).
++const VU1NativeEdgeOffsets &VU1NativeAccess::edgeOffsets()
++{
++    using NS = VU1Interpreter::NativeState;
++    static const VU1NativeEdgeOffsets o = [] {
++        VU1NativeEdgeOffsets r{};
++        r.ctxVu = static_cast<uint32_t>(offsetof(VU1NativeCtx, vu));
++        r.ctxChain = static_cast<uint32_t>(offsetof(VU1NativeCtx, chain));
++        r.ctxContext = static_cast<uint32_t>(offsetof(VU1NativeCtx, context));
++        r.ctxDepth = static_cast<uint32_t>(offsetof(VU1NativeCtx, depth));
++        r.ctxKnown0 = static_cast<uint32_t>(offsetof(VU1NativeCtx, known0));
++        r.ctxKnown1 = static_cast<uint32_t>(offsetof(VU1NativeCtx, known1));
++        r.ctxSlot = static_cast<uint32_t>(offsetof(VU1NativeCtx, slot));
++        r.ctxCyc = static_cast<uint32_t>(offsetof(VU1NativeCtx, cyc));
++        r.ctxCycId = static_cast<uint32_t>(offsetof(VU1NativeCtx, cycId));
++        r.ctxStart = static_cast<uint32_t>(offsetof(VU1NativeCtx, start));
++        r.ctxPc = static_cast<uint32_t>(offsetof(VU1NativeCtx, pc));
++        r.ctxBlocks = static_cast<uint32_t>(offsetof(VU1NativeCtx, blocks));
++        r.ctxPairs = static_cast<uint32_t>(offsetof(VU1NativeCtx, pairs));
++        r.ctxTail = static_cast<uint32_t>(offsetof(VU1NativeCtx, tail));
++        r.vuCycle = static_cast<uint32_t>(offsetof(VU1Interpreter, m_cycle));
++        r.vuNextCommit = static_cast<uint32_t>(offsetof(VU1Interpreter, m_nextCommitCycle));
++        r.vuStop = static_cast<uint32_t>(offsetof(VU1Interpreter, m_stopRequested));
++        r.vuNative = static_cast<uint32_t>(offsetof(VU1Interpreter, m_native));
++        r.statePc = static_cast<uint32_t>(offsetof(VU1State, pc));
++        r.scBudgetEnd = static_cast<uint32_t>(offsetof(VU1Interpreter::StepContext, budgetEnd));
++        r.scCodeSize = static_cast<uint32_t>(offsetof(VU1Interpreter::StepContext, codeSize));
++        r.nsSlots = static_cast<uint32_t>(offsetof(NS, slots));
++        r.nsHist = static_cast<uint32_t>(offsetof(NS, hist));
++        r.nsHistNext = static_cast<uint32_t>(offsetof(NS, histNext));
++        r.nsHistCount = static_cast<uint32_t>(offsetof(NS, histCount));
++        r.nsLaneChecks = static_cast<uint32_t>(offsetof(NS, laneChecks));
++        r.slFn = static_cast<uint32_t>(offsetof(NS::Slot, fn));
++        r.slIdle = static_cast<uint32_t>(offsetof(NS::Slot, idle));
++        r.slBt = static_cast<uint32_t>(offsetof(NS::Slot, bt));
++        r.slTail = static_cast<uint32_t>(offsetof(NS::Slot, tail));
++        r.slLaneReq = static_cast<uint32_t>(offsetof(NS::Slot, laneReq));
++        r.slLaneGen = static_cast<uint32_t>(offsetof(NS::Slot, laneGen));
++        r.slLaneKeep = static_cast<uint32_t>(offsetof(NS::Slot, laneKeep));
++        r.slPairs = static_cast<uint32_t>(offsetof(NS::Slot, pairs));
++        r.slIdleEnd = static_cast<uint32_t>(offsetof(NS::Slot, idleEnd));
++        r.slKnown = static_cast<uint32_t>(offsetof(NS::Slot, known));
++        r.slReadsEntryFlags = static_cast<uint32_t>(offsetof(NS::Slot, readsEntryFlags));
++        r.slScalarCount = static_cast<uint32_t>(offsetof(NS::Slot, scalarCount));
++        r.histSize = static_cast<uint32_t>(sizeof(NS::Hist));
++        r.histMask = static_cast<uint32_t>(NS::kHist - 1u);
++        r.hBt = static_cast<uint32_t>(offsetof(NS::Hist, bt));
++        r.hCyc = static_cast<uint32_t>(offsetof(NS::Hist, cyc));
++        r.hCycId = static_cast<uint32_t>(offsetof(NS::Hist, cycId));
++        r.hStart = static_cast<uint32_t>(offsetof(NS::Hist, start));
++        r.hEnd = static_cast<uint32_t>(offsetof(NS::Hist, end));
++        r.hTail = static_cast<uint32_t>(offsetof(NS::Hist, tail));
++        r.tDesc = static_cast<uint32_t>(offsetof(VU1FlagTail, desc));
++        r.tCyc = static_cast<uint32_t>(offsetof(VU1FlagTail, cyc));
++        r.tStart = static_cast<uint32_t>(offsetof(VU1FlagTail, start));
++        r.maxDepth = kNativeMaxDepth;
++        return r;
++    }();
++    return o;
++}
++
+ // tests / diagnostics: blocks the x64 JIT compiled, could not translate, and recompiled after a failed entry lane check
+ unsigned long long vu1xDespeculated()
+ {

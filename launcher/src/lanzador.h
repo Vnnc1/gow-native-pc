@@ -46,7 +46,9 @@ public:
     Q_INVOKABLE QString rutaDesdeUrl(const QUrl &url) const;
     Q_INVOKABLE QUrl urlDesdeRuta(const QString &ruta) const;
 
-    Q_INVOKABLE bool iniciar(const QVariantMap &ajustes);
+    // entornoMods (patch 73): variables from the mod manager's staged plan (GOW_MOD_VFS_TABLE, GOW_TEXTURE_PACK,
+    // environment overrides). An empty value removes the variable, so a disabled mod never leaks into the runner.
+    Q_INVOKABLE bool iniciar(const QVariantMap &ajustes, const QVariantMap &entornoMods);
     Q_INVOKABLE void detener();
     Q_INVOKABLE void abrirCarpeta(const QString &ruta) const;
     Q_INVOKABLE void abrirRegistro() const;

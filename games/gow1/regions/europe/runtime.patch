@@ -23,7 +23,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
  // El juego ya corta un ataque con el bloqueo (L1) o la evasión (stick derecho) en el cuadro siguiente: esas transiciones
  // llegan con umbral 0. Lo que obliga a esperar es el umbral de las demás: atacar desde una evasión espera al 50 % de la
  // voltereta (~0,6 s) y cada golpe del combo de cuadrado al 27-47 % del anterior. Aquí:
-@@ -56,9 +56,9 @@
+@@ -57,9 +57,9 @@
  
  namespace
  {
@@ -36,7 +36,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      constexpr uint16_t kCuadrado = 0x8000u, kTriangulo = 0x1000u; // bytes 0-1 del búfer de libpad2, activos a 0
      constexpr double kVentanaBufer = 0.35;                        // segundos que se recuerda una pulsación
      constexpr double kEsperaBufer = 0.035;                        // antes de repetirla
-@@ -85,7 +85,7 @@
+@@ -86,7 +86,7 @@
      bool valida(uint32_t a, uint32_t bytes)
      {
          a &= 0x1FFFFFFFu;
@@ -45,7 +45,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      // Controlador de movimientos de Kratos (*(Kratos+0x324)) o 0.
-@@ -432,7 +432,7 @@
+@@ -472,7 +472,7 @@
      }
  #endif
  
@@ -54,24 +54,15 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void empezarMovimiento(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          if (ctx->pc == kEmpezarMovimiento)
-@@ -447,7 +447,7 @@
+@@ -487,7 +487,7 @@
  
      void pad2Read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
 -        const uint32_t buffer = GPR_U32(ctx, 5) & 0x01FFFFFFu;
 +        const uint32_t buffer = GPR_U32(ctx, 5) & 0x1FFFFFFu;
+         const uint32_t ra = GPR_U32(ctx, 31);
          g_pad2Read(rdram, ctx, runtime);
-         const double t = segundos();
- #ifdef GOW_CANCELAR_VIGILAR
-@@ -481,7 +481,7 @@
- 
- void gowCancelarInstalar(PS2Runtime &runtime, const std::string &elfPath)
- {
--    if (std::filesystem::path(elfPath).filename() != "SCUS_973.99" || !runtime.hasFunction(kPad2Read))
-+    if (std::filesystem::path(elfPath).filename() != "SCES_531.33" || !runtime.hasFunction(kPad2Read))
-         return;
-     const char *activo = std::getenv("GOW_CANCELAR");
-     g_activo = !(activo && activo[0] == '0');
+         // gow-native-pc: the call can hand control back at an EE checkpoint. Then v0 is not the 18-byte pad packet
 --- a/PS2Recomp/ps2xRuntime/src/lib/gow_espera.cpp
 +++ b/PS2Recomp/ps2xRuntime/src/lib/gow_espera.cpp
 @@ -1,8 +1,8 @@
@@ -98,9 +89,9 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
 +// retardo termina en una vuelta y vuelve a leer la bandera (0x17A428). El planificador entrega antes la interrupción.
 +// La tabla de funciones tiene una entrada por punto de reanudación (0x17A400 y 0x17A404 dentro del bucle), así que el
  // envoltorio se instala en las tres. GOW_ESPERA_EE=0 lo desactiva.
+ #include "game_overrides.h"
  #include "ps2_runtime.h"
- #include "ps2_runtime_macros.h"
-@@ -32,11 +32,11 @@
+@@ -33,11 +33,11 @@
  
  namespace
  {
@@ -117,7 +108,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      constexpr double kRelojEe = 294912000.0;
  
      PS2Runtime::RecompiledFunction g_bucleCuadro = nullptr;
-@@ -117,7 +117,7 @@
+@@ -118,7 +118,7 @@
                                    std::chrono::steady_clock::now() - inicio).count()),
                                std::memory_order_relaxed);
          // Vuelve al planificador: entrega lo pendiente y reanuda en el bucle de retardo con $v0 = 1, que acaba en una
@@ -126,16 +117,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          SET_GPR_U32(ctx, 2, 1u);
          ctx->pc = kReanudar;
      }
-@@ -127,7 +127,7 @@
- 
- void gowEsperaInstalar(PS2Runtime &runtime, const std::string &elfPath)
- {
--    if (std::filesystem::path(elfPath).filename() != "SCUS_973.99")
-+    if (std::filesystem::path(elfPath).filename() != "SCES_531.33")
-         return;
-     const char *valor = std::getenv("GOW_ESPERA_EE");
-     if (valor && valor[0] == '0')
-@@ -137,7 +137,7 @@
+@@ -138,7 +138,7 @@
      const char *diag = std::getenv("GOW_ESPERA_DIAG");
      g_diag = diag && diag[0] == '1';
      g_bucleCuadro = runtime.lookupFunction(kBucleCuadro);
@@ -172,7 +154,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
  //   *0x35FA98 + 0x40    matriz vista-proyección de la cámara (vector fila: clip = (x, y, z, 1) * M).
  //
  // Herramientas de investigación (variables de entorno):
-@@ -42,15 +42,15 @@
+@@ -43,15 +43,15 @@
  
  namespace
  {
@@ -196,7 +178,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      constexpr float kDistanciaMaxima = 3000.0f; // más lejos se suelta el objetivo
      constexpr float kDistanciaFijar = 1500.0f;  // alcance para elegir al pulsar Alt
  
-@@ -63,7 +63,7 @@
+@@ -64,7 +64,7 @@
      bool direccionValida(uint32_t a, uint32_t bytes = 4u)
      {
          a &= 0x1FFFFFFFu;
@@ -205,7 +187,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
      uint32_t leer32(const uint8_t *rdram, uint32_t a)
      {
-@@ -312,7 +312,7 @@
+@@ -313,7 +313,7 @@
          g_activoPublicado.store(g_fijado != 0u, std::memory_order_relaxed);
      }
  
@@ -214,7 +196,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      uint32_t identificador(const uint8_t *rdram, uint32_t objeto)
      {
          const uint32_t tabla = leer32(rdram, kTablaIdentificadores);
-@@ -333,7 +333,7 @@
+@@ -334,7 +334,7 @@
          return 0u;
      }
  
@@ -223,28 +205,18 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void sobrescribirObjetivo(uint8_t *rdram, R5900Context *ctx)
      {
          if (!g_fijado)
-@@ -471,7 +471,7 @@
+@@ -478,7 +478,7 @@
  
      void pad2Read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
 -        const uint32_t buffer = GPR_U32(ctx, 5) & 0x01FFFFFFu;
 +        const uint32_t buffer = GPR_U32(ctx, 5) & 0x1FFFFFFu;
+         const uint32_t ra = GPR_U32(ctx, 31);
          g_pad2Read(rdram, ctx, runtime);
-         if (GPR_U32(ctx, 2) != 18u || buffer + 18u > PS2_RAM_SIZE)
-             return;
-@@ -560,7 +560,8 @@
- 
- void gowFijarInstalar(PS2Runtime &runtime, const std::string &elfPath)
- {
--    if (std::filesystem::path(elfPath).filename() != "SCUS_973.99")
-+    return; // Research build: camera allocation not validated.
-+    if (std::filesystem::path(elfPath).filename() != "SCES_531.33")
-         return;
-     g_t0 = std::chrono::steady_clock::now();
-     leerHerramientas();
+         // gow-native-pc: the call can hand control back at an EE checkpoint. Then v0 is not the 18-byte pad packet
 --- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
 +++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
-@@ -111,7 +111,7 @@
+@@ -112,7 +112,7 @@
              SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
  #if !defined(PLATFORM_VITA) && !defined(__ANDROID__)
              // Sin minimizar al perder el foco (GLFW_AUTO_ICONIFY): con la ventana minimizada el framebuffer mide 0.
@@ -253,7 +225,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
  #endif
              ToggleFullscreen();
          }
-@@ -124,14 +124,14 @@
+@@ -125,14 +125,14 @@
          applyCursor();
      }
  
@@ -271,7 +243,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      PS2Runtime::RecompiledFunction g_funcionCuadro = nullptr;
      std::atomic<uint64_t> g_cuadrosJuego{0};
      bool g_frameDiagnostics = false;
-@@ -193,12 +193,12 @@
+@@ -194,12 +194,12 @@
          DrawRectangle(px - tam / 3, py - tam / 4, ancho + tam * 2 / 3, tam + tam / 2, Color{0, 0, 0, 150});
          DrawText(texto, px, py, tam, fpsJuego >= 55 ? Color{120, 230, 120, 255} : fpsJuego >= 28 ? Color{240, 210, 90, 255} : Color{240, 100, 90, 255});
      }
@@ -283,10 +255,10 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      {
 -        const uint32_t buffer = GPR_U32(ctx, 5) & 0x01FFFFFFu;
 +        const uint32_t buffer = GPR_U32(ctx, 5) & 0x1FFFFFFu;
+         const uint32_t ra = GPR_U32(ctx, 31);
          g_gowPad2Read(rdram, ctx, runtime);
-         // Los overrides de Waffle escriben el aspecto 16/9 en cada lectura del mando; con TOBIICHI_PANORAMICO se
-         // vuelve a poner el elegido antes de que el juego lo use (si no, alterna entre los dos en cada cuadro).
-@@ -219,9 +219,9 @@
+         // gow-native-pc: la llamada puede devolver el control en un punto de control del EE (ctx->pc = donde reanudar).
+@@ -226,9 +226,9 @@
      }
  
      // Panorámico Hor+ (ver docs/LANZADOR.md, "Panorámico"): F en 0x7F00 y el indicador de vídeo en 0x7F04, en cada
@@ -299,7 +271,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void gowPanoramicoVBlank(uint8_t *rdram);
  }
  
-@@ -259,50 +259,50 @@
+@@ -266,50 +266,50 @@
          };
          const float target = gowAspectoPanoramico();
          float factor = 0.75f;
@@ -364,7 +336,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          }
          write32(0x7F00u, floatBits(factor));
      }
-@@ -316,12 +316,12 @@
+@@ -323,12 +323,12 @@
          if (target <= 0.0f || !rdram)
              return;
          uint32_t video = 0u;
@@ -415,10 +387,10 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
 +//     salen los extras, los trajes y la dificultad Modo Dios (0x1BB140, 0x230050). Se guarda en la tarjeta.
 +//   0x1E1560  fija la vida de una criatura (a0, f12; la deja entre 0 y la máxima). 0x1E1578 le resta daño (a0, f12)
 +//     y avisa de los umbrales que cruza (fases de los jefes); acaba llamando a 0x1E1560.
+ #include "game_overrides.h"
  #include "ps2_runtime.h"
  #include "ps2_runtime_macros.h"
- #include "raylib.h"
-@@ -56,14 +56,14 @@
+@@ -57,14 +57,14 @@
      constexpr const char *kIds[kNumTrucos] = {"inmortal", "un_golpe", "magia", "furia", "orbes",
                                                "mejoras", "poderes", "medidores", "extras"};
  
@@ -441,7 +413,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
  
      std::array<std::atomic<bool>, kNumTrucos> g_activo{};
      std::atomic<bool> g_instalado{false};
-@@ -96,7 +96,7 @@
+@@ -97,7 +97,7 @@
  
      bool direccionValida(uint32_t direccion, uint32_t bytes = 4u)
      {
@@ -450,7 +422,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      template <typename T>
-@@ -139,7 +139,7 @@
+@@ -140,7 +140,7 @@
          return false;
      }
  
@@ -459,7 +431,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // tras un checkpoint (ctx->pc distinto de la entrada), se llama al original sin más.
      void fijarVida(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
-@@ -161,7 +161,7 @@
+@@ -162,7 +162,7 @@
          g_fijarVida(rdram, ctx, runtime);
      }
  
@@ -468,7 +440,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // umbrales que cruza (fases de los jefes) igual que si se los quitaran poco a poco.
      void restarVida(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
-@@ -199,8 +199,8 @@
+@@ -200,8 +200,8 @@
                       rdram[kEstado + 0x78u], rdram[kEstado + 0x79u], rdram[kEstado + 0x7Au], rdram[kEstado + 0x7Bu],
                       rdram[kEstado + 0x7Cu], rdram[kEstado + 0x7Du], leer<uint16_t>(rdram, kEstado + 0x82u), rdram[kEstado + 0x7Eu],
                       rdram[kEstado + 0x7Fu], rdram[kEstado + 0x80u], leer<uint32_t>(rdram, kPartidasTerminadas),
@@ -479,7 +451,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                       leer<float>(rdram, kAjustes + 0x18u), leer<float>(rdram, kAjustes + 0x1Cu), leer<float>(rdram, kAjustes + 0x20u),
                       leer<float>(rdram, kAjustes + 0x24u), leer<float>(rdram, kAjustes + 0x28u));
      }
-@@ -462,7 +462,7 @@
+@@ -463,7 +463,7 @@
              codigos.push_back(c);
          for (int c = 160; c < 256; ++c)
              codigos.push_back(c);
@@ -488,16 +460,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                         0x2039, 0x203A})
              codigos.push_back(c);
          for (const std::string &ruta : rutas)
-@@ -755,7 +755,7 @@
- // Instala los envoltorios de la vida (solo God of War) y lee el estado inicial de TOBIICHI_TRUCOS.
- void gowTrucosInstalar(PS2Runtime &runtime, const std::string &elfPath)
- {
--    if (std::filesystem::path(elfPath).filename() != "SCUS_973.99" || g_instalado.load())
-+    if (std::filesystem::path(elfPath).filename() != "SCES_531.33" || g_instalado.load())
-         return;
-     if (!runtime.hasFunction(kFijarVida) || !runtime.hasFunction(kRestarVida))
-     {
-@@ -813,7 +813,7 @@
+@@ -814,7 +814,7 @@
          rdram[kEstado + 0x7Du] = std::max<uint8_t>(rdram[kEstado + 0x7Du], 4u);
      }
      if (activo(TodosLosPoderes))
@@ -528,9 +491,9 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
 -// Escribir 1 en 0x29CC94 antes de esa comprobación hace que el juego cambie de modo por su propio camino. Si el
 +// Escribir 1 en 0x29DACC antes de esa comprobación hace que el juego cambie de modo por su propio camino. Si el
  // jugador desactiva la opción en el menú, en el cuadro siguiente vuelve a quedar activada.
+ #include "game_overrides.h"
  #include "ps2_runtime.h"
- 
-@@ -23,8 +23,8 @@
+@@ -24,8 +24,8 @@
  
  namespace
  {
@@ -541,15 +504,6 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
  
      PS2Runtime::RecompiledFunction g_comprobarModo = nullptr;
  
-@@ -42,7 +42,7 @@
- 
- void gowVideoInstalar(PS2Runtime &runtime, const std::string &elfPath)
- {
--    if (std::filesystem::path(elfPath).filename() != "SCUS_973.99")
-+    if (std::filesystem::path(elfPath).filename() != "SCES_531.33")
-         return;
-     const char *valor = std::getenv("GOW_PROGRESIVO");
-     if (valor && valor[0] == '0')
 --- a/src/gow_overrides.cpp
 +++ b/src/gow_overrides.cpp
 @@ -1,4 +1,4 @@
@@ -578,7 +532,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
  void gowDumpBranchRing(const char *why);
  #include <map>
  #include <unordered_map>
-@@ -44,7 +44,7 @@
+@@ -45,7 +45,7 @@
      void gowDiagPrimPoll(uint8_t *rdram, double seconds);
      // libpad2 uses socket handles and an 18-byte payload, unlike libpad's
      // port/slot API and 32-byte status packet. God of War expects state 1 and
@@ -587,7 +541,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      struct GowPadSocket { bool open = false; uint32_t port = 0; };
      std::array<GowPadSocket, 2> g_padSockets{};
  
-@@ -62,8 +62,8 @@
+@@ -63,8 +63,8 @@
  
      uint8_t *padBuffer(uint8_t *rdram, uint32_t address, size_t size)
      {
@@ -598,7 +552,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      void gowPad2Init(uint8_t *, R5900Context *ctx, PS2Runtime *)
-@@ -77,7 +77,7 @@
+@@ -78,7 +78,7 @@
          const uint8_t *params = padBuffer(rdram, GPR_U32(ctx, 4), 12);
          uint32_t port = 0, slot = 0;
          if (params) { std::memcpy(&port, params + 4, 4); std::memcpy(&slot, params + 8, 4); }
@@ -607,7 +561,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          for (uint32_t handle = 0; handle < g_padSockets.size(); ++handle)
          {
              if (g_padSockets[handle].open) continue;
-@@ -86,14 +86,14 @@
+@@ -87,14 +87,14 @@
              padReturn(ctx, handle);
              return;
          }
@@ -624,7 +578,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      void gowPad2GetState(uint8_t *, R5900Context *ctx, PS2Runtime *)
-@@ -107,32 +107,32 @@
+@@ -108,32 +108,32 @@
      {
          auto *buffer = padBuffer(rdram, GPR_U32(ctx, 5), 4);
          const auto *socket = padSocket(ctx);
@@ -667,7 +621,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          if (name < 0x100000u)
          {
              char text[48];
-@@ -167,7 +167,7 @@
+@@ -168,7 +168,7 @@
          SET_GPR_U32(&call, 6, result);
          SET_GPR_U32(&call, 7, vm);
          SET_GPR_U32(&call, 29, vm - 0x40u);
@@ -676,7 +630,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      void gowWarpPoll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-@@ -193,7 +193,7 @@
+@@ -194,7 +194,7 @@
          static size_t next = 0;
          static double due = -1.0, requested = -1.0;
          static bool waiting = false;
@@ -685,7 +639,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          // two captures per zone (5 s after arrival and half way through the stay): gow_warp_<n>_<zone>_<k>.ppm
          static double captureAt[2] = {-1.0, -1.0};
          for (int k = 0; k < 2; ++k)
-@@ -220,10 +220,10 @@
+@@ -221,10 +221,10 @@
          }
          if (waiting)
          {
@@ -699,7 +653,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  gowWarpBuiltin(rdram, ctx, runtime, 5u, {});
              if (done && gameplay)
              {
-@@ -237,8 +237,8 @@
+@@ -238,8 +238,8 @@
              else if (now - requested > 90.0)
              {
                  std::fprintf(stderr, "[gow-warp] timeout %s at %.1f s (slot=%d loaded=%u request=%u due=%u) zone=%s\n",
@@ -710,7 +664,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                               gowCurrentZone(rdram, ctx, runtime).c_str());
                  waiting = false;
                  due = now;
-@@ -283,23 +283,23 @@
+@@ -284,23 +284,23 @@
  
      void gowPad2ReadState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -741,7 +695,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          // GOW-Port: keyboard sticks only without any gamepad (PSPadBackend uses the first available slot).
          if (!IsGamepadAvailable(0) && !IsGamepadAvailable(1) && !IsGamepadAvailable(2) && !IsGamepadAvailable(3))
          {
-@@ -329,7 +329,7 @@
+@@ -330,7 +330,7 @@
              // They are stored as kGameplayTime + s.
              constexpr double kGameplayTime = 1.0e6;
              static double gameplayStart = -1.0;
@@ -750,7 +704,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              {
                  gameplayStart = seconds;
                  std::fprintf(stderr, "[gow-pad2:test] gameplay start at %.2f s\n", seconds);
-@@ -380,7 +380,7 @@
+@@ -381,7 +381,7 @@
                      ++ramDumpIndex;
                      if (std::FILE *file = std::fopen(path.c_str(), "wb"))
                      {
@@ -759,7 +713,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                          std::fclose(file);
                      }
                      std::fprintf(stderr, "[gow-pad2:test] RAM dumped to %s at %.2f s\n", path.c_str(), seconds);
-@@ -391,13 +391,13 @@
+@@ -392,13 +392,13 @@
                  const char *value = std::getenv("GOW_PAD_TEST_NO_CAPTURE");
                  return value && std::strcmp(value, "1") == 0;
              }();
@@ -777,7 +731,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  {
                      const uint32_t maximum = readGuest32(rdram, creature + 0x19Cu);
                      float value = 0;
-@@ -410,17 +410,17 @@
+@@ -411,17 +411,17 @@
              if (playerTrace && seconds >= nextPlayerReport)
              {
                  nextPlayerReport = seconds + 1;
@@ -800,7 +754,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                               gowCurrentZone(rdram, ctx, runtime).c_str());
              }
              static double nextStateReport = 0;
-@@ -431,9 +431,9 @@
+@@ -432,9 +432,9 @@
              {
                  nextStateReport = seconds + 5;
                  std::fprintf(stderr, "[gow-pad2:state] seconds=%.2f state=%u pending=%u stage=%u levelReady=%u flashReady=%u movie=%u\n",
@@ -813,7 +767,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              }
              // GOW_PAD_GUION="5:start,12:abajo,16:x": pulsaciones de 0,7 s en esos segundos (en lugar de la
              // secuencia fija). Botones: start, select, arriba, abajo, izquierda, derecha, x, circulo, cuadrado,
-@@ -448,9 +448,9 @@
+@@ -449,9 +449,9 @@
                  if (!text)
                      return presses;
                  static const std::pair<const char *, std::pair<uint8_t, uint8_t>> buttons[] = {
@@ -826,7 +780,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                      {"x", {3, 0x40}}, {"cuadrado", {3, 0x80}}};
                  std::string item;
                  std::istringstream stream(text);
-@@ -502,7 +502,7 @@
+@@ -503,7 +503,7 @@
                  for (size_t i = 0; i < std::size(presses); ++i)
                      if (seconds >= presses[i] && seconds < presses[i] + 0.7)
                      {
@@ -835,7 +789,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                          else state[3] &= ~0x40u; // Cross
                      }
              }
-@@ -535,11 +535,11 @@
+@@ -536,11 +536,11 @@
                          file.write(reinterpret_cast<const char *>(pixels.data() + i), 3);
                      std::fprintf(stderr, "[gow-pad2:test] frame=%s seconds=%.2f\n", name.c_str(), seconds);
                      uint32_t gameState = 0, pending = 0;
@@ -851,7 +805,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                      if (std::getenv("GOW_RENDER_DIAG"))
                      {
                          static bool renderDumped = false;
-@@ -557,7 +557,7 @@
+@@ -558,7 +558,7 @@
                              std::ofstream data("gow_vu1_data.bin", std::ios::binary);
                              data.write(reinterpret_cast<const char *>(runtime->memory().getVU1Data()), 0x4000);
                              std::ofstream ram("gow_render_ram.bin", std::ios::binary);
@@ -860,7 +814,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                              // Sincronizar la VRAM del backend GPU antes de leer el búfer host.
                              runtime->gs().refreshDisplaySnapshot();
                              const auto gsState = runtime->gs().getDebugSnapshot();
-@@ -617,28 +617,28 @@
+@@ -618,28 +618,28 @@
          std::memcpy(buffer, packet.data(), packet.size());
          const uint16_t buttons = static_cast<uint16_t>(state[2] | (state[3] << 8));
          static unsigned reads = 0;
@@ -901,7 +855,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void gowVibGetProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
      {
          auto *profile = padBuffer(rdram, GPR_U32(ctx, 5), 1);
-@@ -648,7 +648,7 @@
+@@ -649,7 +649,7 @@
          padReturn(ctx, 1u);
      }
  
@@ -910,7 +864,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void gowVibSetActParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const auto *socket = padSocket(ctx);
-@@ -683,13 +683,13 @@
+@@ -684,13 +684,13 @@
      void writeGuest32(uint8_t *rdram, uint32_t addr, uint32_t value)
      {
          if (addr == 0u) return;
@@ -926,7 +880,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          return v;
      }
  
-@@ -697,7 +697,7 @@
+@@ -698,7 +698,7 @@
      {
          // GOW-Port: getenv recorre todo el entorno; en funciones llamadas a menudo se lee una vez.
          static const bool pathDiag = std::getenv("GOW_PATH_DIAG") != nullptr;
@@ -935,7 +889,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              const uint32_t object = GPR_U32(ctx, 4);
              const uint32_t address = GPR_U32(ctx, 5);
-@@ -705,43 +705,43 @@
+@@ -706,49 +706,49 @@
              std::fprintf(stderr, "[gow-path] iterator=0x%x parent=0x%x child=%.255s\n", object,
                           readGuest32(rdram, object + 4), text ? reinterpret_cast<const char *>(text) : "<invalid>");
          }
@@ -978,10 +932,16 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void gowHeapZeroAlloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t bytes = GPR_U32(ctx, 5);
+         const uint32_t ra = GPR_U32(ctx, 31);
 -        sub_0013DC78_0x13dc78(rdram, ctx, runtime);
++        sub_0013DCC0_0x13dcc0(rdram, ctx, runtime);
+         // gow-native-pc: the allocator calls the guest's strcmp, so it can hand control back at an EE checkpoint. Then
+         // v0 is not the block yet: reading it gave a stale value and the memset below zeroed up to 16 MiB of the wrong
+         // region of guest memory. Only touch the block once the call really returned.
+         if (ctx->pc != ra)
+             return;
 -        const uint32_t block = GPR_U32(ctx, 2) & 0x01FFFFFFu;
 -        if (block && bytes && bytes < 0x01000000u && block + bytes <= 0x02000000u)
-+        sub_0013DCC0_0x13dcc0(rdram, ctx, runtime);
 +        const uint32_t block = GPR_U32(ctx, 2) & 0x1FFFFFFu;
 +        if (block && bytes && bytes < 0x1000000u && block + bytes <= 0x2000000u)
              std::memset(rdram + block, 0, bytes);
@@ -996,7 +956,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // deleted; the boss/enemy meter HUD (HydraMeter, "_level0/:CheckForGlow2") did it in the user's runs (ship after the
      // Hydra fights, Cliffs combat). Deleting that child again runs a destructor through whatever now occupies the block
      // (a string: jump to 0x3F; or a zeroed list: jump to 0) and frees the block a second time, which links it into the
-@@ -779,10 +779,10 @@
+@@ -801,10 +801,10 @@
          // A child the game may delete: a live block whose virtual destructor (vtable at +4, entry +0xC) is game code.
          bool deletable(const uint8_t *rdram, PS2Runtime *runtime, uint32_t object)
          {
@@ -1009,7 +969,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  return false;
              return runtime->hasFunction(readGuest32(rdram, vtable + 0xCu));
          }
-@@ -798,10 +798,10 @@
+@@ -820,10 +820,10 @@
      void gowOperatorNew(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t ra = GPR_U32(ctx, 31);
@@ -1022,7 +982,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          // reallocated blocks marked free (false "second delete" reports, and the guard dropping live children).
          for (int steps = 0; ctx->pc != ra && ctx->pc != 0u && steps < 100000 && !runtime->isStopRequested(); ++steps)
              runtime->lookupFunction(ctx->pc)(rdram, ctx, runtime);
-@@ -818,8 +818,8 @@
+@@ -842,8 +842,8 @@
      void gowOperatorDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t block = GPR_U32(ctx, 4), ra = GPR_U32(ctx, 31);
@@ -1032,10 +992,10 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
 +        const uint32_t caller = ra == 0x143CD4u ? readGuest32(rdram, GPR_U32(ctx, 29)) : ra;
          if (block == flashqWatch())
              std::fprintf(stderr, "[gow-flashq] delete 0x%x by 0x%x\n", block, caller);
-         const auto it = heap_guard::blocks.find(block);
-@@ -833,15 +833,15 @@
-             }
-             it->second = {false, caller};
+         if (heap_guard::freed.find(block) != heap_guard::freed.end())
+@@ -858,15 +858,15 @@
+             heap_guard::blocks.erase(it);
+             heap_guard::rememberFreed(block, caller);
          }
 -        sub_0014C2F0_0x14c2f0(rdram, ctx, runtime);
 -    }
@@ -1056,7 +1016,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void gowFlashQueueDrain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t player = GPR_U32(ctx, 4), watch = flashqWatch();
-@@ -857,21 +857,21 @@
+@@ -882,21 +882,21 @@
          if (has)
              std::fprintf(stderr, "[gow-flashq] drain player 0x%x ra=0x%x tail=0x%x list:%s\n", player, GPR_U32(ctx, 31),
                           readGuest32(rdram, player + 0xCDCu), list.c_str());
@@ -1084,7 +1044,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              const uint32_t count = readGuest32(rdram, header) >> 16;
              for (uint32_t i = 0; i < count; ++i)
-@@ -884,16 +884,16 @@
+@@ -909,16 +909,16 @@
                  }
              }
          }
@@ -1108,7 +1068,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              const uint32_t count = readGuest32(rdram, definition) >> 16;
              for (uint32_t i = 0; i < count; ++i)
-@@ -906,18 +906,18 @@
+@@ -931,18 +931,18 @@
                  }
              }
          }
@@ -1135,7 +1095,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              uint32_t kept = 0;
              for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
-@@ -936,15 +936,15 @@
+@@ -961,15 +961,15 @@
              }
              writeGuest32(rdram, list + 0x1Cu, kept);
          }
@@ -1154,7 +1114,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          setReturnU32(ctx, seed & 0x7FFFFFFFu);
          ctx->pc = GPR_U32(ctx, 31);
      }
-@@ -956,17 +956,17 @@
+@@ -981,17 +981,17 @@
      void gowDiagCalcWorldMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t model = GPR_U32(ctx, 5);
@@ -1178,7 +1138,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          const uint32_t count = definition ? readGuest32(rdram, definition + 0x10u) : 0u;
          // GOW_SKEL_ANIM=1: per object with a joint palette, report every 90 calls how many joints moved since the previous report.
          if (std::getenv("GOW_SKEL_ANIM") && joints)
-@@ -977,7 +977,7 @@
+@@ -1002,7 +1002,7 @@
              {
                  const uint32_t n = (count > 0u && count < 256u) ? count : 125u;
                  std::vector<float> cur(n * 16u);
@@ -1187,7 +1147,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  unsigned moved = 0, bad = 0;
                  for (uint32_t i = 0; i < n * 16u; ++i) if (!std::isfinite(cur[i])) { ++bad; break; }
                  if (t.second.size() == cur.size())
-@@ -993,7 +993,7 @@
+@@ -1018,7 +1018,7 @@
          if (!watched && seen.size() < 600u && seen.insert(object).second)
              std::fprintf(stderr, "[gow-skel] object=%x skeleton=%x joints=%x count=%u pos=%.1f,%.1f,%.1f\n",
                           object, skeleton, joints, count, f32(object + 0xA0u), f32(object + 0xA4u), f32(object + 0xA8u));
@@ -1196,7 +1156,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              // GOW_SKEL_DUMP=<file>: append 125 joint matrices (64 bytes each) of the watched object per call.
              static const char *dumpPath = std::getenv("GOW_SKEL_DUMP");
-@@ -1017,8 +1017,8 @@
+@@ -1042,8 +1042,8 @@
      // ~3 s prints, per controller in the animator heap area, calls/time/rate/delta since the last print.
      void gowDiagController(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -1207,7 +1167,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              static thread_local bool reported = false;
              if (!reported)
-@@ -1034,9 +1034,9 @@
+@@ -1059,9 +1059,9 @@
          Info &i = info[self];
          ++i.calls; i.last = f32(self + 8u); i.rate = f32(self + 0xCu);
          {
@@ -1219,7 +1179,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              if (d > 0.f && d < 10.f) { dmin = std::min(dmin, d); dmax = std::max(dmax, d); dsum += d; ++dn; }
              if (total % 4000u == 3999u && dn)
              {
-@@ -1059,12 +1059,12 @@
+@@ -1084,12 +1084,12 @@
      // with its mode (+0x58), flags word (*(+0x68)), source pointers (+0x78/+0x7C), joint masks (+0x84/+0x104 halfwords) and count (+0x204).
      void gowDiagBlend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -1235,7 +1195,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              std::fprintf(stderr, "[gow-blend] %x mode=%u flags=%x src78=%x src7c=%x p60=%x p80=%x cnt204=%x w218=%x masks84:", self, readGuest32(rdram, self + 0x58u), flagsPtr ? readGuest32(rdram, flagsPtr) : 0u,
                           readGuest32(rdram, self + 0x78u), readGuest32(rdram, self + 0x7Cu), readGuest32(rdram, self + 0x60u), readGuest32(rdram, self + 0x80u), readGuest32(rdram, self + 0x204u), readGuest32(rdram, self + 0x218u));
              for (uint32_t i = 0; i < 12; ++i) std::fprintf(stderr, " %04x", u16(self + 0x84u + i * 2u));
-@@ -1082,16 +1082,16 @@
+@@ -1107,16 +1107,16 @@
          memory.write32(0x10002010u, 0x40000000u);
          memory.write32(0x10002000u, 0u);
          for (uint32_t offset : {0u, 16u, 32u, 48u, 64u, 64u, 64u, 64u})
@@ -1255,7 +1215,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          padReturn(ctx, 0u);
      }
  
-@@ -1101,15 +1101,15 @@
+@@ -1126,15 +1126,15 @@
      {
          const auto *name = padBuffer(rdram, GPR_U32(ctx, 4), 128);
          std::fprintf(stderr, "[gow-fmv] skipped %.127s\n", name ? reinterpret_cast<const char *>(name) : "<invalid>");
@@ -1275,7 +1235,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // name argument (a0) into the movie struct (0x304D10), so the override name is put on the guest stack below sp and
      // a0 points there; the game's own buffer (the intro's holds 6 characters) is not written.
      std::vector<std::string> &movieOverrideList()
-@@ -1141,7 +1141,7 @@
+@@ -1166,7 +1166,7 @@
              // GOW_MPEG_DIAG: the movies the game loads itself (tools/movies.py --new-game tells them apart by this line)
              if (const uint8_t *name = padBuffer(rdram, GPR_U32(ctx, 4), 1))
                  std::fprintf(stderr, "[gow-fmv] load %.31s\n", reinterpret_cast<const char *>(name));
@@ -1284,7 +1244,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              return;
          }
          const std::string &override = list[g_movieOverrideNext++];
-@@ -1155,14 +1155,14 @@
+@@ -1180,14 +1180,14 @@
          std::memcpy(buffer, override.data(), override.size());
          SET_GPR_U32(ctx, 4, name);
          SET_GPR_U32(ctx, 29, name);
@@ -1303,7 +1263,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // request is made once, GOW_BONUS_MOVIE_DELAY seconds (default 10) after the menu update first runs. With a
      // GOW_MOVIE_OVERRIDE list, a request is made each time the movie thread is idle again (3 s after the previous movie
      // ended) while list entries remain; the load override then plays the next entry instead of the bonus movie.
-@@ -1174,18 +1174,18 @@
+@@ -1199,18 +1199,18 @@
                                                                          std::chrono::duration<double>(delay));
          static bool done = false, inFlight = false;
          const bool listMode = movieOverrideList().size() > 1;
@@ -1325,7 +1285,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  std::memcpy(menu + 0x1518, &address, 4);
                  std::memcpy(menu + 0x1520, &one, 4);
                  inFlight = true;
-@@ -1193,7 +1193,7 @@
+@@ -1218,7 +1218,7 @@
                               GPR_U32(ctx, 4));
              }
          }
@@ -1334,7 +1294,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          static uint32_t lastState = 0u;
          if (done && movieState != lastState)
          {
-@@ -1205,20 +1205,20 @@
+@@ -1230,20 +1230,20 @@
              }
              lastState = movieState;
          }
@@ -1362,7 +1322,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          // near the end of a file, or every read of a big stream (a movie) with GOW_MPEG_DIAG=2
          static const bool allReads = [] { const char *v = std::getenv("GOW_MPEG_DIAG"); return v && v[0] == '2'; }();
          if (size - position < 0x10000u || (allReads && size > 0x100000u))
-@@ -1226,25 +1226,25 @@
+@@ -1251,25 +1251,25 @@
                           position, GPR_U32(ctx, 2), readGuest32(rdram, stream + 4u));
      }
  
@@ -1396,7 +1356,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              const uint32_t base = readGuest32(rdram, movie + 0xE8u), size = readGuest32(rdram, movie + 0xECu);
              if (size != 0u && readGuest32(rdram, movie + 0xF0u) == base + size)
-@@ -1254,16 +1254,16 @@
+@@ -1279,16 +1279,16 @@
  
      void gowMovieVideoRingWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -1417,7 +1377,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      void gowMovieStreamService(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-@@ -1283,7 +1283,7 @@
+@@ -1308,7 +1308,7 @@
                  std::string changed;
                  for (uint32_t i = 0; i < 0x30u; ++i)
                  {
@@ -1426,7 +1386,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                      if (value != previous[i])
                      {
                          char text[32];
-@@ -1293,16 +1293,16 @@
+@@ -1318,16 +1318,16 @@
                      }
                  }
                  std::fprintf(stderr, "[gow-fmv-poll] polls=%llu state=%u ra=%x%s\n", static_cast<unsigned long long>(polls),
@@ -1446,7 +1406,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      void gowSkipMovieStart(uint8_t *, R5900Context *ctx, PS2Runtime *)
      {
          std::fprintf(stderr, "[gow-fmv] start request skipped (ra=%x)\n", GPR_U32(ctx, 31));
-@@ -1314,15 +1314,15 @@
+@@ -1339,15 +1339,15 @@
          static unsigned calls = 0;
          if (++calls <= 30)
              std::fprintf(stderr, "[gow-flash-ready] a0=%x event=%x ra=%x\n", GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 31));
@@ -1465,7 +1425,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          {
              // Only the intro-completion query is bypassed, after the level load.
              // No animation state or game-state flags are changed.
-@@ -1331,10 +1331,10 @@
+@@ -1356,10 +1356,10 @@
          }
          sub_00100C50_0x100c50(rdram, ctx, runtime);
          static unsigned samples = 0;
@@ -1478,7 +1438,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              std::fprintf(stderr, "[gow-animation] object=%x time=%g delta=%g\n", object, ctx->f[0], delta);
          }
      }
-@@ -1344,19 +1344,19 @@
+@@ -1369,19 +1369,19 @@
          const uint32_t ra = GPR_U32(ctx, 31);
          sub_00100BF0_0x100bf0(rdram, ctx, runtime);
          static unsigned samples = 0;
@@ -1501,7 +1461,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              std::fprintf(stderr, "[gow-filter] resume index=%x limit=%x rows=%x ra=%x sp=%x\n",
                           GPR_U32(ctx, 10), GPR_U32(ctx, 12), GPR_U32(ctx, 14), GPR_U32(ctx, 31), GPR_U32(ctx, 29));
          sub_001262C8_0x1262c8(rdram, ctx, runtime);
-@@ -1365,10 +1365,10 @@
+@@ -1390,10 +1390,10 @@
      // GOW-Port: observar el productor de posiciones, sin alterar buffers ni ejecución EE.
      void gowDiagInitUnpack(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -1514,7 +1474,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          static unsigned samples=0;
          if (samples++ < 64 && ctx->pc == caller)
              std::fprintf(stderr,"[gow-eeprim:init] this=%x caller=%x type=%u chunk=%u buffer=%u command=%x next=%x\n",
-@@ -1380,18 +1380,18 @@
+@@ -1405,18 +1405,18 @@
      size_t g_nextPrimProbe=0;
  
      // GOW-Port: observar la lista usada por ProcessServer antes de ejecutar el original.
@@ -1537,7 +1497,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              const bool validView = padBuffer(rdram, view, 0x3B0u) != nullptr;
              const uint32_t viewId = validView ? readGuest32(rdram, view + 0x3ACu) : 0u;
              const uint32_t contextMask = readGuest32(rdram, context + 0x48u);
-@@ -1443,14 +1443,14 @@
+@@ -1468,14 +1468,14 @@
              }
          }
          // Nunca escribir índices, posiciones ni registros: el original conserva también sus checkpoints.
@@ -1555,7 +1515,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          static unsigned early = 0u, scene = 0u;
          auto &samples = state == 11u ? scene : early;
          if (samples < 64u)
-@@ -1462,10 +1462,10 @@
+@@ -1487,10 +1487,10 @@
              const uint32_t slot = validServer ? readGuest32(rdram, server + 0xD4u) : 0u;
              // Calculos en 64 bits para no envolver indices fuera de RAM.
              const uint64_t row = (table & 0x1FFFFFFFu) + uint64_t(group) * 12u;
@@ -1568,7 +1528,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              const uint32_t context = validCell ? readGuest32(rdram, uint32_t(cell)) : 0u;
              const bool validContext = padBuffer(rdram, context, 0x24u) != nullptr;
              const uint32_t vtable = validContext ? readGuest32(rdram, context + 0x20u) : 0u;
-@@ -1478,7 +1478,7 @@
+@@ -1503,7 +1503,7 @@
                           validContext ? 1u : 0u, vtable, methods ? 1u : 0u, int(adjustment), target);
          }
          // La seleccion es una fotografia de entrada; el original conserva sus checkpoints y llamadas.
@@ -1577,7 +1537,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      }
  
      struct GowModelContextSamples { uint32_t physical = 0u; unsigned early = 0u, scene = 0u; };
-@@ -1499,12 +1499,12 @@
+@@ -1524,12 +1524,12 @@
          return 0u;
      }
  
@@ -1593,7 +1553,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          static std::array<GowModelContextSamples, 8> probes{};
          const unsigned sample = gowModelContextSample(probes, context, state);
          if (sample)
-@@ -1528,7 +1528,7 @@
+@@ -1553,7 +1553,7 @@
                  std::memcpy(&id, clientData, sizeof(id));
                  const uint32_t enabled = readGuest32(rdram, client + 0x2Cu);
                  const uint32_t view = readGuest32(rdram, client + 0x44u);
@@ -1602,7 +1562,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  const uint32_t vtable = readGuest32(rdram, client + 0x20u);
                  const auto *methods = padBuffer(rdram, vtable, 0x20u);
                  int16_t adjustment = 0;
-@@ -1549,20 +1549,20 @@
+@@ -1574,20 +1574,20 @@
                           sample, state, context, validContext ? 1u : 0u, head, count, active, invalidRoutes,
                           invalid ? 1u : 0u, cycle ? 1u : 0u, node && !invalid && !cycle ? 1u : 0u);
          }
@@ -1630,7 +1590,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              const bool validView = padBuffer(rdram, view, 0x3B0u) != nullptr;
              const uint32_t viewId = validView ? readGuest32(rdram, view + 0x3ACu) : 0u;
              const uint32_t mask = validContext ? readGuest32(rdram, context + 0x48u) : 0u;
-@@ -1601,22 +1601,22 @@
+@@ -1626,22 +1626,22 @@
                           viewRejected, treeCandidates, processCandidates, staticCount, sphereTree, sphereValid,
                           invalid ? 1u : 0u, cycle ? 1u : 0u, node && !invalid && !cycle ? 1u : 0u);
          }
@@ -1660,7 +1620,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              const uint32_t object = valid ? readGuest32(rdram, model + 0x18u) : 0u;
              const bool validObject = padBuffer(rdram, object, 0x108u) != nullptr;
              const uint32_t skeleton = validObject ? readGuest32(rdram, object + 0x104u) : 0u;
-@@ -1625,7 +1625,7 @@
+@@ -1650,7 +1650,7 @@
              if (skeletonData) std::memcpy(&rootId, skeletonData + 0x86u, sizeof(rootId));
              const uint32_t visibility = skeletonData ? readGuest32(rdram, skeleton + 0x54u) : 0u;
              const uint64_t rootAddress = (visibility & 0x1FFFFFFFu) + uint64_t(rootId) * 4u;
@@ -1669,7 +1629,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              const uint32_t rootVisible = validRoot ? (!visibility || readGuest32(rdram, uint32_t(rootAddress)) ? 1u : 0u) : 0u;
              std::fprintf(stderr, "[gow-model:process] sample=%u state=%u context=%x this=%x valid=%u caller=%x view=%x groups=%u groupArray=%x disableCulling=%u object=%x skeleton=%x visibility=%x rootId=%u validRoot=%u rootVisible=%u groupBits=%x\n",
                           ++samples, state, context, model, valid ? 1u : 0u, GPR_U32(ctx, 31), view,
-@@ -1634,18 +1634,18 @@
+@@ -1659,18 +1659,18 @@
                           visibility, unsigned(rootId), validRoot ? 1u : 0u, rootVisible,
                           validObject ? readGuest32(rdram, object + 0x100u) : 0u);
          }
@@ -1695,7 +1655,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          const uint32_t view = GPR_U32(ctx, 4), model = GPR_U32(ctx, 17), group = GPR_U32(ctx, 19);
          std::array<uint32_t, 4> sphere{};
          std::array<uint32_t, 10> planes{};
-@@ -1657,7 +1657,7 @@
+@@ -1682,7 +1682,7 @@
              if (validView)
                  for (size_t i = 0u; i < offsets.size(); ++i) planes[i] = readGuest32(rdram, view + offsets[i]);
          }
@@ -1704,7 +1664,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          if (sample)
              std::fprintf(stderr, "[gow-model:clip] sample=%u state=%u this=%x group=%x view=%x validView=%u sphere=%08x,%08x,%08x,%08x planes=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x completed=%u result=%x\n",
                           sample, state, model, group, view, validView ? 1u : 0u,
-@@ -1671,7 +1671,7 @@
+@@ -1696,7 +1696,7 @@
          static double next=0;
          if(seconds<next) return;
          next=seconds+5;
@@ -1713,7 +1673,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          for(const auto &p:g_primProbes)
          {
              const auto *data=padBuffer(rdram,p.address,16);
-@@ -1684,13 +1684,13 @@
+@@ -1709,13 +1709,13 @@
  
      void gowDiagUpdateAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -1731,7 +1691,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          ++samples;
          // Un checkpoint no es un retorno: no interpretar v0 como dirección en ese caso.
          if (ctx->pc != caller)
-@@ -1730,7 +1730,7 @@
+@@ -1755,7 +1755,7 @@
              const uint32_t n = (len - off < 16u) ? (len - off) : 16u;
              for (uint32_t i = 0; i < n; ++i)
              {
@@ -1740,7 +1700,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                  std::snprintf(hex + i * 3, 4, "%02x ", c);
                  asc[i] = (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '.';
              }
-@@ -1739,7 +1739,7 @@
+@@ -1764,7 +1764,7 @@
      }
  
      // sub_0026BF28(cmd, tamano, datos): envio de comandos al driver de sonido 989snd (version EE).
@@ -1749,7 +1709,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // respuesta = 0x305600 [12 bytes]) y devuelve la palabra 1 de la respuesta.
      // cmd 0x68 = mensaje para un plugin de 989snd (smpd, el cargador de datos): 'datos' apunta a
      // {u32 a, u32 b, u32 len, u32 ptr} y se envian los 12 primeros bytes + len bytes copiados de ptr.
-@@ -1755,9 +1755,9 @@
+@@ -1780,9 +1780,9 @@
  
      void gowSnd989SendCommand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
@@ -1762,7 +1722,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              return;
          }
          const uint32_t cmd = GPR_U32(ctx, 4);
-@@ -1791,7 +1791,7 @@
+@@ -1816,7 +1816,7 @@
              return;
          }
          const uint32_t ra = GPR_U32(ctx, 31);
@@ -1771,7 +1731,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          if (g_sndCmdCount <= 300 && ctx->pc == ra)
          {
              std::fprintf(stderr, "[gow-snd]   -> v0=0x%x\n", GPR_U32(ctx, 2));
-@@ -1866,18 +1866,18 @@
+@@ -1891,18 +1891,18 @@
          return value;
      }
  
@@ -1798,7 +1758,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          if (width == 0u)
              return false; // the original traps (divide by zero): let it run
          s = {};
-@@ -1919,16 +1919,16 @@
+@@ -1944,13 +1944,13 @@
          GSDisplayState state;
          if (!gowComputeDisplay(rdram, state))
          {
@@ -1811,15 +1771,20 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              const uint32_t ra = GPR_U32(ctx, 31);
 -            sub_00183360_0x183360(rdram, ctx, runtime); // writes through the register path
 +            sub_00183450_0x183450(rdram, ctx, runtime); // writes through the register path
-             const GSDisplayState hw = ps2_gs_display::display(runtime->memory());
-             static int reports = 0;
--            const uint64_t fb = 0x3FFFFF000FFFFFull, dm = 0x007FFFFF1FFFFFFFull; // DISPFB/DISPLAY defined fields
-+            const uint64_t fb = 0x3FFFFF000FFFFFull, dm = 0x7FFFFF1FFFFFFFull; // DISPFB/DISPLAY defined fields
-             const bool c1 = (state.pmode & 1u) != 0u;
-             const bool same = (hw.pmode & 0xFFFFu) == state.pmode && (hw.smode2 & 3u) == state.smode2 &&
-                               (hw.dispfb2 & fb) == state.dispfb2 && (hw.display2 & dm) == state.display2 &&
-@@ -1947,30 +1947,30 @@
-             SET_GPR_U32(ctx, 31, ra);
+             // gow-native-pc: the call can hand control back at an EE checkpoint. Then it has not written the registers
+             // yet, and the old code set ctx->pc = ra anyway: the rest of the original was skipped, only half the
+             // registers were written and the comparison below was made against a half-updated state. Only compare (and
+@@ -1959,7 +1959,7 @@
+             {
+                 const GSDisplayState hw = ps2_gs_display::display(runtime->memory());
+                 static int reports = 0;
+-                const uint64_t fb = 0x3FFFFF000FFFFFull, dm = 0x007FFFFF1FFFFFFFull; // DISPFB/DISPLAY defined fields
++                const uint64_t fb = 0x3FFFFF000FFFFFull, dm = 0x7FFFFF1FFFFFFFull; // DISPFB/DISPLAY defined fields
+                 const bool c1 = (state.pmode & 1u) != 0u;
+                 const bool same = (hw.pmode & 0xFFFFu) == state.pmode && (hw.smode2 & 3u) == state.smode2 &&
+                                   (hw.dispfb2 & fb) == state.dispfb2 && (hw.display2 & dm) == state.display2 &&
+@@ -1979,12 +1979,12 @@
+             }
          }
          ps2_gs_display::setDisplay(runtime->memory(), state);
 -        SET_GPR_U64(ctx, 2, 0u); // the original returned stack garbage; its only caller (0x1837B8 <- 0x17A128) ignores it
@@ -1834,7 +1799,8 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // time statistic, acknowledges FINISH and returns 0 with interrupts enabled.
      void gowGsFinishHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
-         PS2Memory &memory = runtime->memory();
+@@ -1993,18 +1993,18 @@
+         gow_gs_replay::gameState().store(readGuest32(rdram, 0x0029E560u), std::memory_order_relaxed);
          if (ps2_gs_display::finishPending(memory))
          {
 -            gowStore32(rdram, 0x0029C7D0u, 2u);
@@ -1860,7 +1826,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
              }
              ps2_gs_display::ackFinish(memory);
          }
-@@ -1979,7 +1979,7 @@
+@@ -2013,7 +2013,7 @@
          ctx->pc = GPR_U32(ctx, 31);
      }
  
@@ -1869,30 +1835,35 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // EnableIntc(0), GsPutIMR(GsGetIMR() & ~FINISHMSK)); the CSR store clearing a stale FINISH is the native ack.
      void gowGsFinishInstall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
-@@ -1994,16 +1994,16 @@
-                 std::fprintf(stderr, "[gsregs] call %08x did not return (pc=%08x)\n", address, ctx->pc);
+@@ -2045,19 +2045,19 @@
+             return true;
          };
          SET_GPR_U64(ctx, 4, 0u);
 -        SET_GPR_U64(ctx, 5, 0x00182DD8u);
 +        SET_GPR_U64(ctx, 5, 0x182EC8u);
          SET_GPR_U64(ctx, 6, 0u);
--        call(0x00293900u); // AddIntcHandler
+-        if (!call(0x00293900u)) // AddIntcHandler
+-            return;
 -        gowStore32(rdram, 0x0029C7C0u, GPR_U32(ctx, 2));
-+        call(0x294540u); // AddIntcHandler
++        if (!call(0x294540u)) // AddIntcHandler
++            return;
 +        gowStore32(rdram, 0x29D400u, GPR_U32(ctx, 2));
          ps2_gs_display::ackFinish(runtime->memory());
          SET_GPR_U64(ctx, 4, 0u);
--        call(0x00294690u); // EnableIntc
--        call(0x00279E30u); // GsGetIMR
-+        call(0x2952D0u); // EnableIntc
-+        call(0x27AA40u); // GsGetIMR
+-        if (!call(0x00294690u)) // EnableIntc
+-            return;
+-        if (!call(0x00279E30u)) // GsGetIMR
++        if (!call(0x2952D0u)) // EnableIntc
++            return;
++        if (!call(0x27AA40u)) // GsGetIMR
+             return;
          SET_GPR_U64(ctx, 4, GPR_U64(ctx, 2) & ~0x200ull);
--        call(0x00279DF0u); // GsPutIMR
-+        call(0x27AA00u); // GsPutIMR
+-        if (!call(0x00279DF0u)) // GsPutIMR
++        if (!call(0x27AA00u)) // GsPutIMR
+             return;
          SET_GPR_U32(ctx, 31, ra);
          ctx->pc = ra;
-     }
-@@ -2013,7 +2013,7 @@
+@@ -2068,7 +2068,7 @@
      // interrupt handler cbTimerHandler) serves only DelayThread in this game. DelayThread is a native scheduler
      // delay and the timer system starts without timer 2, so no game code programs or reads timer 2.
  
@@ -1901,7 +1872,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // (0, or KE_CAN_NOT_WAIT 0x80008008 with interrupts disabled), the thread sleeps usec of guest time.
      void gowDelayThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
-@@ -2027,7 +2027,7 @@
+@@ -2082,7 +2082,7 @@
          runtime->eeScheduler().delayCurrent(usec * EeScheduler::kEeClockHz / 1000000u); // resumes with v0 = 0
      }
  
@@ -1910,7 +1881,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
      // success without programming timer 2 or installing its interrupt handler.
      void gowTimerSystemNoop(uint8_t *, R5900Context *ctx, PS2Runtime *)
      {
-@@ -2054,10 +2054,10 @@
+@@ -2109,10 +2109,10 @@
                      for (const EeThreadSnapshot &t : snapshot.threads)
                          std::fprintf(stderr, "[gow-threads]   id=%d prio=%d status=%d wait=%d/%d pc=%08x ra=%08x\n", t.id,
                                       t.currentPriority, int(t.status), int(t.waitReason), t.waitId, t.pc, t.ra);
@@ -1924,7 +1895,7 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
                      {
                          std::string text;
                          for (uint32_t off = 0xE8u; off < 0x160u; off += 4u)
-@@ -2075,101 +2075,101 @@
+@@ -2130,98 +2130,98 @@
          gow_gs_replay::configure(runtime.memory(),runtime.gs());
          // El heap interno del runtime va bajo el ELF (memoria libre) para no pisar el heap propio del juego,
          // que este crea con SetupHeap al final del .bss (patches/ps2recomp-heap.patch).
@@ -2085,7 +2056,11 @@ both passed 11 session checks, including 2000 VU1 comparisons without mismatches
          std::fprintf(stderr, "[gow-override] sceSifInitRpc=%d iWakeupThread=%d sceCdReadDvdDualInfo=%d snd989=%d modbuf=%d\n",
                       a, b, c, d, e);
      }
- }
- 
+@@ -2230,5 +2230,5 @@
+ // gow-native-pc: the executable names this build serves. The USA build serves SCUS_973.99 only; a regional
+ // overlay (japan, europe) replaces this registration with its own names, and the game modules ask the registry
+ // instead of repeating the name (that was six copies of it). GOW_ELF_ALIASES adds names at run time.
 -PS2_REGISTER_GAME_OVERRIDE("God of War (SCUS-97399)", "SCUS_973.99", 0x00100008u, 0u, applyGowOverrides)
-+PS2_REGISTER_GAME_OVERRIDE("God of War (SCES-53133)", "SCES_531.33", 0x100008u, 0u, applyGowOverrides)
+-
++PS2_REGISTER_GAME_OVERRIDE_ALIASES("God of War (SLES-53133)", "SLES_531.33", nullptr, 0x00100008u, 0u, applyGowOverrides)
++

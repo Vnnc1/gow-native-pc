@@ -14,6 +14,11 @@ Output (under <data>/<game>/):
   mc0/                    the one memory card folder: every disc folder's mc0 is a junction to it
   languages.json          [{language, label, edition, elf, quality: "full"|"standalone"|"original"}], one per
                           language (the best folder), plus "recompile_elf" (the executable the pipeline recompiles)
+A disc whose profile region declares `code = "<region id>"` carries that region's executable (the Asia SCAJ-97399
+disc boots the Japanese copy byte for byte): it is extracted and normalised like any other, its executable is also
+linked under the name that build keys on, and it is reported for register_region.py instead of entering
+languages.json, because that manifest feeds the USA pipeline and the primary installation's Play list. Pass a
+regional disc its own --data directory: regional cards and saves must not mix with the primary ones.
 Discs whose executable is not the profile's game code are reported and skipped. Re-running is cheap: an already
 extracted disc (same image size and time) is kept.
 """
@@ -35,6 +40,7 @@ import chd  # noqa: E402
 import profile as profiles  # noqa: E402
 
 SECTOR = discfs.SECTOR
+ROOT = os.path.dirname(os.path.dirname(HERE))
 
 
 def say(msg):
@@ -76,6 +82,25 @@ def extract(src, dst):
     with open(marker, 'w', encoding='utf-8') as saved:
         saved.write(stamp + '\n' + os.path.abspath(src) + '\n')
     return dst
+
+
+def expose_for_build(folder, elf_name, build_elf):
+    """Give the disc's executable the name the build that runs it expects (same bytes, second name).
+
+    The runtime registers its per-game overrides and gates the native integration on the executable name it is
+    handed, so a disc that carries another edition's code (the Asia SCAJ-97399 image boots the Japanese copy)
+    has to be presented under that edition's name. The image is untouched: `.disc_layout` keeps describing the
+    disc as pressed, and the link is a second name for the same file.
+    """
+    source, link = os.path.join(folder, elf_name), os.path.join(folder, build_elf)
+    if elf_name == build_elf or not os.path.isfile(source):
+        return False
+    if not os.path.exists(link):
+        try:
+            os.link(source, link)
+        except OSError:
+            shutil.copy2(source, link)
+    return True
 
 
 def normalise(folder, prof):
@@ -131,8 +156,6 @@ def normalise(folder, prof):
     if wide and movie:
         mapped = 0
         for i, name, part, size, sector in toc:
-            # Missing-part remapping above may have changed the payload being inspected.
-            part, size, sector = struct.unpack_from('<III', raw, i + 12)
             if name.endswith(wide) and (size <= SECTOR or is_placeholder(part, size, sector)):
                 base = name[:-len(wide)] + movie
                 if base in part0 and part0[base][0] > size:
@@ -227,22 +250,43 @@ def main():
     base = os.path.join(a.data, a.game)
     card = os.path.join(base, 'mc0')
     found = []
+    regional = []
     for src in a.discs:
         resolved = chd.resolve(src, os.path.join(a.data, 'imports', 'chd'))
         info = identify.identify(resolved)
         if info.get('game') != a.game:
             say(f'skipped {src}: {"; ".join(info["problems"]) or "another game"}')
             continue
-        if not info.get('compatible'):
+        build = identify.region_by_id(prof, info.get('code'))
+        if not (info.get('compatible') or build):
             say(f'skipped {src}: {"; ".join(info["problems"])}')
             continue
         say(f'{info["label"]} [{info["kind"]}] <- {src}')
         folder = extract(resolved, os.path.join(base, 'discs', info['edition']))
-        for note in normalise(folder, prof):
+        notes = normalise(folder, prof)
+        if build:
+            if expose_for_build(folder, info['elf'], build['elf']):
+                notes.append(f'{info["elf"]} is also {build["elf"]}: the {build["id"]} build keys on that name')
+            for note in notes:
+                say(f'  {note}')
+            if os.path.abspath(base) == os.path.abspath(os.path.join(ROOT, 'data', a.game)):
+                say('  this is the primary installation: a regional disc keeps its own cards and saves, '
+                    'so prepare it with its own --data')
+            junction(os.path.join(folder, 'mc0'), card)
+            regional.append(dict(info, folder=folder, build=build['id'], runner_elf=os.path.join(folder, build['elf'])))
+            continue
+        for note in notes:
             say(f'  {note}')
         junction(os.path.join(folder, 'mc0'), card)
         found.append(dict(info, folder=folder))
+    for f in regional:
+        say(f'register {f["label"]}: python -I tools/pipeline/register_region.py --game {a.game} '
+            f'--region {f["edition"]} --runner "<the {f["build"]} runner>" --elf "{f["runner_elf"]}" '
+            '--data "<its own data directory>"')
     if not found:
+        if regional:
+            say('only regional discs were given: nothing to write in languages.json (they are registered instead)')
+            return
         sys.exit('no compatible disc of ' + prof['title'])
     originals = [f for f in found if f['kind'] == 'original']
     languages = {}

@@ -1,0 +1,240 @@
+# gow-native-pc: launcher-side effect switches. Apply from the workspace root with git apply; this is not a
+# runtime-clone patch (the clone carries Tobiichi's own launcher, with different Main.qml/lanzador.cpp).
+#
+# v2 (2026-11-06), dead-toggle fix: the first version added the three Settings properties, the Graphics page
+# group and bandera("GOW_FX_*") in lanzador.cpp, but Main.qml's jugar() play map did not contain the three
+# keys. Lanzador::iniciar reads a.value("fxSin*") from that map, so every toggle read as false and the three
+# environment variables were always removed: no switch could ever change anything. The follow-up hunks at the
+# end of this file forward the keys, include them in the session-diagnostics allowlist and add an assertion to
+# tools/test/regional-play-ui.py (plus the mod-model stub that test needed to run at all).
+# Verified: regional-play-ui.py passes with Qt 6.8.3 / qml.exe, every a.value key is present in the play map.
+#
+# v3 (2026-11-06), evidence fix: gow-session.exe records the runtime environment in the session report,
+# but its allowlist omitted the three GOW_FX_* variables and the picture settings, so a report could not
+# prove whether a switch reached the runner. The last hunk adds them. Also changed outside this patch
+# (workspace sources/docs, no runtime clone involved): play-asia.cmd (no blind overrides + settings note),
+# tools/test/launcher-env-contract.py (new contract test), tools/pipeline/modules/verify.ps1 (runs it),
+# engine/README.md (patch 81 moved out of the runtime chain).
+#
+diff --git a/launcher/qml/Main.qml b/launcher/qml/Main.qml
+--- a/launcher/qml/Main.qml
++++ b/launcher/qml/Main.qml
+@@ -84,6 +84,11 @@ ApplicationWindow {
+         property bool vuRapida: false // GOW_VU1_FAST (runtime patch 51): VU1 blocks without operand normalisation / MADD overflow check
+         property bool jitInline: true
+         property bool diagnostics: false
++        // gow-native-pc (runtime patch 80): effect switches. All off = the original picture; they only change the
++        // host-side GS draw, the guest runs exactly the same.
++        property bool fxSinSombras: false // GOW_FX_NO_SHADOWS
++        property bool fxSinAditivos: false // GOW_FX_NO_ADDITIVE3D
++        property bool fxSinFiltrado: false // GOW_FX_NO_TEXTURE_FILTER
+         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
+         property string textoJuego: "" // game language: a "language" of installer.languages() (e.g. "en", "pt-BR"); empty = ask
+         property real portadaFoco: 0.55
+@@ -210,6 +215,9 @@ ApplicationWindow {
+         ajustes.escSalir = false
+         ajustes.minimizarAlJugar = true
+         ajustes.trucos = ""
++        ajustes.fxSinSombras = false
++        ajustes.fxSinAditivos = false
++        ajustes.fxSinFiltrado = false
+     }
+ 
+     // Name key of the Graphics page's quick profile the current settings match (PaginaGrafico.qml perfiles).
+diff --git a/launcher/qml/PaginaGrafico.qml b/launcher/qml/PaginaGrafico.qml
+--- a/launcher/qml/PaginaGrafico.qml
++++ b/launcher/qml/PaginaGrafico.qml
+@@ -253,6 +253,37 @@ ScrollView {
+             }
+         }
+ 
++        Grupo { text: Tema.t("grupoEfectos") }
++        Fila {
++            titulo: Tema.t("fxSinSombras")
++            descripcion: Tema.t("fxSinSombrasDesc")
++            Interruptor {
++                checked: raiz.ajustes.fxSinSombras
++                onToggled: raiz.ajustes.fxSinSombras = checked
++            }
++        }
++        Fila {
++            titulo: Tema.t("fxSinAditivos")
++            descripcion: Tema.t("fxSinAditivosDesc")
++            Interruptor {
++                checked: raiz.ajustes.fxSinAditivos
++                onToggled: raiz.ajustes.fxSinAditivos = checked
++            }
++        }
++        Fila {
++            titulo: Tema.t("fxSinFiltrado")
++            descripcion: Tema.t("fxSinFiltradoDesc")
++            Interruptor {
++                checked: raiz.ajustes.fxSinFiltrado
++                onToggled: raiz.ajustes.fxSinFiltrado = checked
++            }
++        }
++        Fila {
++            titulo: Tema.t("fxAviso")
++            descripcion: Tema.t("fxAvisoDesc")
++            anchoControl: 0
++        }
++
+         Grupo { text: Tema.t("grupoHerramientas") }
+         Fila {
+             titulo: Tema.t("upNativo")
+diff --git a/launcher/qml/Textos.js b/launcher/qml/Textos.js
+--- a/launcher/qml/Textos.js
++++ b/launcher/qml/Textos.js
+@@ -496,6 +496,17 @@ var tabla = {
+     grupoImagen: { tr: "GÖRÜNTÜ", en: "IMAGE", es: "IMAGEN", pt: "IMAGEM" },
+     grupoCalidad: { tr: "KALİTE", en: "QUALITY", es: "CALIDAD", pt: "QUALIDADE" },
+     grupoHerramientas: { tr: "ÖLÇEKLEME VE ARAÇLAR", en: "UPSCALING AND TOOLS", es: "ESCALADO Y HERRAMIENTAS", pt: "UPSCALING E FERRAMENTAS" },
++    grupoEfectos: { tr: "EFFEKT ANAHTARLARI (YENİDEN BAŞLATMA)", en: "EFFECT SWITCHES (RESTART)", es: "INTERRUPTORES DE EFECTOS (REINICIAR)", pt: "CHAVES DE EFEITOS (REINICIAR)" },
++    fxSinNiebla: { tr: "Sis kapalı", en: "Fog off", es: "Niebla desactivada", pt: "Névoa desligada" },
++    fxSinNieblaDesc: { tr: "Oyunun uzak geometriye uyguladığı sis karışımını kaldırır. Yalnızca görüntü; sisin gizlediği uzak geometri görünebilir.", en: "Removes the fog blend applied to distant geometry. Visual only; distant geometry the fog hid may become visible.", es: "Quita la mezcla de niebla aplicada a la geometría lejana. Solo visual; puede aparecer geometría lejana que la niebla ocultaba.", pt: "Remove a mistura de névoa aplicada à geometria distante. Apenas visual; geometria distante que a névoa escondia pode aparecer." },
++    fxSinSombras: { tr: "Karakter gölgeleri kapalı", en: "Character shadows off", es: "Sombras de personajes desactivadas", pt: "Sombras de personagens desligadas" },
++    fxSinSombrasDesc: { tr: "Gölge hacmi sayım geçişlerini atlar. Karakter ve nesne gölgeleri kaybolur; yansımalar ve ışık kalır. Oyunu etkilemez.", en: "Skips the shadow-volume count passes. Character and object shadows disappear; reflections and lighting stay. It does not affect gameplay.", es: "Omite las pasadas de conteo del volumen de sombra. Desaparecen las sombras de personajes y objetos; las reflexiones y la iluminación se mantienen. No afecta al juego.", pt: "Pula as passagens de contagem do volume de sombra. Sombras de personagens e objetos somem; reflexos e iluminação permanecem. Não afeta a jogabilidade." },
++    fxSinAditivos: { tr: "Toplamalı parlaklık kapalı", en: "Additive glow off", es: "Brillo aditivo desactivado", pt: "Brilho aditivo desligado" },
++    fxSinAditivosDesc: { tr: "3B toplamalı çizimleri atlar (ateş, parlaklık, büyü kıvılcımları). Gölgeler ayrı anahtardadır. Bazı oyun ipuçları daha az okunur olabilir.", en: "Skips 3D additive draws (fire, glow, magic sparks). Shadows have their own switch. Some gameplay cues may be less readable.", es: "Omite los dibujos aditivos 3D (fuego, brillo, chispas mágicas). Las sombras tienen su propio interruptor. Algunas pistas de juego pueden leerse peor.", pt: "Pula os desenhos aditivos 3D (fogo, brilho, faíscas mágicas). As sombras têm seu próprio interruptor. Algumas dicas de jogo podem ficar menos legíveis." },
++    fxSinFiltrado: { tr: "Doku filtrelemesini kapat (en yakın)", en: "Disable texture filtering (nearest)", es: "Desactivar filtrado de texturas (vecino)", pt: "Desativar filtragem de texturas (vizinho)" },
++    fxSinFiltradoDesc: { tr: "Dokuları en yakın komşuyla örnekler: daha keskin, daha pikselli ve titrek. GPU bant genişliğini azaltır.", en: "Samples textures with nearest neighbour: sharper, more pixelated and shimmering. Uses less GPU bandwidth.", es: "Muestrea texturas con el vecino más cercano: más nítido, más pixelado y con parpadeo. Usa menos ancho de banda de GPU.", pt: "Amostra texturas com o vizinho mais próximo: mais nítido, mais pixelado e tremeluzente. Usa menos banda da GPU." },
++    fxAviso: { tr: "Yeniden başlatmada uygulanır", en: "Applies on restart", es: "Se aplica al reiniciar", pt: "Aplica ao reiniciar" },
++    fxAvisoDesc: { tr: "Bu anahtarlar oyun açılırken okunur: değiştirdikten sonra oyunu kapatıp yeniden açın. Hepsi kapalıyken görüntü özgün hâlindedir.", en: "These switches are read when the game starts: close and reopen the game after changing them. All off keeps the original picture.", es: "Estos interruptores se leen al iniciar el juego: ciérralo y vuelve a abrirlo tras cambiarlos. Todos apagados mantiene la imagen original.", pt: "Estes interruptores são lidos ao iniciar o jogo: feche e reabra o jogo após mudá-los. Tudo desligado mantém a imagem original." },
+     upNativo: { tr: "Yerleşik ölçekleme", en: "Built-in upscaling", es: "Escalado integrado", pt: "Upscaling nativo" },
+     upNativoDesc: { tr: "Oyun, iç çözünürlükte gerçekten daha fazla piksel çizer (2×, 3×…); keskin filtre ve FXAA sonra ekrana uydurur. GPU ağırsa iç çözünürlüğü düşürmek FPS kazandırır; CPU sınırlı sahnelerde değişmez.", en: "The game really draws more pixels at the internal resolution (2×, 3×…); the sharp filter and FXAA then fit it to your screen. Lowering the internal resolution gains FPS when the GPU is the limit; it does not help CPU-bound scenes.", es: "El juego dibuja de verdad más píxeles a la resolución interna (2×, 3×…); el filtro nítido y el FXAA la ajustan a tu pantalla. Bajar la resolución interna da FPS si la GPU es el límite; no ayuda en escenas limitadas por la CPU.", pt: "O jogo desenha de verdade mais pixels na resolução interna (2×, 3×…); o filtro nítido e o FXAA ajustam à sua tela. Baixar a resolução interna dá FPS quando a GPU é o limite; não ajuda em cenas limitadas pela CPU." },
+     upDlss: { tr: "DLSS / FSR 2–3 / XeSS", en: "DLSS / FSR 2–3 / XeSS", es: "DLSS / FSR 2–3 / XeSS", pt: "DLSS / FSR 2–3 / XeSS" },
+diff --git a/launcher/qml/idiomas/zh.js b/launcher/qml/idiomas/zh.js
+--- a/launcher/qml/idiomas/zh.js
++++ b/launcher/qml/idiomas/zh.js
+@@ -402,6 +402,17 @@ var textos = {
+     grupoImagen: "图像",
+     grupoCalidad: "画质",
+     grupoHerramientas: "放大与工具",
++    grupoEfectos: "特效开关（重启生效）",
++    fxSinNiebla: "关闭雾效",
++    fxSinNieblaDesc: "移除游戏对远景应用的雾混合。只影响画面；原本被雾遮住的远景会显露出来。",
++    fxSinSombras: "关闭角色阴影",
++    fxSinSombrasDesc: "跳过阴影体积的计数绘制（实测每 5 秒约 13 万–40 万次绘制）。接触阴影消失；雨夜等昏暗场景差异很小，晴天更明显。不影响玩法。",
++    fxSinAditivos: "关闭加色发光层（雨/粒子/辉光）",
++    fxSinAditivosDesc: "跳过 3D 加色绘制：船甲板的雨幕、水面飞沫、火焰与魔法辉光会消失，其余几何和 HUD 不变。",
++    fxSinFiltrado: "关闭纹理过滤（最近邻）",
++    fxSinFiltradoDesc: "纹理改用最近邻采样：更锐利、更像素化并会闪烁；内部渲染分辨率越高越明显，0.35x 下差异很小。",
++    fxAviso: "需要重启游戏生效",
++    fxAvisoDesc: "这些开关在游戏启动时读取；修改后请关闭并重新打开游戏。全部保持关闭 = 原版画面。",
+     upNativo: "内置放大",
+     upNativoDesc: "游戏会以内部分辨率（2×、3×…）真正绘制更多像素；再由锐利滤镜和 FXAA 适配到你的屏幕。当 GPU 是瓶颈时，降低内部分辨率能提高 FPS；对受 CPU 限制的场景没有帮助。",
+     upDlss: "DLSS / FSR 2–3 / XeSS",
+diff --git a/launcher/src/lanzador.cpp b/launcher/src/lanzador.cpp
+--- a/launcher/src/lanzador.cpp
++++ b/launcher/src/lanzador.cpp
+@@ -511,6 +511,13 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
+     // GPU lives (on an HD 4400, 1x runs at half the rate of 0.7x).
+     entorno.insert(QStringLiteral("PS2X_GS_HW_SCALE"),
+                    QString::number(std::clamp(a.value(QStringLiteral("escala"), 2).toDouble(), 0.25, 4.0), 'g', 3));
++    // gow-native-pc (runtime patch 80): effect switches. Default off; the runtime filters GS draws at the frontend.
++    // PS2X_GS_FOG_OFF is not exposed: the game never draws with GS fog (0 draws with FGE in the sample window), so the
++    // switch could not change anything. GOW_FX_NO_SHADOWS is experimental: it removes the shadow-volume pass, but the
++    // picture difference on the rain-lit ship deck is small.
++    bandera("GOW_FX_NO_SHADOWS", a.value(QStringLiteral("fxSinSombras")).toBool());
++    bandera("GOW_FX_NO_ADDITIVE3D", a.value(QStringLiteral("fxSinAditivos")).toBool());
++    bandera("GOW_FX_NO_TEXTURE_FILTER", a.value(QStringLiteral("fxSinFiltrado")).toBool());
+     // gow-native-pc: PS2X_GS_HW is no longer a dead switch: the runtime reads it (0 = software rasterizer, for a
+     // GPU that cannot give an OpenGL 4.3 context). The others are still not read by anything.
+     entorno.insert(QStringLiteral("PS2X_GS_RENDERER"),
+diff --git a/launcher/qml/Main.qml b/launcher/qml/Main.qml
+--- a/launcher/qml/Main.qml
++++ b/launcher/qml/Main.qml
+@@ -268,6 +268,10 @@
+             filtro: ajustes.filtro, nitidez: ajustes.nitidez, fxaa: ajustes.fxaa, anisotropico: ajustes.anisotropico,
+             escala: escalaElegida(),
+             dibujoHardware: ajustes.dibujoHardware,
++            // Effect switches (runtime patch 80). Lanzador::iniciar reads them from this map and turns true into a
++            // GOW_FX_* environment variable; a key missing here makes the switch a dead toggle (all read as false).
++            fxSinSombras: ajustes.fxSinSombras, fxSinAditivos: ajustes.fxSinAditivos,
++            fxSinFiltrado: ajustes.fxSinFiltrado,
+             fpsLimite: ajustes.fpsLimite, vsync: ajustes.vsync, mostrarFps: ajustes.mostrarFps,
+             elf: elegido.elf, iso: "", ejecutable: elegido.runner,
+             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
+diff --git a/launcher/src/session_diagnostics.cpp b/launcher/src/session_diagnostics.cpp
+--- a/launcher/src/session_diagnostics.cpp
++++ b/launcher/src/session_diagnostics.cpp
+@@ -295,6 +295,7 @@
+     // Explicit settings allowlist excludes ISO/save paths, key bindings and other personal fields.
+     for (const QString &key : {"diagnostics", "framePc", "gpu", "modoPantalla", "ancho", "alto", "escala",
+                                "aspecto", "fxaa", "vsync", "fpsLimite", "filtro", "anisotropico",
++                               "fxSinSombras", "fxSinAditivos", "fxSinFiltrado",
+                                "jitInline", "finAnticipado", "vuRapida", "usarPacoteTexturas", "idioma", "saltarVideos", "arranqueRapido",
+                                "qteHold", "qteHoldButtons", "qteHoldRate"})
+         if (settings.contains(key)) selected[key] = QJsonValue::fromVariant(settings.value(key));
+diff --git a/tools/test/regional-play-ui.py b/tools/test/regional-play-ui.py
+--- a/tools/test/regional-play-ui.py
++++ b/tools/test/regional-play-ui.py
+@@ -75,6 +75,26 @@
+         function partidas(path) { lastSaves = path; return [] }
+     }
+     QtObject { id: mando; property bool conectado: false; signal boton(string name) }
++    // Mod model is a C++ context property in the real launcher; the play path only needs its staging result,
++    // but Main.qml also instantiates the Mods page, whose bindings need the harmless empty shapes below.
++    QtObject {
++        id: modeloMods
++        property var mods: []
++        property var profiles: []
++        property var diagnostics: []
++        property var lastRun: ({hits: 0, lookups: 0})
++        property string lastError: ""
++        property string notice: ""
++        property string profile: "launcher"
++        property int enabledCount: 0
++        property bool active: false
++        property bool busy: false
++        property bool pythonReady: true
++        property bool stale: false
++        property bool requiresRebuild: false
++        function refresh() {}
++        function prepararEntorno(path) { return {ok: true, env: {}} }
++    }
+     UI.Main { id: page }
+     function check(ok, message) { if (!ok) throw new Error(message) }
+     Timer {
+@@ -99,6 +119,21 @@
+                 check(lanzador.lastPlay.ejecutable === "/usa/runner", "USA runner changed")
+                 check(lanzador.lastPlay.partidas === "/repo/data/gow1/saves", "USA saves changed")
+                 check(lanzador.lastPlay.framePc === "0x1837b8", "USA frame probe changed")
++                // gow-native-pc: the effect toggles are Settings properties, but Lanzador::iniciar only sees the
++                // explicit play map. A key left out there silently reads as false and the switch does nothing.
++                check(lanzador.lastPlay.fxSinSombras === false && lanzador.lastPlay.fxSinAditivos === false
++                      && lanzador.lastPlay.fxSinFiltrado === false, "effect switches must default to off in the play map")
++                page.ajustesGuardados.fxSinSombras = true
++                page.ajustesGuardados.fxSinAditivos = true
++                page.ajustesGuardados.fxSinFiltrado = true
++                page.jugar()
++                check(lanzador.lastPlay.fxSinSombras === true && lanzador.lastPlay.fxSinAditivos === true
++                      && lanzador.lastPlay.fxSinFiltrado === true, "effect switches were not forwarded to Lanzador::iniciar")
++                // The "low" graphics profile must still reach the runner as a smaller internal resolution.
++                page.ajustesGuardados.resolucionInterna = "0.5"
++                page.jugar()
++                check(lanzador.lastPlay.escala === 0.5, "the low profile must lower PS2X_GS_HW_SCALE")
++                page.ajustesGuardados.resolucionInterna = "2"
+                 page.ajustesGuardados.textoJuego = "region:missing"
+                 check(!page.selectedGame && page.carpetaPartidas === "", "missing regional build must not silently select USA saves")
+                 console.log("PASS: real Main.qml region routing and save isolation")
+diff --git a/launcher/src/session_diagnostics.cpp b/launcher/src/session_diagnostics.cpp
+--- a/launcher/src/session_diagnostics.cpp
++++ b/launcher/src/session_diagnostics.cpp
+@@ -411,11 +411,15 @@
+     for (const auto &file : patchDir.entryInfoList({"*.patch"}, QDir::Files, QDir::Name)) patches[file.fileName()] = sha(file.filePath());
+     r.meta["source_patch_sha256"] = patches;
+     r.meta["source_snapshot_note"] = "Source/configuration at launch; runner_sha256 identifies the actual executable. Local edits may not be built.";
++    // Picture/effect settings are part of the evidence: without them a session report cannot tell whether a
++    // "no effect" report means the switch never reached the runner or the game simply draws that effect rarely.
+     QJsonObject env;
+     for (const char *name : {"GOW_PERF_DIAG", "GOW_FRAME_DIAG", "GOW_PERF_FRAME_PC", "GOW_AUDIO", "GOW_AUDIO_STATS", "GOW_IOP_DRIFT",
+          "GOW_VU1N_DIAG", "GOW_VU1N_X64", "GOW_VU1X_INLINE", "GOW_DISPATCH_FULL", "GOW_GS_FINISH_ASINCRONO",
+          "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
+-         "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ"})
++         "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "PS2X_GS_RENDERER", "GOW_SCALER", "GOW_SHARPEN",
++         "TOBIICHI_FXAA", "GOW_ANISO", "GOW_FX_NO_SHADOWS", "GOW_FX_NO_ADDITIVE3D", "GOW_FX_NO_TEXTURE_FILTER",
++         "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ"})
+         if (qEnvironmentVariableIsSet(name)) env[name] = redact(qEnvironmentVariable(name).left(128), r.paths);
+     r.meta["runtime_environment"] = env;
+ #ifdef Q_OS_WIN

@@ -1,0 +1,405 @@
+# gow-native-pc (patch 72): the per-batch GL prelude only issues the calls whose arguments changed.
+#
+# Problem: every GS batch re-issued Viewport / Enable(SCISSOR_TEST) / Scissor / Disable(SCISSOR_TEST) /
+# Disable(CULL_FACE) even when none of their arguments had changed since the previous batch. [gs-cost2] put that
+# prelude at pre_fbo=141-194 ms per 5 s at 0.5x with 12.4k batches (11 us of the ~90 us a batch costs), the third
+# largest item of the GS worker behind texture decoding and the draw call itself.
+#
+# Change: three helpers (setViewport / setScissorRect / setScissorTest) remember what is bound and skip the driver
+# call when nothing changed; every writer in the renderer goes through them. Two calls are removed outright:
+#   * Disable(CULL_FACE) - nothing in the backend ever calls Enable(CULL_FACE), so it was a no-op issued 12k times/5 s;
+#   * the Disable(SCISSOR_TEST) at the end of draw() - the next batch turns it back on, and every non-draw path
+#     that needs it off (CLUT readback, shuffle, depth clear, ClearFramebuffer, Present) calls setScissorTest(false).
+# GOW_GS_STATE_CACHE=0 restores the unconditional calls (it does not restore the two removed ones: measure those by
+# reverting the patch).
+#
+# Measured (i3-4170 + HD 4400, Asia disc SLPM_670.10, 0.5x, PS2X_GS_WORKER=1, VU1 x64 fast, GOW_GS_COST=1, 5 s
+# windows, 22-25 s runs, the two settings alternating inside the same build):
+#   pre_fbo          141-194 ms/5 s  ->  47-94 ms/5 s      (the item this patch targets)
+#   one_ms/batch     83.5-92.8 us    ->  69.4-71.8 us      (-14..-23 %; batches got heavier in the same runs, so the
+#                                                           per-batch figure is the comparable one, not guest fps)
+#   GL errors        0 in every run (GOW_GS_HW_ERRTRACE and the per-batch GetError budget)
+# The scene (opening level, game-driven) differs too much between runs to quote a guest-fps delta honestly.
+#
+# Also in this patch, no effect measured on this disc, kept because they are correct and cost nothing when unused:
+#   * decodeDirect() gives each colour format its own TEXA row loop instead of one applyTexa() call per texel
+#     ([gs-hw] direct=0/0K on this disc: it decodes no direct-colour image, so this path is not exercised here);
+#   * [gs-hw] now reports direct=/idx= decode counts and texels. That is what found the real texture cost: ~800 index
+#     decodes per 5 s, 80 M texels, i.e. the paletted path (indexTextureFor -> GSMem::ReadIndexRun), not this one.
+#     A fast path for PSMT8 rows was written and dropped again: the per-pixel checker GOW_GS_IDXCHECK showed the
+#     first two pixels of row 0 of bp=35a0 at bytes 36 and 178, so P8 rows are not linear and a run cannot be a
+#     memcpy. That measurement is why this patch does not touch ReadIndexRun.
+#   * [gs-hw] also reports blk=<written blocks>/<image blocks> and box=<their bounding rectangle>/<image area>, taken
+#     when an image is re-decoded after an upload invalidated it. Measured on the Asia disc: blk=41-42 %, box=91-93 %.
+#     That is the answer to "why not re-decode only the part that changed": the game rewrites scattered atlas entries,
+#     so the rectangle that covers them is almost the whole image. A partial re-decode would save nothing and add one
+#     GL call per rectangle. Both counters are kept so the next person does not have to measure this again.
+#
+# What was tried and is not in here:
+#   * PSMT8 rows as a memcpy run (see above) - measured wrong, removed;
+#   * hoisting the page-table lookup out of the texel loop (precomputed row of offsets, page base once per 128
+#     texels) - measured 3.2 ns/texel against 3.1 ns/texel for the original, i.e. the compiler already hoists it;
+#     removed rather than kept as dead complexity;
+#   * partial texture re-decode driven by the written block range - killed by the box=91-93 % measurement.
+#
+# Verification: the diff reproduces the working tree exactly - `patch -p1 < 72-gs-batch-prelude.patch` applied to
+# the pre-change tree yields a file byte-identical to the one in engine/runtime (checked), and the runtime built from
+# it ran the Asia disc with 0 GL errors and the title/legal screens rendering correctly (host_shot.png).
+#
+# Layout note: patches 59..71 are still uncommitted in this tree and do not reapply to 471c831 on their own (patch 59
+# fails on gs_gl.cpp), so the chain cannot be replayed from scratch to prove this file's base. It is a diff against
+# the tree that carries 59..71.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -539,6 +539,12 @@
+         bool pcsx2Hashed = false;
+         uint64_t srcHash = 0;     // gow-native-pc (patch 61): hash of the GS memory span this image was decoded from
+         bool srcHashed = false;
++        // gow-native-pc (patch 73): blocks of this image that uploads marked stale since the last decode, so the next
++        // decode can report how much of the image the writes actually covered (measurement only).
++        uint32_t dirtyBlocks = 0;
++        // patch 73: block index range (relative to blockLo) written since the last decode, so the rectangle the writes
++        // cover can be matched against the whole image before deciding on a partial re-decode.
++        uint32_t dirtyLo = ~0u, dirtyHi = 0u;
+     };
+ 
+     struct RenderTarget
+@@ -585,6 +591,37 @@
+     bool initialized = false, failed = false;
+     uint8_t *vram = nullptr;
+     uint32_t vramSize = 0;
++    // gow-native-pc (patch 72): the per-batch prelude re-issued Viewport / Enable / Scissor / Disable even when nothing
++    // about them had changed, and those four are the most expensive calls in it on the Intel driver ([gs-cost2] pre_fbo
++    // 141-194 ms per 5 s at 0.5x, i.e. ~11 us of the ~90 us a batch costs). Each one is now issued only when its
++    // arguments change. Every writer goes through these helpers - a stale cache here means a frame drawn into the wrong
++    // rectangle - and GOW_GS_STATE_CACHE=0 restores the unconditional calls.
++    bool stateCacheOn = !(std::getenv("GOW_GS_STATE_CACHE") && std::getenv("GOW_GS_STATE_CACHE")[0] == '0');
++    GLint vpW = -1, vpH = -1;
++    GLint scX = -1, scY = -1, scW = -1, scH = -1;
++    int scOn = -1;
++    void setViewport(GLsizei w, GLsizei h)
++    {
++        if (stateCacheOn && w == vpW && h == vpH)
++            return;
++        vpW = w; vpH = h;
++        gl().Viewport(0, 0, w, h);
++    }
++    void setScissorRect(GLint x, GLint y, GLsizei w, GLsizei h)
++    {
++        if (stateCacheOn && x == scX && y == scY && w == scW && h == scH)
++            return;
++        scX = x; scY = y; scW = w; scH = h;
++        gl().Scissor(x, y, w, h);
++    }
++    void setScissorTest(bool on)
++    {
++        const int v = on ? 1 : 0;
++        if (stateCacheOn && v == scOn)
++            return;
++        scOn = v;
++        if (on) gl().Enable(kScissorTest); else gl().Disable(kScissorTest);
++    }
+ 
+     float scale = 2.0f;
+     GLuint program = 0, vao = 0, vbo = 0;
+@@ -694,6 +731,13 @@
+         uint64_t zbpChanges = 0;    // depth re-attached to a different ZBP on the same target (stale depth contents)
+         uint64_t zbpFallback = 0;   // a ZBP past kDepthsPerTarget reused the attached depth (should stay 0)
+         uint64_t depthTextures = 0; // depth textures created (per-ZBP buffers); a jump here means new targets/zbps
++        // patch 72: which decode path the texDecodes above took, and how many texels each re-read, so the texture cost
++        // can be attributed without guessing (GOW_GS_HW_STATS=1 prints them)
++        uint64_t directDecodes = 0, indexDecodes = 0, directTexels = 0, indexTexels = 0;
++        // patch 73: of the images decoded because an upload invalidated them, how many blocks the writes touched against
++        // how many blocks the image spans. Low means a partial re-decode would pay; ~equal means it would not.
++        uint64_t redecodeDirty = 0, redecodeSpan = 0, redecodeSamples = 0;
++        uint64_t redecodeBoxPct = 0; // sum of (dirty block rectangle area / image area) in percent, over the samples
+         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+@@ -1512,11 +1556,41 @@
+             return tex;
+         }
+         ++stats.texDecodes;
++        if (tex.dirtyBlocks != 0u && tex.blockHi > tex.blockLo)
++        {
++            stats.redecodeDirty += tex.dirtyBlocks;
++            stats.redecodeSpan += tex.blockHi - tex.blockLo;
++            ++stats.redecodeSamples;
++            // patch 73: how big the rectangle covering those blocks is, in percent of the image (PSMT8 layout).
++            if (tex.dirtyHi > tex.dirtyLo && s.context.tex0.psm == 0x13)
++            {
++                const uint32_t ppr = std::max<uint32_t>(1u, t.tbw / 2u);
++                const uint32_t span = tex.blockHi - tex.blockLo;
++                uint32_t bx0 = ~0u, by0 = ~0u, bx1 = 0u, by1 = 0u;
++                for (uint32_t k = tex.dirtyLo; k < tex.dirtyHi && k < span; ++k)
++                {
++                    const uint32_t page = k / 32u, bi = k % 32u;
++                    const uint32_t bx = (page % ppr) * 128u + (bi % 8u) * 16u;
++                    const uint32_t by = (page / ppr) * 64u + (bi / 8u) * 16u;
++                    bx0 = std::min(bx0, bx); by0 = std::min(by0, by);
++                    bx1 = std::max(bx1, bx + 16u); by1 = std::max(by1, by + 16u);
++                }
++                const uint64_t area = static_cast<uint64_t>(bx1 - bx0) * (by1 - by0);
++                const uint64_t whole = static_cast<uint64_t>(s.textureWidth) * s.textureHeight;
++                if (whole != 0u)
++                    stats.redecodeBoxPct += area * 100u / whole;
++            }
++            tex.dirtyLo = ~0u;
++            tex.dirtyHi = 0u;
++            tex.dirtyBlocks = 0;
++        }
+         tex.pcsx2Hashed = false;
+         classifyTexture(s);
+         const Api &g = gl();
+         std::vector<uint32_t> pixels;
+         decodeDirect(s, pixels);
++        ++stats.directDecodes;
++        stats.directTexels += static_cast<uint64_t>(pixels.size());
+         static const int texDumpLimit = std::getenv("GOW_GS_HW_TEXDUMP") ? std::atoi(std::getenv("GOW_GS_HW_TEXDUMP")) : 0;
+         static int texDumped = 0;
+         if (texDumped < texDumpLimit && s.textureWidth > 16)
+@@ -1563,6 +1637,14 @@
+             return;
+         }
+         out.resize(static_cast<size_t>(w) * h);
++        // gow-native-pc (patch 72): the TEXA stage used to be a call per texel on every decode (716 decodes per 5 s on the
++        // Asia disc). Its result is constant for the formats this path handles - CT32 is untouched, CT24 only replaces
++        // the alpha byte, CT16/CT16S pick between two alpha bytes - so each format gets its own row loop. The generic
++        // path (Z24/Z16 and the swizzle-only formats) keeps applyTexa() unchanged, so the output is bit-identical.
++        const uint8_t psm = t.psm;
++        const uint8_t ta0b = s.texa.ta0, ta1b = s.texa.ta1;
++        const uint32_t ta0 = static_cast<uint32_t>(ta0b) << 24u;
++        const bool aem = s.texa.aem != 0;
+         for (uint32_t y = 0; y < h; ++y)
+         {
+             uint32_t *line = out.data() + static_cast<size_t>(y) * w;
+@@ -1577,8 +1659,34 @@
+                     line[x] = GSSwizzle::LoadAt(f, vram + at.byte, at.shift);
+                 }
+             }
++            if (psm == GS_PSM_CT32)
++                continue; // applyTexa() returns the texel unchanged for CT32: the row is already final
++            if (psm == GS_PSM_CT24)
++            {
++                if (!aem)
++                    for (uint32_t x = 0; x < w; ++x)
++                        line[x] = (line[x] & 0x00FFFFFFu) | ta0;
++                else
++                    for (uint32_t x = 0; x < w; ++x)
++                    {
++                        const uint32_t rgb = line[x] & 0x00FFFFFFu;
++                        line[x] = rgb | (rgb != 0u ? ta0 : 0u);
++                    }
++                continue;
++            }
++            if (psm == GS_PSM_CT16 || psm == GS_PSM_CT16S)
++            {
++                for (uint32_t x = 0; x < w; ++x)
++                {
++                    const uint32_t c = static_cast<uint16_t>(line[x]);
++                    const uint32_t r = (c & 0x1Fu) << 3u, g = ((c >> 5u) & 0x1Fu) << 3u, b = ((c >> 10u) & 0x1Fu) << 3u;
++                    const uint32_t a = (c & 0x8000u) != 0u ? ta1b : ((aem && (r | g | b) == 0u) ? 0u : ta0b);
++                    line[x] = r | (g << 8u) | (b << 16u) | (a << 24u);
++                }
++                continue;
++            }
+             for (uint32_t x = 0; x < w; ++x)
+-                line[x] = GSCpuInternal::applyTexa(s.texa, t.psm, sixteen ? GSCpuInternal::Rgba5551ToRgba8888(static_cast<uint16_t>(line[x])) : line[x]);
++                line[x] = GSCpuInternal::applyTexa(s.texa, psm, sixteen ? GSCpuInternal::Rgba5551ToRgba8888(static_cast<uint16_t>(line[x])) : line[x]);
+         }
+         static const bool check = std::getenv("GOW_GS_TEXCHECK") != nullptr;
+         if (check)
+@@ -1596,8 +1704,8 @@
+                         std::fprintf(stderr, "[gs-texcheck] psm=%u tbp=%x tbw=%u %ux%u at %u,%u ref=%08x run=%08x\n", t.psm, t.tbp0, t.tbw, w, h, x, y, ref, out[static_cast<size_t>(y) * w + x]);
+                 }
+             }
+-            if (++checked % 200 == 0)
+-                std::fprintf(stderr, "[gs-texcheck] %d textures checked, %d mismatching texels\n", checked, mismatches);
++            if (++checked % 50 == 0)
++                std::fprintf(stderr, "[gs-texcheck] %d decodes checked, %d mismatching texels\n", checked, mismatches);
+         }
+     }
+ 
+@@ -1621,11 +1729,41 @@
+             return tex;
+         }
+         ++stats.texDecodes;
++        if (tex.dirtyBlocks != 0u && tex.blockHi > tex.blockLo)
++        {
++            stats.redecodeDirty += tex.dirtyBlocks;
++            stats.redecodeSpan += tex.blockHi - tex.blockLo;
++            ++stats.redecodeSamples;
++            // patch 73: how big the rectangle covering those blocks is, in percent of the image (PSMT8 layout).
++            if (tex.dirtyHi > tex.dirtyLo && s.context.tex0.psm == 0x13)
++            {
++                const uint32_t ppr = std::max<uint32_t>(1u, t.tbw / 2u);
++                const uint32_t span = tex.blockHi - tex.blockLo;
++                uint32_t bx0 = ~0u, by0 = ~0u, bx1 = 0u, by1 = 0u;
++                for (uint32_t k = tex.dirtyLo; k < tex.dirtyHi && k < span; ++k)
++                {
++                    const uint32_t page = k / 32u, bi = k % 32u;
++                    const uint32_t bx = (page % ppr) * 128u + (bi % 8u) * 16u;
++                    const uint32_t by = (page / ppr) * 64u + (bi / 8u) * 16u;
++                    bx0 = std::min(bx0, bx); by0 = std::min(by0, by);
++                    bx1 = std::max(bx1, bx + 16u); by1 = std::max(by1, by + 16u);
++                }
++                const uint64_t area = static_cast<uint64_t>(bx1 - bx0) * (by1 - by0);
++                const uint64_t whole = static_cast<uint64_t>(s.textureWidth) * s.textureHeight;
++                if (whole != 0u)
++                    stats.redecodeBoxPct += area * 100u / whole;
++            }
++            tex.dirtyLo = ~0u;
++            tex.dirtyHi = 0u;
++            tex.dirtyBlocks = 0;
++        }
+         tex.pcsx2Hashed = false;
+         classifyTexture(s);
+         tex.width = std::max<uint32_t>(1u, s.textureWidth);
+         tex.height = std::max<uint32_t>(1u, s.textureHeight);
+         std::vector<uint8_t> indices(static_cast<size_t>(tex.width) * tex.height);
++        ++stats.indexDecodes;
++        stats.indexTexels += static_cast<uint64_t>(indices.size());
+         for (uint32_t y = 0; y < tex.height; ++y)
+             GSMem::ReadIndexRun(vram, t.psm, t.tbp0, t.tbw, 0u, y, tex.width,
+                                 indices.data() + static_cast<size_t>(y) * tex.width);
+@@ -1764,7 +1902,13 @@
+         {
+             Texture &t = kv.second;
+             if (t.valid && t.blockLo < hi && lo < t.blockHi)
++            {
+                 t.valid = false;
++                const uint32_t a = std::max(lo, t.blockLo), b = std::min(hi, t.blockHi);
++                t.dirtyBlocks += b - a;
++                t.dirtyLo = std::min(t.dirtyLo, a - t.blockLo);
++                t.dirtyHi = std::max(t.dirtyHi, b - t.blockLo);
++            }
+         }
+     }
+ 
+@@ -1943,9 +2087,9 @@
+         g.BindFramebuffer(kFramebuffer, clutFbo);
+         g.Disable(kBlend);
+         g.Disable(kDepthTest);
+-        g.Disable(kScissorTest);
++        setScissorTest(false);
+         g.ColorMask(kTrue, kTrue, kTrue, kTrue);
+-        g.Viewport(0, 0, static_cast<GLsizei>(count), 1);
++        setViewport(static_cast<GLsizei>(count), 1);
+         g.BindVertexArray(presentVao);
+         g.DrawArrays(kTriangles, 0, 3);
+         g.PixelStorei(kPackAlignment, 4);
+@@ -2197,8 +2341,8 @@
+         const uint32_t m16 = fbmsk16(c.frame.fbmsk);
+         const GLboolean lo = (m16 & 0xFFu) == 0u ? kTrue : kFalse, hi = (m16 & 0xFF00u) == 0u ? kTrue : kFalse;
+         g.BindFramebuffer(kFramebuffer, dst.fbo);
+-        g.Viewport(0, 0, dst.glW, dst.glH);
+-        g.Disable(kScissorTest);
++        setViewport(dst.glW, dst.glH);
++        setScissorTest(false);
+         g.Disable(kBlend);
+         g.Disable(kDepthTest);
+         g.DepthMask(kFalse);
+@@ -2327,14 +2471,14 @@
+             if (ty1 <= ty0)
+                 return;
+             g.BindFramebuffer(kFramebuffer, t.fbo);
+-            g.Viewport(0, 0, t.glW, t.glH);
+-            g.Enable(kScissorTest);
+-            g.Scissor(static_cast<GLint>(std::floor(x0 * scale)), static_cast<GLint>(std::floor(ty0 * scale)),
++            setViewport(t.glW, t.glH);
++            setScissorTest(true);
++            setScissorRect(static_cast<GLint>(std::floor(x0 * scale)), static_cast<GLint>(std::floor(ty0 * scale)),
+                       static_cast<GLsizei>(std::ceil((x1 - x0) * scale)), static_cast<GLsizei>(std::ceil((ty1 - ty0) * scale)));
+             g.DepthMask(kTrue);
+             g.ClearDepth(std::min(std::max(z, 0.0) / static_cast<double>(zMaxFor(zpsm)), 1.0));
+             g.Clear(kDepthBufferBit);
+-            g.Disable(kScissorTest);
++            setScissorTest(false);
+             t.lastDepthSeq = ++writeSeq;
+             // the memory now holds these literal values, not an inverted Z buffer
+             const auto inv = std::find(invertedZ.begin(), invertedZ.end(), t.zbp);
+@@ -2859,13 +3003,12 @@
+         if (costOn)
+             cost.preTgt += costTgt - costStart;
+         g.BindFramebuffer(kFramebuffer, rt.fbo);
+-        g.Viewport(0, 0, rt.glW, rt.glH);
+-        g.Enable(kScissorTest);
++        setViewport(rt.glW, rt.glH);
++        setScissorTest(true);
+         const int sx0 = c.scissor.x0, sy0 = c.scissor.y0;
+         const int sw = std::max(0, static_cast<int>(c.scissor.x1) - sx0 + 1), sh = std::max(0, static_cast<int>(c.scissor.y1) - sy0 + 1);
+-        g.Scissor(static_cast<GLint>(std::floor(sx0 * scale)), static_cast<GLint>(std::floor(sy0 * scale)),
++        setScissorRect(static_cast<GLint>(std::floor(sx0 * scale)), static_cast<GLint>(std::floor(sy0 * scale)),
+                   static_cast<GLsizei>(std::ceil(sw * scale)), static_cast<GLsizei>(std::ceil(sh * scale)));
+-        g.Disable(kCullFace);
+         const uint64_t costFbo = costOn ? costTicks() : 0u;
+         if (costOn)
+             cost.preFbo += costFbo - costTgt;
+@@ -3213,7 +3356,8 @@
+         if (costOn)
+             cost.draw += costDraw - costVert;
+         ++stats.batches;
+-        g.Disable(kScissorTest);
++        // Scissor stays enabled: every non-draw path that needs it off calls setScissorTest(false), so the next batch
++        // finds the state it wants without a second driver call. (Patch 72; GOW_GS_STATE_CACHE=0 restores the old pair.)
+         static const int rtDumpAt = std::getenv("GOW_GS_HW_RTDUMP") ? std::atoi(std::getenv("GOW_GS_HW_RTDUMP")) : -1;
+         static const double rtDumpSec = std::getenv("GOW_GS_HW_RTDUMPAT") ? std::atof(std::getenv("GOW_GS_HW_RTDUMPAT")) : -1.0;
+         static const auto rtT0 = std::chrono::steady_clock::now();
+@@ -3378,17 +3522,24 @@
+         if (now - stats.last < std::chrono::seconds(5))
+             return;
+         stats.last = now;
+-        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu ringStalls=%llu oversized=%llu zbpchg=%llu zbpfull=%llu depthTex=%llu textures=%zu\n",
++        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu ringStalls=%llu oversized=%llu zbpchg=%llu zbpfull=%llu depthTex=%llu textures=%zu direct=%llu/%lluK idx=%llu/%lluK blk=%llu%%/%llu box=%llu%%\n",
+                      (unsigned long long)stats.shuffles, (unsigned long long)stats.shuffleDraws, (unsigned long long)stats.draws,
+                      (unsigned long long)stats.batches, (unsigned long long)stats.texDecodes, (unsigned long long)stats.texHits,
+                      (unsigned long long)stats.texReuse, (unsigned long long)stats.skippedPsm, (unsigned long long)stats.skippedPrim,
+                      (unsigned long long)stats.unsupportedBlend, (unsigned long long)stats.ringWraps,
+                      (unsigned long long)stats.ringStalls, (unsigned long long)stats.oversizedBatches,
+                      (unsigned long long)stats.zbpChanges, (unsigned long long)stats.zbpFallback,
+-                     (unsigned long long)stats.depthTextures, textures.size());
++                     (unsigned long long)stats.depthTextures, textures.size(),
++                     (unsigned long long)stats.directDecodes, (unsigned long long)(stats.directTexels / 1024u),
++                     (unsigned long long)stats.indexDecodes, (unsigned long long)(stats.indexTexels / 1024u),
++                     (unsigned long long)(stats.redecodeSpan ? stats.redecodeDirty * 100u / stats.redecodeSpan : 0u),
++                     (unsigned long long)stats.redecodeSamples,
++                     (unsigned long long)(stats.redecodeSamples ? stats.redecodeBoxPct / stats.redecodeSamples : 0u));
+         stats.shuffles = stats.shuffleDraws = stats.draws = stats.batches = stats.texDecodes = stats.texHits = stats.texReuse =
+             stats.skippedPsm = stats.skippedPrim = stats.unsupportedBlend = stats.ringWraps = stats.ringStalls =
+             stats.oversizedBatches = stats.zbpChanges = stats.zbpFallback = stats.depthTextures = 0;
++        stats.directDecodes = stats.indexDecodes = stats.directTexels = stats.indexTexels = 0;
++        stats.redecodeDirty = stats.redecodeSpan = stats.redecodeSamples = stats.redecodeBoxPct = 0;
+     }
+ 
+     RenderTarget *findTarget(uint32_t fbp)
+@@ -3527,15 +3678,15 @@
+     const Api &g = d.gl();
+     RenderTarget &rt = d.target(context.frame.fbp, context.frame.fbw);
+     g.BindFramebuffer(kFramebuffer, rt.fbo);
+-    g.Enable(kScissorTest);
++    d.setScissorTest(true);
+     const int sx0 = context.scissor.x0, sy0 = context.scissor.y0;
+-    g.Scissor(static_cast<GLint>(std::floor(sx0 * d.scale)), static_cast<GLint>(std::floor(sy0 * d.scale)),
++    d.setScissorRect(static_cast<GLint>(std::floor(sx0 * d.scale)), static_cast<GLint>(std::floor(sy0 * d.scale)),
+               static_cast<GLsizei>(std::ceil((context.scissor.x1 - sx0 + 1) * d.scale)),
+               static_cast<GLsizei>(std::ceil((context.scissor.y1 - sy0 + 1) * d.scale)));
+     g.ColorMask(kTrue, kTrue, kTrue, kTrue);
+     g.ClearColor((rgba & 0xFF) / 255.0f, ((rgba >> 8) & 0xFF) / 255.0f, ((rgba >> 16) & 0xFF) / 255.0f, ((rgba >> 24) & 0xFF) / 255.0f);
+     g.Clear(kColorBufferBit);
+-    g.Disable(kScissorTest);
++    d.setScissorTest(false);
+     return true;
+ }
+ 
+@@ -3732,8 +3883,8 @@
+         d.presentH = outH;
+     }
+     g.BindFramebuffer(kFramebuffer, d.presentFbo);
+-    g.Viewport(0, 0, outW, outH);
+-    g.Disable(kScissorTest);
++    d.setViewport(outW, outH);
++    d.setScissorTest(false);
+     g.Disable(kDepthTest);
+     g.ColorMask(kTrue, kTrue, kTrue, kTrue);
+     g.ClearColor(0.f, 0.f, 0.f, 1.f);

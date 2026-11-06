@@ -1,0 +1,107 @@
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -532,6 +532,27 @@
+     ns.histCount = 0u;
+ }
+ 
++// gow-native-pc (patch 76): the entry-timing memo's hit test, split out of blockTiming so the chain path can try it without
++// a call (the memo answers ~99% of the blocks that need exact entry timing). Same predicate as blockTiming's first branch.
++// A template so NativeState, a private member of VU1Interpreter, is only named inside its member functions.
++namespace
++{
++template <typename NS>
++bool vu1nMemoTry(const NS &ns, const typename NS::Slot &sl, uint64_t start, const uint8_t *&cyc, uint32_t &cycId)
++{
++    if (!sl.memoable || !sl.memoCyc || ns.histCount == 0u)
++        return false;
++    const typename NS::Hist *pred = &ns.hist[(ns.histNext + NS::kHist - 1u) % NS::kHist];
++    if (pred->end != start || pred->end - pred->start < ns.maxLat || ns.arraysReadyBy > start)
++        return false;
++    if (sl.memoPred != pred->bt || sl.memoPredId != pred->cycId)
++        return false;
++    cyc = sl.memoCyc;
++    cycId = sl.memoId;
++    return true;
++}
++}
++
+ // Issue cycles (relative to vu.m_cycle) of the block's pairs: the idle table unless a lane it reads is still in flight
+ // past that read; then the exact engine's stall model, run once per distinct (lane, slack) set and cached.
+ const uint8_t *VU1NativeAccess::blockTiming(VU1Interpreter &vu, VU1Interpreter::NativeState::Slot &sl, uint32_t &cycId)
+@@ -541,16 +562,16 @@
+     NS::BlockTiming &bt = *sl.bt;
+     static const bool btDiag = std::getenv("GOW_VU1_COST") != nullptr; // patch 65: which path the entry-flag state takes
+     const uint64_t start = vu.m_cycle;
++    const uint8_t *memoCyc = nullptr;
++    if (vu1nMemoTry(ns, sl, start, memoCyc, cycId))
++    {
++        if (btDiag)
++            ++vu1cost::counters.btMemo;
++        return memoCyc;
++    }
+     const NS::Hist *pred = ns.histCount ? &ns.hist[(ns.histNext + NS::kHist - 1u) % NS::kHist] : nullptr;
+     const bool memoOk = pred && sl.memoable && pred->end == start && pred->end - pred->start >= ns.maxLat &&
+                         ns.arraysReadyBy <= start;
+-    if (memoOk && sl.memoPred == pred->bt && sl.memoPredId == pred->cycId && sl.memoCyc)
+-    {
+-        if (btDiag)
+-            ++vu1cost::counters.btMemo;
+-        cycId = sl.memoId;
+-        return sl.memoCyc;
+-    }
+     const NS::BlockTiming *predBt = memoOk ? pred->bt : nullptr;
+     const uint32_t predId = memoOk ? pred->cycId : 0u;
+     const auto remember = [&](const uint8_t *cyc, uint32_t id) {
+@@ -1076,6 +1097,21 @@
+     constexpr uint32_t kMaxDepth = 64u;
+ #endif
+     const uint32_t pc = next & 0x3FF8u;
++    // gow-native-pc (patch 76): the successor's slot is a 128-byte structure picked by a branch target, so its first line is
++    // often a level-2 miss that the bookkeeping below cannot hide. Start the load (and the hint) before the exit half of
++    // this block runs, so it is in flight while the history entry is written. Costs nothing when the slot is already hot.
++    static const bool chainWarm = [] {
++        const char *v = std::getenv("GOW_VU1_CHAIN_WARM");
++        return !(v && *v == '0');
++    }();
++    NS::Slot *const nextSlot = chainWarm ? &ns.slots[pc >> 3] : nullptr;
++    if (chainWarm)
++    {
++        (void)nextSlot->fn; // a load the compiler may turn into a non-retiring probe; keeps the address live
++#if defined(__clang__) || defined(__GNUC__)
++        __builtin_prefetch(nextSlot);
++#endif
++    }
+     // gow-native-pc (patch 34): fast path for self-loops and idle-timing blocks without scalar pipelines or tails.
+     static_assert((NS::kHist & (NS::kHist - 1u)) == 0u, "the history ring index below is masked, not reduced modulo");
+     if (pc == n.pc && cur.fastSelf && n.cyc == cur.idle) [[likely]]
+@@ -1123,7 +1159,7 @@
+         return nullptr;
+     if (pc + 8u > context.codeSize)
+         return nullptr;
+-    NS::Slot &sl = ns.slots[pc >> 3];
++    NS::Slot &sl = chainWarm ? *nextSlot : ns.slots[pc >> 3];
+     if (!sl.known || !sl.fn)
+         return nullptr;
+     // gow-native-pc: an entry lane check here (as runNative's); a failing one returns to runNative, which counts it (and has
+@@ -1141,10 +1177,19 @@
+     n.known1 = (n.known1 & sl.laneKeep[1]) | sl.laneGen[1];
+     const uint64_t start = vu.m_cycle;
+     uint32_t cycId = 0u;
+-    const uint8_t *cyc = sl.readsEntryFlags ? blockTiming(vu, sl, cycId) : sl.idle;
++    const uint8_t *cyc;
++    if (!sl.readsEntryFlags)
++        cyc = sl.idle;
++    else if (chainWarm && vu1nMemoTry(ns, sl, start, cyc, cycId)) // patch 76: memo hit, without the blockTiming call
++    {
++        if (chainCost)
++            ++vu1cost::counters.btMemo;
++    }
++    else
++        cyc = blockTiming(vu, sl, cycId);
+     if (chainCost) // patch 65: how many blocks take each of the two expensive paths
+     {
+-        ++vu1cost::counters.chainFlagReads;
++        vu1cost::counters.chainFlagReads += sl.readsEntryFlags; // patch 76: this counter says "flag readers"
+         vu1cost::counters.chainTails += sl.tail != nullptr;
+         vu1cost::counters.chainScalar += sl.scalarCount != 0u;
+     }

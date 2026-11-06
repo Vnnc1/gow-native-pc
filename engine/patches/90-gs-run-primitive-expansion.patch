@@ -1,0 +1,58 @@
+GS run expansion: one helper for the per-primitive batch layout shared by both SubmitRun paths (no behaviour change)
+
+`SubmitRun` expands a run primitive into a `GSPrimitiveBatch` in two paths (the per-primitive `Submit` path and the
+`GsInventory` path). Both repeated the same vertex-count clamp, copy and zero-filled tail; the tail also has to match
+what the `Op::Run` encoder writes. They now call one `fillRunPrimitive`, so the two consumers cannot drift apart.
+Same vertices, same tail, +14/-10 lines.
+
+Verified with patch 89 in the same binary: four 63 s ship-deck runs, `anomalies=0`, `levelReady=1`, `run_drops=0`.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 30c33de..173ddc3 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -104,6 +104,18 @@ namespace
+         std::memcpy(&value, data, sizeof(T));
+         return value;
+     }
++
++    // gow-native-pc (patch 90): one expansion of a run primitive into the per-primitive batch layout. The
++    // per-primitive Submit path and the GsInventory path must see exactly the same vertices (and the same
++    // zero-filled tail the Op::Run encoder writes), so both call this.
++    void fillRunPrimitive(const GSVertex *source, uint8_t vc, GSPrimitiveBatch &batch)
++    {
++        batch.vertexCount = vc;
++        for (uint8_t v = 0; v < vc; ++v)
++            batch.vertices[v] = source[v];
++        for (uint8_t v = vc; v < 3u; ++v)
++            batch.vertices[v] = GSVertex{};
++    }
+ }
+ 
+ GSThreadedBackend::GSThreadedBackend(std::unique_ptr<GSRasterBackend> inner)
+@@ -472,11 +484,7 @@ void GSThreadedBackend::SubmitRun(const GSDrawState &state, const GSVertex *vert
+         for (uint32_t i = 0u; i < primCount; ++i)
+         {
+             const uint8_t vc = static_cast<uint8_t>(std::min<uint32_t>(counts[i], 3u));
+-            batch.vertexCount = vc;
+-            for (uint8_t v = 0; v < vc; ++v)
+-                batch.vertices[v] = vertices[static_cast<size_t>(i) * 3u + v];
+-            for (uint8_t v = vc; v < 3u; ++v)
+-                batch.vertices[v] = GSVertex{}; // same tail as the encoded record (see Op::Run)
++            fillRunPrimitive(vertices + static_cast<size_t>(i) * 3u, vc, batch);
+             Submit(batch);
+         }
+         return;
+@@ -488,11 +496,7 @@ void GSThreadedBackend::SubmitRun(const GSDrawState &state, const GSVertex *vert
+         for (uint32_t i = 0u; i < primCount; ++i)
+         {
+             const uint8_t vc = static_cast<uint8_t>(std::min<uint32_t>(counts[i], 3u));
+-            batch.vertexCount = vc;
+-            for (uint8_t v = 0; v < vc; ++v)
+-                batch.vertices[v] = vertices[static_cast<size_t>(i) * 3u + v];
+-            for (uint8_t v = vc; v < 3u; ++v)
+-                batch.vertices[v] = GSVertex{}; // same tail as the encoded record (see Op::Run)
++            fillRunPrimitive(vertices + static_cast<size_t>(i) * 3u, vc, batch);
+             GsInventory::get().draw(batch);
+         }
+     }

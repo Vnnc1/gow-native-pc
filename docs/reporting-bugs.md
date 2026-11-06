@@ -2,12 +2,6 @@
 
 Every game started through the launcher gets a local session report. No report is uploaded automatically.
 
-The private diagnostic kit's detailed mode also records `[gs-cache]` for patch 60:
-resident decoded-texture bytes, budget, cumulative evictions and cumulative storage
-reuses. These are not total process/GPU memory measurements. The regular FPS mode
-does not enable these renderer statistics. The collector preserves the numeric fields
-in `metrics.jsonl` and records `GOW_GS_HW_STATS` when explicitly set.
-
 1. Play normally. Basic collection records guest FPS/frame intervals and process health. If an issue repeats,
    enable **Performance → Audio and compilation diagnostics** before the next launch. Detailed timing can lower
    FPS; identify that mode when comparing performance.
@@ -103,77 +97,3 @@ personal data, so review before sharing. Nothing automatically posts an issue or
 
 Compare normal versus detailed diagnostics separately. Measure collector overhead in controlled paired runs before
 claiming it is negligible on a hardware tier. The public stable-60-FPS gate still requires visible, audible play.
-
-## Queue capacity waits (patch 59)
-
-With `GOW_SYNC_DIAG=1`, `[gow-queue]` separates producer backpressure from the
-existing explicit synchronization metrics. Queue 1 is the VU1-to-GS stage ring;
-`queued_peak` is occupied ring bytes (including record overhead/padding). Queue 2
-is the GS backend queue; `queued_peak` is pending chunks, excluding the active chunk.
-Configuration records contain `enabled=1` and the effective spin/queue limits.
-Wait records contain `window`, `waits`, `wait_ms`, `max_ms`, and `final`.
-
-Only initially full capacity checks are timed. Stage timing includes its spin and
-condition-variable wait; backend timing starts after acquiring the queue mutex.
-Neither includes initial mutex-acquisition time. Counters are producer-serialized,
-bounded, emitted at most once per five seconds when waits occur, and flushed at
-shutdown (`final=1`). A wait crossing a window is charged in full when it ends;
-intervals need not align with FPS windows. Absence of wait records is not evidence
-of disabled instrumentation; check the configuration record. Abrupt exit can lose
-the partial window. Disabled diagnostics read no per-wait clocks.
-
-These are elapsed waits, including scheduling, not CPU/GPU utilization. They can
-overlap other scoped times and must not be added to VU/GS buckets as frame time.
-Detailed runs diagnose bottlenecks; compare FPS separately with diagnostics off.
-The collector retains these records and the explicit stage-spin/chunk-limit values
-without changing the report file allowlist.
-
-# Developer audio trace
-
-For developer-only audio transition diagnosis, patch 78 enables `GOW_AUDIO_TRACE=1`
-(`session-game-smoke.py --audio-trace`). It stores up to 512 events per sound engine
-and emits `[gow-audio-trace]` records after audio shutdown. Normal playback does not
-enable it. `kind=0` is a reset (available frames discarded), `kind=1` a partial/empty
-drain, and `kind=2` an acquisition or drain lasting at least 1 ms. Reset/publication
-counters and `total_published` are lifetime totals for that engine.
-For drain events, `available` is the queue after latency trimming; `total_published`
-also includes samples later discarded by queue limits or reset.
-
-Use each event's `t_us`, relative to its `begin=1` marker, for event timing: the
-collector's `elapsed_ms` on dumped events is their late emission time. Acquisition
-`wait_us` includes thread scheduling as well as mutex acquisition; `drain_us` includes
-existing audio-stat logging when enabled. Neither is pure CPU execution time.
-`producer_age_us` is valid only when `producer_known=1`. Require matching begin/end
-markers, zero overflow and complete event counts; forced termination can lose the
-trace. These diagnostics do not establish clean FPS or audible quality.
-
-Patch 79 adds `grant_cycles`, `sound_base`, `total_cycles`, `run_grant` and
-`pending_iop`: the producer's last service snapshot before the recorded publication,
-not scheduler values at callback time. Context is invalid after reset until the
-next publication (`producer_known=1`). `reason` identifies that publication:
-0 batch, 1 explicit flush, 2 other register read, 3 register write, 4 sample RAM,
-5 stream change, 6 stream position, 7 stream-half check, 8 envelope read,
-9 other parameter read. `frames_*` are cumulative published stereo frames by reason,
-not call counts or CPU timings. Their sum equals `total_published`, including frames
-later discarded. Default audio timing and buffering are unchanged.
-`pending_iop` is normally zero because the scheduling batch clears it before
-running the IOP; zero does not exclude a lack of upstream EE progress. Disabled
-tracing still adds a call/null check and reason arguments, but no trace clocks,
-allocation or logging.
-
-# Private diagnostic kit
-
-`gow-diagnostics` is a separate Windows frontend for a precompiled test runner.
-Its installer identity and Qt application data are independent of the normal launcher.
-It validates the profile ELF code hash, required prepared-disc files and runner/helper
-hashes, then uses the existing detached collector. Each run copies the adjacent card
-to private application data; reports never include that card. See
-[the Portuguese test guide](diagnostic-kit.pt-BR.md) for the player workflow.
-
-The collector also exports `summary.json` and `RESUMO.txt`, derived only from bounded,
-redacted report files. FPS summaries exclude windows overlapping the first 30 seconds,
-weight by window duration and retain zero-FPS windows. They still include later menus
-and loading; they are not controlled benchmarks. Queue totals cover the whole session.
-The median of window p95 values is not a pooled p95. VU1 misses are interval counters;
-JIT unsupported counts are cumulative. Unavailable counters are omitted. The GS renderer
-comes from the actual context startup line. Alerts indicate observations, not root causes.

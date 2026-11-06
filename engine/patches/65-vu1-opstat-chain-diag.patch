@@ -1,0 +1,508 @@
+# 65-vu1-opstat-chain-diag: measurement only. GOW_VU1_OPSTAT=1 counts the dynamic opcode mix per VU1 program entry;
+# GOW_VU1_COST=1 now also splits VU1NativeAccess::chain out of the dispatch loop and says which entry-timing path a block
+# takes. Off by default (one static branch per block / per run while unset).
+#
+# Why: patch 63 says the VU1 wall is three microprograms (pc 0 / 18 / 30) but not what their code is made of, and patch 62
+# put the whole remaining share in "blockcode". The pair classes come from the exact engine's decoder, once per block; every
+# execution adds the block's static counts, so the sums are exact pair counts, not a sample, and must match patch 63's
+# `pairs` for the same entry (0.3 % here, the 5 s window offset of the two reports).
+#
+# Measured (i3-4170 + HD 4400, Asia disc, 0.5x, GOW_VU1_FAST=1, -Scripted attract demo, 70 s, 5 s windows; three
+# consecutive windows agree within 1 %):
+#   pairs 250-258M per 5 s. Upper: FMAC 30.8-31.9 %, FMAC writing ACC 29.7-30.8 %, special (ITOF/FTOI/ABS/CLIP) 14.5-14.6 %,
+#   NOP 21.2-23.1 %, I-bit 1.6-1.7 %. Lower: IALU 33.7-34.7 %, memory (LQ/SQ/LQI/SQI/ILW/ISW) 27.3-27.6 %, branch 12.6-12.9 %,
+#   FDIV 2.2-2.4 %, EFU 0.2 %, XGKICK 0.1 %, NOP 18.5-20.2 %, special-register moves 3.4-3.8 %.
+#   Flag writers (ADD/SUB/MADD/MSUB) 41.4-43.0 %, ACC readers 46.7-48.4 %, status-op reads (FSxx) 0.0 %, WAITQ 0.1 %.
+#   Branches: static (B/BAL) 2.1 %, dynamic (JR/JALR) 0.6-0.8 %, conditional (IBEQ..IBGEZ) 9.9-10.1 % - so a superblock
+#   across static branches could reach at most 2 % of the pairs.
+#   chain: 6.4-6.6M calls/s at ~140-160 ns per block body; the 1/16 rdtsc sample of chain reads 68-72 ns per call (noise
+#   included), 43-48 % of block time. 99 % of chained blocks read entry flags, 52 % carry a tail, 19 % touch scalar
+#   pipelines, 1 % take the self-loop path. [vu1-bt]: memo 99.6 %, idle 0.4 %, cache 0.0 %, sim 0.0 % - the entry-flag
+#   timing is a memo hit, so the flag latency model itself is not a cost.
+#diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index 0db2843..88b641a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -64,6 +64,13 @@ namespace vu1cost
+         unsigned long long xgkickTicks = 0;     // XGKICK tag walk + finishXgkick (part of the block time)
+         unsigned long long xgkickSubmitTicks = 0; // the part of that spent handing the packet to the GS (submitGifPacket)
+         unsigned long long xgkickSamples = 0;
++        // gow-native-pc (patch 65): VU1NativeAccess::chain, the per-block entry/exit bookkeeping a chained block pays
++        // (history ring, tail record, lane checks, entry timing, counters). Sampled 1/16 and scaled, like blockTicks.
++        unsigned long long chainTicks = 0, chainCalls = 0;
++        unsigned long long chainFinishTicks = 0; // of that, the block timing bookkeeping up to the next block's entry
++        unsigned long long chainFlagReads = 0, chainTails = 0, chainSelf = 0, chainScalar = 0; // block kinds seen in chain
++        // gow-native-pc (patch 65): how VU1NativeAccess::blockTiming resolves the entry-flag state of a block
++        unsigned long long btMemo = 0, btIdle = 0, btCache = 0, btSim = 0;
+     };
+     inline Counters counters;
+ 
+@@ -80,6 +87,62 @@ namespace vu1cost
+     inline HotEntry hot[2048]; // indexed by entry pc >> 3 (VU1 micro memory is 16 KB)
+ }
+ 
++// gow-native-pc (patch 65): GOW_VU1_OPSTAT=1, the dynamic opcode mix of each program (bucket = the run's entry PC, as in
++// patch 63). A block's pairs are classified once at slot setup with the exact engine's decoder; every execution adds that
++// block's static counts, so the sums are exact pair counts (they must equal patch 63's `pairs` for the same entry), not a
++// sample. Zero while unset (one branch per block / per run).
++namespace vu1op
++{
++    enum : uint8_t
++    {
++        kUFmac, kUFmacAcc, kUSpecial, kUNone, kUOther, kUCount // upper: FMAC / FMAC writing ACC / ITOF-FTOI-ABS-CLIP / NOP / other
++    };
++    enum : uint8_t
++    {
++        kLMem, kLIalu, kLBranch, kLFdiv, kLEfu, kLXgkick, kLNone, kLOther, kLCount // lower, by the decoder's pipeline
++    };
++    struct Cats // one block, counts in uint8_t (a block is at most 64 pairs)
++    {
++        uint8_t up[kUCount] = {}, lo[kLCount] = {};
++        uint8_t pairs = 0, flagWriters = 0, statusOps = 0, waitQP = 0, accOps = 0, nopUpper = 0;
++        uint8_t brStatic = 0, brDyn = 0, brCond = 0; // B / BAL | JR / JALR | IBEQ..IBGEZ (successor static for the first two)
++    };
++    struct Bucket
++    {
++        unsigned long long up[kUCount] = {}, lo[kLCount] = {};
++        unsigned long long pairs = 0, blocks = 0, runs = 0, tailBlocks = 0;
++        unsigned long long flagWriters = 0, statusOps = 0, waitQP = 0, accOps = 0, nopUpper = 0;
++        unsigned long long brStatic = 0, brDyn = 0, brCond = 0;
++    };
++    inline Bucket bucket[2048];
++    inline bool enabled()
++    {
++        static const bool on = [] {
++            const char *v = std::getenv("GOW_VU1_OPSTAT");
++            return v && v[0] != '0';
++        }();
++        return on;
++    }
++    inline uint32_t &current() // bucket of the run being executed (VU1 runs on one worker thread)
++    {
++        static thread_local uint32_t at = 0u;
++        return at;
++    }
++    inline void account(uint32_t pc, const Cats &c, bool tail)
++    {
++        Bucket &b = bucket[current()];
++        for (uint32_t i = 0; i < kUCount; ++i)
++            b.up[i] += c.up[i];
++        for (uint32_t i = 0; i < kLCount; ++i)
++            b.lo[i] += c.lo[i];
++        b.pairs += c.pairs, b.flagWriters += c.flagWriters, b.statusOps += c.statusOps;
++        b.waitQP += c.waitQP, b.accOps += c.accOps, b.nopUpper += c.nopUpper;
++        b.brStatic += c.brStatic, b.brDyn += c.brDyn, b.brCond += c.brCond;
++        ++b.blocks;
++        b.tailBlocks += tail;
++    }
++}
++
+ namespace vu1n
+ {
+     inline uint32_t macValRt(__m128 r, uint32_t m);
+@@ -276,6 +339,8 @@ struct VU1Interpreter::NativeState
+     unsigned long long laneChecks = 0, laneFails = 0; // gow-native-pc: clean-operand entry checks run / failed
+     unsigned long long selfBlocks = 0, selfPairs = 0;  // gow-native-pc: blocks that branched back to themselves (diag)
+     std::unordered_map<uint32_t, unsigned> missPcs, missHits;
++    // gow-native-pc (patch 65): opcode mix of the block at each pc, filled at slot setup only while GOW_VU1_OPSTAT is on
++    std::vector<vu1op::Cats> opCats;
+     uint32_t jitSeen = 0;          // gow-native-pc: background compiler modules registered (ps2_vu1_jit.inl)
+     uint64_t jitQueuedAt = ~0ull;  // code generation (codeChanges) whose micro-memory hash is jitHash
+     uint64_t jitHash = 0;
+@@ -306,6 +371,8 @@ struct VU1NativeAccess
+     static void commitValuesKeepTiming(VU1Interpreter &vu);
+     static void prepareBlockTiming(VU1Interpreter &vu, VU1Interpreter::NativeState::BlockTiming &bt, const uint8_t *code,
+                                    uint32_t pc, uint32_t count, const uint8_t *idle);
++    // gow-native-pc (patch 65): static opcode mix of a block for GOW_VU1_OPSTAT (exact engine's decoder, once per slot)
++    static void opstatClassify(VU1Interpreter &vu, const uint8_t *code, uint32_t pc, uint32_t count, vu1op::Cats &out);
+     static const uint8_t *blockTiming(VU1Interpreter &vu, VU1Interpreter::NativeState::Slot &sl, uint32_t &cycId);
+     static void scalarStart(VU1Interpreter &vu, uint64_t issue, uint32_t latency, bool fdiv);
+     static void commitDue(VU1Interpreter &vu); // commitReadyPipelines after a native block (FDIV/EFU-only fast path)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index ae47fee..2dffd7e 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1999,6 +1999,15 @@ static void vu1CostReport()
+     const double blockMs = msOf(d(c.blockTicks, prev.blockTicks));
+     const double xgkickMs = msOf(d(c.xgkickTicks, prev.xgkickTicks));
+     const double xgkickSubmitMs = msOf(d(c.xgkickSubmitTicks, prev.xgkickSubmitTicks));
++    const double chainMs = msOf(d(c.chainTicks, prev.chainTicks)); // patch 65
++    const double chainFinishMs = msOf(d(c.chainFinishTicks, prev.chainFinishTicks));
++    const unsigned long long chainCalls = d(c.chainCalls, prev.chainCalls);
++    const unsigned long long chainFlagReads = d(c.chainFlagReads, prev.chainFlagReads);
++    const unsigned long long chainTails = d(c.chainTails, prev.chainTails);
++    const unsigned long long chainSelf = d(c.chainSelf, prev.chainSelf);
++    const unsigned long long chainScalar = d(c.chainScalar, prev.chainScalar);
++    const unsigned long long btMemo = d(c.btMemo, prev.btMemo), btIdle = d(c.btIdle, prev.btIdle);
++    const unsigned long long btCache = d(c.btCache, prev.btCache), btSim = d(c.btSim, prev.btSim);
+     const double dispatchRaw = nativeMs - entryMs - exitMs - blockMs;
+     const double dispatchMs = dispatchRaw > 0.0 ? dispatchRaw : 0.0;
+     const double otherRaw = runMs - nativeMs;
+@@ -2009,14 +2018,29 @@ static void vu1CostReport()
+     std::fprintf(stderr,
+                  "[vu1-cost] tid=%zu run_ms=%.0f runs=%llu (%.0f/s) entries=%llu blocks=%llu (%.1fM/s) pairs=%llu | "
+                  "blockcode=%.1f%% dispatch=%.1f%% entry=%.1f%% exit=%.1f%% other=%.1f%% | "
+-                 "block_ns=%.1f pair_ns=%.2f xgkicks=%llu (%llu KB) xgkick_ms=%.0f (%.1f%% of block time) submit_ms=%.0f (%.0f%%)\n",
++                 "block_ns=%.1f pair_ns=%.2f xgkicks=%llu (%llu KB) xgkick_ms=%.0f (%.1f%% of block time) submit_ms=%.0f (%.0f%%) "
++                 "chain_ms=%.0f (%.1f%% of block time, %.0f ns/call) [finish_ms=%.0f] "
++                 "self=%.0f%% flagread=%.0f%% tail=%.0f%% scalar=%.0f%%\n",
+                  static_cast<size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFu),
+                  runMs, runs, runs / wall, entries, blocks,
+                  blocks / wall * 1e-6, pairs, pct(blockMs), pct(dispatchMs), pct(entryMs), pct(exitMs),
+                  pct(otherMs), blocks ? blockMs * 1e6 / static_cast<double>(blocks) : 0.0,
+                  pairs ? blockMs * 1e6 / static_cast<double>(pairs) : 0.0, d(c.xgkicks, prev.xgkicks),
+                  d(c.xgkickBytes, prev.xgkickBytes) / 1024u, xgkickMs, blockMs > 0.0 ? xgkickMs * 100.0 / blockMs : 0.0,
+-                 xgkickSubmitMs, xgkickMs > 0.0 ? xgkickSubmitMs * 100.0 / xgkickMs : 0.0);
++                 xgkickSubmitMs, xgkickMs > 0.0 ? xgkickSubmitMs * 100.0 / xgkickMs : 0.0,
++                 chainMs, blockMs > 0.0 ? chainMs * 100.0 / blockMs : 0.0,
++                 chainCalls ? chainMs * 1e6 / static_cast<double>(chainCalls) : 0.0,
++                 chainFinishMs,
++                 chainCalls ? chainSelf * 100.0 / static_cast<double>(chainCalls) : 0.0,
++                 chainCalls ? chainFlagReads * 100.0 / static_cast<double>(chainCalls) : 0.0,
++                 chainCalls ? chainTails * 100.0 / static_cast<double>(chainCalls) : 0.0,
++                 chainCalls ? chainScalar * 100.0 / static_cast<double>(chainCalls) : 0.0);
++    const unsigned long long btTotal = btMemo + btIdle + btCache + btSim;
++    std::fprintf(stderr, "[vu1-bt] memo=%.1f%% idle=%.1f%% cache=%.1f%% sim=%.1f%% (calls=%.0f/s)\n",
++                 btTotal ? btMemo * 100.0 / static_cast<double>(btTotal) : 0.0,
++                 btTotal ? btIdle * 100.0 / static_cast<double>(btTotal) : 0.0,
++                 btTotal ? btCache * 100.0 / static_cast<double>(btTotal) : 0.0,
++                 btTotal ? btSim * 100.0 / static_cast<double>(btTotal) : 0.0, btTotal / wall);
+     prev = c;
+ }
+ 
+@@ -2071,6 +2095,81 @@ static void vu1HotReport()
+     std::fprintf(stderr, "\n");
+ }
+ 
++// gow-native-pc (patch 65): GOW_VU1_OPSTAT=1, every 5 s: the dynamic opcode mix of each program (per-pair counts; the
++// pair totals must match patch 63's [vu1-hot] pairs for the same entry). Percentages are of that program's pairs.
++static void vu1OpstatReport()
++{
++    if (!vu1op::enabled())
++        return;
++    static auto last = std::chrono::steady_clock::now();
++    const auto now = std::chrono::steady_clock::now();
++    if (now - last < std::chrono::seconds(5))
++        return;
++    const double wall = std::chrono::duration<double>(now - last).count();
++    last = now;
++    static vu1op::Bucket prev[2048];
++    struct Row { unsigned long long pc, pairs, runs, blocks, tail; vu1op::Bucket d; };
++    static Row rows[2048];
++    size_t count = 0u;
++    unsigned long long totalPairs = 0u;
++    for (size_t i = 0; i < 2048u; ++i)
++    {
++        const vu1op::Bucket &c = vu1op::bucket[i];
++        const vu1op::Bucket &p = prev[i];
++        if (c.pairs == p.pairs && c.runs == p.runs)
++            continue;
++        Row &r = rows[count++];
++        r.pc = i * 8u;
++        r.pairs = c.pairs - p.pairs;
++        r.runs = c.runs - p.runs;
++        r.blocks = c.blocks - p.blocks;
++        r.tail = c.tailBlocks - p.tailBlocks;
++        for (uint32_t k = 0; k < vu1op::kUCount; ++k)
++            r.d.up[k] = c.up[k] - p.up[k];
++        for (uint32_t k = 0; k < vu1op::kLCount; ++k)
++            r.d.lo[k] = c.lo[k] - p.lo[k];
++        r.d.flagWriters = c.flagWriters - p.flagWriters;
++        r.d.statusOps = c.statusOps - p.statusOps;
++        r.d.brStatic = c.brStatic - p.brStatic;
++        r.d.brDyn = c.brDyn - p.brDyn;
++        r.d.brCond = c.brCond - p.brCond;
++        r.d.waitQP = c.waitQP - p.waitQP;
++        r.d.accOps = c.accOps - p.accOps;
++        r.d.nopUpper = c.nopUpper - p.nopUpper;
++        totalPairs += r.pairs;
++        prev[i] = c;
++    }
++    std::sort(rows, rows + count, [](const Row &a, const Row &b) { return a.pairs > b.pairs; });
++    std::fprintf(stderr, "[vu1-op] total_pairs=%.2fM wall=%.2fs", static_cast<double>(totalPairs) * 1e-6, wall);
++    for (size_t i = 0; i < count && i < 6u; ++i)
++    {
++        const Row &r = rows[i];
++        const vu1op::Bucket &d = r.d;
++        const double n = r.pairs ? static_cast<double>(r.pairs) : 1.0;
++        std::fprintf(stderr,
++                     " | pc=%x pairs=%.2fM runs=%.0f/s blk=%.1f/n"
++                     " U[fmac %.1f acc %.1f spec %.1f nop %.1f oth %.1f]"
++                     " L[mem %.1f ialu %.1f br %.1f fdiv %.1f efu %.1f xgk %.1f nop %.1f oth %.1f]"
++                     " flagw %.1f stat %.1f waitqp %.1f accr %.1f nopU %.1f tail %.1f"
++                     " br[st %.1f dyn %.1f cond %.1f]",
++                     static_cast<unsigned>(r.pc), static_cast<double>(r.pairs) * 1e-6,
++                     static_cast<double>(r.runs) / wall,
++                     r.runs ? static_cast<double>(r.blocks) / static_cast<double>(r.runs) : 0.0,
++                     d.up[vu1op::kUFmac] * 100.0 / n, d.up[vu1op::kUFmacAcc] * 100.0 / n,
++                     d.up[vu1op::kUSpecial] * 100.0 / n, d.up[vu1op::kUNone] * 100.0 / n,
++                     d.up[vu1op::kUOther] * 100.0 / n,
++                     d.lo[vu1op::kLMem] * 100.0 / n, d.lo[vu1op::kLIalu] * 100.0 / n,
++                     d.lo[vu1op::kLBranch] * 100.0 / n, d.lo[vu1op::kLFdiv] * 100.0 / n,
++                     d.lo[vu1op::kLEfu] * 100.0 / n, d.lo[vu1op::kLXgkick] * 100.0 / n,
++                     d.lo[vu1op::kLNone] * 100.0 / n, d.lo[vu1op::kLOther] * 100.0 / n,
++                     d.flagWriters * 100.0 / n, d.statusOps * 100.0 / n, d.waitQP * 100.0 / n,
++                     d.accOps * 100.0 / n, d.nopUpper * 100.0 / n,
++                     r.blocks ? static_cast<double>(r.tail) / static_cast<double>(r.blocks) : 0.0,
++                     d.brStatic * 100.0 / n, d.brDyn * 100.0 / n, d.brCond * 100.0 / n);
++    }
++    std::fprintf(stderr, "\n");
++}
++
+ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+@@ -2429,6 +2528,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         vu1CostReport();
+     }
+     vu1HotReport(); // patch 63: returns immediately while GOW_VU1_HOT is unset
++    vu1OpstatReport(); // patch 65: returns immediately while GOW_VU1_OPSTAT is unset
+ }
+ 
+ // GOW-Port: GOW_VU1C_VERIFICAR. Antes de un bloque compilado se ejecutan sus pares con el interprete desde el
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 2a38f45..76379b3 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -539,12 +539,15 @@ const uint8_t *VU1NativeAccess::blockTiming(VU1Interpreter &vu, VU1Interpreter::
+     using NS = VU1Interpreter::NativeState;
+     NS &ns = *vu.m_native;
+     NS::BlockTiming &bt = *sl.bt;
++    static const bool btDiag = std::getenv("GOW_VU1_COST") != nullptr; // patch 65: which path the entry-flag state takes
+     const uint64_t start = vu.m_cycle;
+     const NS::Hist *pred = ns.histCount ? &ns.hist[(ns.histNext + NS::kHist - 1u) % NS::kHist] : nullptr;
+     const bool memoOk = pred && sl.memoable && pred->end == start && pred->end - pred->start >= ns.maxLat &&
+                         ns.arraysReadyBy <= start;
+     if (memoOk && sl.memoPred == pred->bt && sl.memoPredId == pred->cycId && sl.memoCyc)
+     {
++        if (btDiag)
++            ++vu1cost::counters.btMemo;
+         cycId = sl.memoId;
+         return sl.memoCyc;
+     }
+@@ -593,10 +596,18 @@ const uint8_t *VU1NativeAccess::blockTiming(VU1Interpreter &vu, VU1Interpreter::
+                 ns.sig.push_back(static_cast<uint16_t>(((200u + k) << 8) | std::min<uint64_t>(ready[k] - start - bt.scalarAt[k], 255u)));
+     }
+     if (ns.sig.empty())
++    {
++        if (btDiag)
++            ++vu1cost::counters.btIdle;
+         return remember(bt.idle, 0u);
++    }
+     for (const auto &c : bt.cache)
+         if (c.sig == ns.sig)
++        {
++            if (btDiag)
++                ++vu1cost::counters.btCache;
+             return remember(c.cyc.data(), c.id);
++        }
+     // simulate on the exact engine's pipeline state (synced; this also drops the history, whose timing tables may be
+     // cache slots replaced below), then restore it
+     syncInflight(vu);
+@@ -646,6 +657,8 @@ const uint8_t *VU1NativeAccess::blockTiming(VU1Interpreter &vu, VU1Interpreter::
+     for (NS::Slot &other : ns.slots) // may point into the cache slot replaced here
+         if (other.bt == &bt)
+             other.memoCyc = nullptr;
++    if (btDiag)
++        ++vu1cost::counters.btSim;
+     return remember(slot.cyc.data(), slot.id);
+ }
+ 
+@@ -790,6 +803,80 @@ void VU1NativeAccess::codeChanged(VU1Interpreter::NativeState &ns, const uint8_t
+     std::memcpy(ns.code, code, sizeof(ns.code));
+ }
+ 
++// gow-native-pc (patch 65): the opcode mix of a block, from the exact engine's decoder (so the categories mean the same
++// thing the interpreter does). Called once per slot setup, only while GOW_VU1_OPSTAT is on.
++void VU1NativeAccess::opstatClassify(VU1Interpreter &vu, const uint8_t *code, uint32_t pc, uint32_t count, vu1op::Cats &out)
++{
++    out = {};
++    for (uint32_t i = 0; i < count; ++i)
++    {
++        const VU1Interpreter::DecodedInstructionPair d = vu.decodeInstructionPair(code, pc + i * 8u);
++        ++out.pairs;
++        if (d.upperNop)
++            ++out.up[vu1op::kUNone], ++out.nopUpper;
++        else if (d.iBit)
++            ++out.up[vu1op::kUOther];
++        else
++        {
++            const uint32_t op = d.upper & 0x3Fu;
++            uint32_t cat = vu1op::kUFmac;
++            if (op <= 0x2Fu)
++            {
++                // the ACC variants of ADD/SUB/MADD/MSUB/MUL write ACC instead of the destination register
++                if (d.upperUsage.accWrite != 0u)
++                    cat = vu1op::kUFmacAcc;
++                if (op <= 0x0Fu)
++                    ++out.flagWriters; // ADD / SUB / MADD / MSUB also update the MAC flags
++            }
++            else
++            {
++                const uint32_t special = (d.upper & 3u) | ((d.upper >> 4) & 0x7Cu);
++                if ((special >= 0x10u && special <= 0x17u) || special == 0x1Du || special == 0x1Fu)
++                    cat = vu1op::kUSpecial; // ITOF / FTOI / ABS / CLIP
++                else if (d.upperUsage.accWrite != 0u)
++                    cat = vu1op::kUFmacAcc;
++                if (special <= 0x0Fu || (special >= 0x18u && special <= 0x1Cu) || special == 0x1Eu)
++                    ++out.flagWriters;
++            }
++            ++out.up[cat];
++            if (d.upperUsage.accRead != 0u || d.upperUsage.accWrite != 0u)
++                ++out.accOps;
++        }
++        if (d.iBit)
++        {
++            ++out.lo[vu1op::kLOther]; // no lower op is issued with an illegal upper
++            continue;
++        }
++        const VU1Interpreter::InstructionUsage &lu = d.lowerUsage;
++        uint32_t lcat = vu1op::kLOther;
++        switch (lu.pipeline)
++        {
++        case VU1Interpreter::PipelineLsu: lcat = vu1op::kLMem; break;
++        case VU1Interpreter::PipelineIalu: lcat = vu1op::kLIalu; break;
++        case VU1Interpreter::PipelineBranch: lcat = vu1op::kLBranch; break;
++        case VU1Interpreter::PipelineFdiv: lcat = vu1op::kLFdiv; break;
++        case VU1Interpreter::PipelineEfu: lcat = vu1op::kLEfu; break;
++        case VU1Interpreter::PipelineXgkick: lcat = vu1op::kLXgkick; break;
++        case VU1Interpreter::PipelineNone: lcat = vu1op::kLNone; break;
++        default: break;
++        }
++        ++out.lo[lcat];
++        const uint32_t opHi = (d.lower >> 25) & 0x7Fu;
++        if (opHi >= 0x14u && opHi <= 0x17u)
++            ++out.statusOps; // FSEQ / FSSET / FSAND / FSOR: the branch conditions, the only MAC-status readers
++        else if (opHi == 0x20u || opHi == 0x21u)
++            ++out.brStatic; // B / BAL: the successor is known when the block is compiled
++        else if (opHi == 0x24u || opHi == 0x25u)
++            ++out.brDyn; // JR / JALR
++        else if (opHi >= 0x28u && opHi <= 0x2Fu)
++            ++out.brCond; // IBEQ / IBNE / IBLTZ / IBGTZ / IBLEZ / IBGEZ
++        if (lu.waitQ || lu.waitP)
++            ++out.waitQP;
++        if (lu.accRead != 0u || lu.accWrite != 0u)
++            ++out.accOps;
++    }
++}
++
+ // The dispatch slot of pc, set up on first use (native block lookup, timing tables).
+ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint32_t pc)
+ {
+@@ -818,6 +905,12 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu,
+         sl.pairs = static_cast<uint16_t>(count);
+         if (count != 0u)
+         {
++            if (vu1op::enabled()) // patch 65: static opcode mix of this block (dynamic counts are added per execution)
++            {
++                if (ns.opCats.size() != 2048u)
++                    ns.opCats.resize(2048u);
++                opstatClassify(vu, code, pc, count, ns.opCats[pc >> 3]);
++            }
+             const uint64_t key = vu1n::blockKey(pc, words, count * 2u);
+             auto it = nativeRegistry().find(key);
+             // Save a full context image only when an actually dispatched block is missing. Unrelated MPG changes
+@@ -955,6 +1048,27 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     using NS = VU1Interpreter::NativeState;
+     VU1Interpreter &vu = *n.vu;
+     NS &ns = *vu.m_native;
++    static const bool opStatDiag = vu1op::enabled(); // patch 65: dynamic opcode mix (bucket = the run's entry PC)
++    const bool opStatOn = opStatDiag && ns.opCats.size() == 2048u;
++    // patch 65: the per-block entry/exit bookkeeping below, timed under patch 62's GOW_VU1_COST (1/16 sample, scaled)
++    static const bool chainCost = std::getenv("GOW_VU1_COST") != nullptr;
++    const bool chainSample = chainCost && ((vu1cost::counters.chainCalls & 15u) == 0u);
++    const uint64_t chainStart = chainSample ? vu1cost::ticks() : 0u;
++    struct ChainScope
++    {
++        bool on; uint64_t start;
++        ~ChainScope()
++        {
++            if (on)
++            {
++                const uint64_t raw = vu1cost::ticks() - start;
++                const uint64_t overhead = vu1cost::rdtscOverhead();
++                vu1cost::counters.chainTicks += (raw > overhead ? raw - overhead : 0u) * 16u;
++            }
++        }
++    } chainScope{chainSample, chainStart};
++    if (chainCost)
++        ++vu1cost::counters.chainCalls;
+     const NS::Slot &cur = *static_cast<const NS::Slot *>(n.slot);
+ #if defined(__clang__)
+     constexpr uint32_t kMaxDepth = 4096u;
+@@ -966,6 +1080,8 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     static_assert((NS::kHist & (NS::kHist - 1u)) == 0u, "the history ring index below is masked, not reduced modulo");
+     if (pc == n.pc && cur.fastSelf && n.cyc == cur.idle) [[likely]]
+     {
++        if (chainCost)
++            ++vu1cost::counters.chainSelf;
+         const uint64_t end = n.start + cur.idleEnd;
+         NS::Hist &h = ns.hist[ns.histNext];
+         h.bt = cur.bt;
+@@ -986,6 +1102,8 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+         const auto &context = *static_cast<const VU1Interpreter::StepContext *>(n.context);
+         if (!n.chain || n.depth >= kMaxDepth || vu.m_stopRequested || end >= context.budgetEnd) [[unlikely]]
+             return nullptr;
++        if (opStatOn) // patch 65: this block runs inside the chain, runNative will not count it
++            vu1op::account(n.pc, ns.opCats[n.pc >> 3], cur.tail != nullptr);
+         n.start = end;
+         ++n.depth;
+         return const_cast<NS::Slot *>(&cur);
+@@ -1024,6 +1142,13 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     const uint64_t start = vu.m_cycle;
+     uint32_t cycId = 0u;
+     const uint8_t *cyc = sl.readsEntryFlags ? blockTiming(vu, sl, cycId) : sl.idle;
++    if (chainCost) // patch 65: how many blocks take each of the two expensive paths
++    {
++        ++vu1cost::counters.chainFlagReads;
++        vu1cost::counters.chainTails += sl.tail != nullptr;
++        vu1cost::counters.chainScalar += sl.scalarCount != 0u;
++    }
++    uint64_t chainT3 = chainSample ? vu1cost::ticks() : 0u;
+     n.cyc = cyc;
+     n.start = start;
+     if (sl.tail)
+@@ -1038,6 +1163,14 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     n.pc = pc;
+     n.cycId = cycId;
+     ++n.depth;
++    if (chainSample) // patch 65: where the per-block chain time goes (rdtsc pair overhead subtracted)
++    {
++        const uint64_t overhead = vu1cost::rdtscOverhead();
++        const uint64_t finish = chainT3 - chainStart;
++        vu1cost::counters.chainFinishTicks += (finish > 3u * overhead ? finish - 3u * overhead : 0u) * 16u;
++    }
++    if (opStatOn) // patch 65: this block runs inside the chain, runNative will not count it
++        vu1op::account(n.pc, ns.opCats[n.pc >> 3], sl.tail != nullptr);
+     return &sl;
+ }
+ 
+@@ -1070,7 +1203,10 @@ bool VU1Interpreter::runNative(StepContext &context)
+     // gow-native-pc (patch 63): one attribution sample per program run, keyed by the entry PC (m_state.pc is the
+     // microcode address the run starts at, before the loop rewrites it per block).
+     static const bool hotDiag = std::getenv("GOW_VU1_HOT") != nullptr;
++    static const bool opStatDiag = vu1op::enabled(); // patch 65
+     const uint32_t hotPc = m_state.pc & 0x3FF8u;
++    if (opStatDiag)
++        vu1op::current() = hotPc >> 3;
+     const uint64_t hotStart = hotDiag ? vu1cost::ticks() : 0u;
+ 
+     const uint64_t generation = context.memory ? context.memory->getVU1CodeGeneration() : 0u;
+@@ -1229,6 +1365,8 @@ bool VU1Interpreter::runNative(StepContext &context)
+             VU1NativeAccess::commitDue(*this); // FDIV/EFU entries kept for timing retire when ready (values are written already)
+         ctx.pairs += last.pairs;
+         ++ctx.blocks;
++        if (opStatDiag && ns.opCats.size() == 2048u) // patch 65: blocks that did not chain (the others counted in chain)
++            vu1op::account(ctx.pc, ns.opCats[ctx.pc >> 3], last.tail != nullptr);
+         if (ns.diag && (result & 0x3FF8u) == ctx.pc)
+             ++ns.selfBlocks, ns.selfPairs += last.pairs;
+         m_state.pc = result & 0x3FFFu;
+@@ -1302,6 +1440,8 @@ bool VU1Interpreter::runNative(StepContext &context)
+         h.blocks += ctx.blocks;
+         h.pairs += ctx.pairs;
+     }
++    if (opStatDiag && armed) // patch 65
++        ++vu1op::bucket[hotPc >> 3].runs;
+     return handled;
+ }
+ 

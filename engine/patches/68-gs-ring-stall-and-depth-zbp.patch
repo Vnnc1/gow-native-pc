@@ -1,0 +1,85 @@
+gs-native-pc (patch 68): the vertex ring waits instead of overwriting, and depth re-attachment is counted
+
+Two things found while auditing the ring added by patch 59.
+
+1. Fence timeout. A wrap waits 1 s on the previous lap's fence; if the wait timed out the code went on and
+   reset the offset anyway, so a GPU still reading that lap would get vertices overwritten under it - torn
+   geometry that looks like a driver bug. It now blocks for real (GL_TIMEOUT_IGNORED) and counts the stall
+   (`ringStalls` in GOW_GS_HW_STATS). A stall is a bug in the ring sizing, never something to ignore.
+
+2. Depth vs ZBP. A RenderTarget owns exactly one depth texture, but it is attached for whatever ZBP the draw
+   uses; when ZBP changes the texture keeps the previous buffer's contents (GS keeps one region per ZBP, so
+   that is not the same memory). Adding the counter first, before changing the behaviour:
+   0.5x Asia disc, 30 s -> `zbpchg=2032` per 5 s, i.e. ~17 re-attachments per frame, so the game does switch
+   ZBP on a live target. Counted, not yet fixed: a fix has to key depth by ZBP and keep the Z-sampling path
+   (findReinterpretSource, the inverted-Z shadow passes) pointing at the right one, which needs its own patch
+   and a frame comparison. `depthCleared` is declared in RenderTarget and never read - it was presumably meant
+   for this.
+
+Verified: builds clean; 30 s Asia-disc run at 0.5x with PS2X_GS_WORKER=1 reports ringWraps=12, ringStalls=0,
+oversized=0, zbpchg=2032 and the same frame distribution as before (median 28.2 guest fps), so nothing here
+changes the normal path.
+
+Files: PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 26b0cc5..7077e2e 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -686,6 +686,8 @@ struct GSHwBackend::Impl
+         uint64_t draws = 0, batches = 0, skippedPsm = 0, unsupportedBlend = 0, texDecodes = 0, texHits = 0, skippedPrim = 0;
+         uint64_t texReuse = 0, shuffleDraws = 0; // patch 61: revalidated decodes, shuffle pass draws
+         uint64_t ringWraps = 0, oversizedBatches = 0; // vertex ring pressure: > 2 wraps/frame means the ring is too small
++        uint64_t ringStalls = 0;    // wraps that had to wait for the GPU (a stall; a high count points at the ring size)
++        uint64_t zbpChanges = 0;    // depth re-attached to a different ZBP on the same target (stale depth contents)
+         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+@@ -1015,6 +1017,12 @@ struct GSHwBackend::Impl
+             g.ClearDepth(0.0);
+             g.Clear(kDepthBufferBit);
+         }
++        else if (t.zbp != zbp)
++        {
++            // A different ZBP is different VRAM, so the depth now in this texture belongs to another buffer. Counted
++            // first: whether the game really does this decides if the stale contents matter (GOW_GS_HW_STATS zbpchg).
++            ++stats.zbpChanges;
++        }
+         t.zbp = zbp;
+     }
+ 
+@@ -2620,7 +2628,13 @@ struct GSHwBackend::Impl
+             if (vertexFence)
+             {
+                 if (g.ClientWaitSync(vertexFence, 0, 0) == kTimeoutExpired)
+-                    g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, 1000000000ull);
++                {
++                    // One second already means the GPU is far behind. Waiting is the only safe move: returning here and
++                    // overwriting the lap would feed the queue vertices that are being read right now (torn geometry
++                    // that is nearly impossible to trace back). Block instead, and make it visible.
++                    ++stats.ringStalls;
++                    g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, ~0ull);
++                }
+                 g.DeleteSync(vertexFence);
+             }
+             vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
+@@ -3235,14 +3249,16 @@ struct GSHwBackend::Impl
+         if (now - stats.last < std::chrono::seconds(5))
+             return;
+         stats.last = now;
+-        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu oversized=%llu textures=%zu\n",
++        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu ringStalls=%llu oversized=%llu zbpchg=%llu textures=%zu\n",
+                      (unsigned long long)stats.shuffles, (unsigned long long)stats.shuffleDraws, (unsigned long long)stats.draws,
+                      (unsigned long long)stats.batches, (unsigned long long)stats.texDecodes, (unsigned long long)stats.texHits,
+                      (unsigned long long)stats.texReuse, (unsigned long long)stats.skippedPsm, (unsigned long long)stats.skippedPrim,
+                      (unsigned long long)stats.unsupportedBlend, (unsigned long long)stats.ringWraps,
+-                     (unsigned long long)stats.oversizedBatches, textures.size());
++                     (unsigned long long)stats.ringStalls, (unsigned long long)stats.oversizedBatches,
++                     (unsigned long long)stats.zbpChanges, textures.size());
+         stats.shuffles = stats.shuffleDraws = stats.draws = stats.batches = stats.texDecodes = stats.texHits = stats.texReuse =
+-            stats.skippedPsm = stats.skippedPrim = stats.unsupportedBlend = stats.ringWraps = stats.oversizedBatches = 0;
++            stats.skippedPsm = stats.skippedPrim = stats.unsupportedBlend = stats.ringWraps = stats.ringStalls =
++            stats.oversizedBatches = stats.zbpChanges = 0;
+     }
+ 
+     RenderTarget *findTarget(uint32_t fbp)

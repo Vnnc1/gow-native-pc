@@ -1,0 +1,117 @@
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -110,6 +110,83 @@
+             return v && *v && *v != '0';
+         }();
+         return off;
++    }
++
++    // gow-native-pc (patch 80): launcher-side effect switches. Each one is a host-side GS-state mask on the primitives
++    // the effect is drawn with, so the guest still runs identically and only the picture changes. They are read once.
++    bool gowFxFlag(const char *name)
++    {
++        const char *v = std::getenv(name);
++        return v && *v && *v != '0';
++    }
++    bool gowFxNoTextureFilter() { static const bool off = gowFxFlag("GOW_FX_NO_TEXTURE_FILTER"); return off; }
++    bool gowFxNoShadows() { static const bool off = gowFxFlag("GOW_FX_NO_SHADOWS"); return off; }
++    bool gowFxNoAdditive3d() { static const bool off = gowFxFlag("GOW_FX_NO_ADDITIVE3D"); return off; }
++
++    // The guest's last full-screen sprite is the present copy (same test updatePreferredDisplaySourceForDraw uses).
++    // It must never be filtered or the picture goes black even though the scene is still drawn.
++    bool gowFxIsDisplayCopy(const GSPrimitiveBatch &batch)
++    {
++        const GSDrawState &state = batch.state;
++        const GSContext &ctx = state.context;
++        if (state.prim.type != GS_PRIM_SPRITE || batch.vertexCount < 2u)
++            return false;
++        const GSVertex &v0 = batch.vertices[0];
++        const GSVertex &v1 = batch.vertices[1];
++        int x0 = static_cast<int>(v0.x) - (ctx.xyoffset.ofx >> 4);
++        int y0 = static_cast<int>(v0.y) - (ctx.xyoffset.ofy >> 4);
++        int x1 = static_cast<int>(v1.x) - (ctx.xyoffset.ofx >> 4);
++        int y1 = static_cast<int>(v1.y) - (ctx.xyoffset.ofy >> 4);
++        if (x0 > x1) std::swap(x0, x1);
++        if (y0 > y1) std::swap(y0, y1);
++        const int xEnd = x0 + std::max(1, x1 - x0) - 1;
++        const int yEnd = y0 + std::max(1, y1 - y0) - 1;
++        const uint8_t alphaMode = static_cast<uint8_t>(ctx.alpha & 0xFFu);
++        const uint8_t alphaFix = static_cast<uint8_t>((ctx.alpha >> 32u) & 0xFFu);
++        return state.prim.tme && state.prim.abe && state.prim.fst && state.prim.ctxt &&
++               ctx.frame.fbp != ctx.tex0.tbp0 && alphaMode == 0x64u &&
++               (alphaFix == 0x60u || alphaFix == 0x80u) &&
++               x0 <= 0 && y0 <= 0 && xEnd >= 639 && yEnd >= 447;
++    }
++
++    // Returns 0 when the batch is drawn and 1/2/3 for the category a switch removed, so the diagnostic can report what
++    // each switch actually caught in the scene.
++    int gowFxSkipKind(const GSPrimitiveBatch &batch)
++    {
++        const GSDrawState &s = batch.state;
++        if (!s.prim.abe)
++            return 0;
++        if (gowFxIsDisplayCopy(batch))
++            return 0;
++        const uint32_t alpha = static_cast<uint32_t>(s.context.alpha & 0xFFu);
++        const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, d = (alpha >> 6) & 3u;
++        // Character shadow volumes: untextured, COLCLAMP=0, Cs*FIX+Cd counting into G (gs_hw_backend.cpp blendState).
++        // They are additive too, so they are classified first to keep the two switches independent.
++        if (!s.prim.tme && (s.colclamp & 1u) == 0u && alpha == 0x68u)
++            return gowFxNoShadows() ? 1 : 0;
++        // Screen-space draws (HUD, subtitles, screen flashes) keep ZTE off; never filter those.
++        if (((s.context.test >> 16u) & 1u) == 0u)
++            return 0;
++        if (a == 0u && b == 2u && d == 1u) // Cs*C + Cd: fire, glow, additive particles
++            return gowFxNoAdditive3d() ? 2 : 0;
++        return 0;
++    }
++
++    void gowFxNoteSkip(int kind)
++    {
++        static uint64_t shadow = 0, additive = 0;
++        using Clock = std::chrono::steady_clock;
++        static const Clock::time_point first = Clock::now();
++        static Clock::time_point windowEnd = first + std::chrono::seconds(5);
++        if (kind == 1) ++shadow;
++        else if (kind == 2) ++additive;
++        Clock::time_point now = Clock::now();
++        if (now < windowEnd)
++            return;
++        std::fprintf(stderr, "[gow-fx] skipped shadow=%llu additive=%llu\n",
++                     static_cast<unsigned long long>(shadow), static_cast<unsigned long long>(additive));
++        shadow = additive = 0;
++        windowEnd = now + std::chrono::seconds(5);
+     }
+ 
+     struct GowFogDiagAgg
+@@ -2176,7 +2253,19 @@
+         const uint64_t fe1 = feDiag ? __rdtsc() : 0u;
+         updatePreferredDisplaySourceForDraw(batch);
+         gowFogDiagDraw(batch); // GOW-Port: PS2X_GS_FOG_DIAG.
+-        submitDraw(batch);
++        static const bool fxAny = gowFxNoShadows() || gowFxNoAdditive3d();
++        if (!fxAny)
++        {
++            submitDraw(batch);
++        }
++        else
++        {
++            const int fx = gowFxSkipKind(batch);
++            if (fx == 0)
++                submitDraw(batch);
++            else
++                gowFxNoteSkip(fx); // GOW-Port (patch 80): launcher effect switch.
++        }
+         const uint64_t fe2 = feDiag ? __rdtsc() : 0u;
+         if (feDiag)
+             gsFeDiagAdd(fe1 - fe0, fe2 - fe1, fe2 - fe0);
+@@ -2325,6 +2414,8 @@
+     const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
+     const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
+     batch.state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
++    if (gowFxNoTextureFilter())
++        batch.state.linearFilter = false; // GOW-Port (patch 80): nearest sampling, launcher "texture filter" switch.
+     return batch;
+ }
+ 

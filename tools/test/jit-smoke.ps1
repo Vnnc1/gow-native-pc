@@ -33,15 +33,12 @@ $vars.GOW_VU1_CAPTURA = Join-Path $data 'jit-validation-capture'
 $vars.GOW_VU1_SIN_COMPILAR = '1'
 # These switches are presence/path based: the string "0" does not disable them.
 Remove-Item env:GOW_VU1_NATIVE_OFF, env:GOW_VU1N_JIT -ErrorAction SilentlyContinue
-$vars.PS2X_GS_ESCALA = '2'
 $vars.PS2X_GS_HW_SCALE = '2'
-$vars.PS2X_GS_ESCALA_DINAMICA = '1'
 $vars.TOBIICHI_PANORAMICO = '16:9'
 $vars.TOBIICHI_FXAA = '1'
 $vars.TOBIICHI_VENTANA_FPS = '120'
-$vars.PS2X_GS_SHADER_CACHE_DIR = Join-Path $data 'shader-test-cache'
 if ($Visible) { $vars.GOW_WINDOW_HIDDEN = '0' }
-New-Item -ItemType Directory -Force $vars.GOW_VU1_CAPTURA, $vars.PS2X_GS_SHADER_CACHE_DIR | Out-Null
+New-Item -ItemType Directory -Force $vars.GOW_VU1_CAPTURA | Out-Null
 foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
 $start = @{ FilePath=(Join-Path $build 'ps2xRuntime/ps2EntryRunner.exe'); WorkingDirectory=$runDir; WindowStyle='Hidden';
     RedirectStandardOutput=(Join-Path $runDir 'stdout.log'); RedirectStandardError=(Join-Path $runDir 'stderr.log'); PassThru=$true }

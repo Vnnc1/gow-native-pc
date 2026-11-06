@@ -24,7 +24,7 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     version = re.search(r'project\(GowNativePcLauncher VERSION ([0-9.]+)',
-                        (root / 'launcher/CMakeLists.txt').read_text()).group(1)
+                        (root / 'launcher/CMakeLists.txt').read_text(encoding='utf-8')).group(1)
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         parser.error('Package on the native x86-64 Linux build host')
 

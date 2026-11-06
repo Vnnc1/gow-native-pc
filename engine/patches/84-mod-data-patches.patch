@@ -1,0 +1,212 @@
+Mod manager data patches (patch 84): declarative guest-RAM writes, interpreted once per VBlank
+
+The manager can now let a mod change game DATA without loading any code. [[patches]] entries in
+mod.toml are validated (guest-RAM range, alignment, width, optional .text SHA-1 binding), written
+to hooks/data-patches.tsv and interpreted by the new host C++ below. It is the same table-driven
+pattern as gowTrucosVBlank / gowPanoramicoVBlank: no DLL, no script, no guest machine code. The
+table is read once at start-up; unset or empty, the game is unchanged. This patch also adds the
+VBlank call in gow_integracion.cpp and the source entry in ps2xRuntime/CMakeLists.txt.
+
+The visual-effect half needs no runtime change: it only uses existing getenv readers
+(gow_ajustes_vivo.h, gow_integracion.cpp, gow_video.cpp, gow_trucos.cpp). Data patches DO require
+this patch to be applied and the runner rebuilt ONCE; the CLI marks such plans requiresRebuild=true
+and the launcher tells the player so.
+
+Not runtime-measured in this change: the runner was not rebuilt here (a full rebuild needs the
+game data and takes 20-40 min). Validation is static: CLI selftest, patch --check and launcher build.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_mod_patches.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_mod_patches.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_mod_patches.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++#include <cstdint>
++
++// GOW-Port (patch 84): declarative guest-RAM data patches contributed by the mod manager.
++// The table is pure data (address / width / value / optional condition); every interpretation happens
++// in this host C++ below. No DLL, no script and no guest machine code is ever loaded.
++// The manager (tools/mods/gow_mods_cli.py) writes the table and binds it to the ELF's .text SHA-1.
++namespace gow::mods
++{
++// Called once per VBlank from gowIntegracionVBlank(). The table is read once, on the first call.
++void dataPatchesVBlank(uint8_t *rdram);
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_mod_patches.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_mod_patches.cpp
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_mod_patches.cpp
+@@ -0,0 +1,141 @@
++#include "runtime/gow_mod_patches.h"
++
++#include <cstddef>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <string>
++#include <vector>
++
++// GOW-Port (patch 84): host-side interpreter for declarative guest-RAM data patches.
++//
++// The mod manager writes a six-column TSV (address / width / value / mask / expected / once) and points
++// GOW_MOD_PATCH_TABLE at it. This file contains the ONLY code that touches that file: it parses numbers,
++// validates the address and writes at most `width` bytes into EE RDRAM once per VBlank. A mod can therefore
++// change game DATA (health, magic, timers, flags) but can never supply executable code. This is the same
++// table-driven pattern already used by gowTrucosVBlank and gowPanoramicoVBlank.
++//
++// Safety: no code loading, no arbitrary host paths (the launcher owns the variable), a hard cap on the
++// number of patches, and a guest-RAM range/alignment check on every line. Unset or empty, nothing runs.
++namespace
++{
++constexpr size_t kMaxPatches = 512;
++constexpr uint32_t kRamMin = 0x00100000u;   // below this is kernel/scratch: mods must not write there
++constexpr uint32_t kRamSize = 0x02000000u;  // EE RDRAM size
++constexpr uint32_t kRamMask = 0x01FFFFFFu;
++
++struct DataPatch
++{
++    uint32_t address = 0u;
++    uint32_t value = 0u;
++    uint32_t mask = 0u;      // 0 = unconditional
++    uint32_t expected = 0u;  // applied only when (current & mask) == expected
++    uint8_t width = 4u;
++    bool once = false;       // write on the first VBlank only
++};
++
++std::vector<DataPatch> g_patches;
++bool g_loaded = false;
++bool g_firstFrameDone = false;
++bool g_log = false;
++
++uint32_t parseNumber(const std::string &text)
++{
++    try {
++        return static_cast<uint32_t>(std::stoull(text, nullptr, 0));
++    } catch (...) {
++        return 0u;
++    }
++}
++
++std::vector<std::string> splitTabs(const std::string &line)
++{
++    std::vector<std::string> out;
++    size_t start = 0;
++    while (true) {
++        const size_t tab = line.find('\t', start);
++        if (tab == std::string::npos) {
++            out.push_back(line.substr(start));
++            break;
++        }
++        out.push_back(line.substr(start, tab - start));
++        start = tab + 1;
++    }
++    return out;
++}
++
++void loadTable()
++{
++    g_loaded = true;
++    const char *path = std::getenv("GOW_MOD_PATCH_TABLE");
++    if (!path || !*path)
++        return;
++    g_log = std::getenv("GOW_MOD_PATCH_LOG") != nullptr;
++    std::ifstream input(path, std::ios::binary);
++    std::string line;
++    while (std::getline(input, line) && g_patches.size() < kMaxPatches) {
++        if (!line.empty() && line.back() == '\r')
++            line.pop_back();
++        if (line.empty() || line.front() == '#')
++            continue;
++        const std::vector<std::string> fields = splitTabs(line);
++        if (fields.size() < 6)
++            continue;
++        DataPatch patch;
++        patch.address = parseNumber(fields[0]);
++        patch.width = static_cast<uint8_t>(parseNumber(fields[1]));
++        patch.value = parseNumber(fields[2]);
++        patch.mask = parseNumber(fields[3]);
++        patch.expected = parseNumber(fields[4]);
++        patch.once = parseNumber(fields[5]) != 0u;
++        if (patch.width != 1u && patch.width != 2u && patch.width != 4u)
++            continue;
++        if (patch.address < kRamMin || patch.address + patch.width > kRamSize)
++            continue;
++        if (patch.address % patch.width != 0u)
++            continue;
++        g_patches.push_back(patch);
++    }
++    if (!g_patches.empty())
++        std::fprintf(stderr, "[mod-patch] %zu data patches from %s\n", g_patches.size(), path);
++}
++
++uint32_t readValue(const uint8_t *rdram, uint32_t address, uint8_t width)
++{
++    uint32_t value = 0u;
++    std::memcpy(&value, rdram + (address & kRamMask), width);
++    return value;
++}
++
++void writeValue(uint8_t *rdram, uint32_t address, uint8_t width, uint32_t value)
++{
++    std::memcpy(rdram + (address & kRamMask), &value, width);
++}
++}
++
++namespace gow::mods
++{
++void dataPatchesVBlank(uint8_t *rdram)
++{
++    if (!rdram)
++        return;
++    if (!g_loaded)
++        loadTable();
++    if (g_patches.empty())
++        return;
++    const bool first = !g_firstFrameDone;
++    g_firstFrameDone = true;
++    for (const DataPatch &patch : g_patches) {
++        if (patch.once && !first)
++            continue;
++        if (patch.mask != 0u
++            && (readValue(rdram, patch.address, patch.width) & patch.mask) != patch.expected)
++            continue;
++        writeValue(rdram, patch.address, patch.width, patch.value);
++        if (g_log && first)
++            std::fprintf(stderr, "[mod-patch] 0x%08X <- 0x%X (width %u)\n", patch.address, patch.value,
++                         static_cast<unsigned>(patch.width));
++    }
++}
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -18,6 +18,7 @@
+ #include "raylib.h"
+ #include "runtime/gow_frame_metrics.h"
+ #include "runtime/gow_ajustes_vivo.h"
++#include "runtime/gow_mod_patches.h"
+ #include <chrono>
+ 
+ #include <algorithm>
+@@ -337,6 +338,8 @@
+ {
+     gowPanoramicoVBlank(rdram);
+     gowTrucosVBlank(rdram);
++    // GOW-Port (patch 84): declarative guest-RAM data patches contributed by mods (data only, no code).
++    gow::mods::dataPatchesVBlank(rdram);
+ }
+ 
+ // GOW-Port: proporción de la imagen en la ventana (gs_host_present.cpp). 0 = estirar a toda la ventana.
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -423,6 +423,7 @@
+     src/lib/ps2_rom_device.cpp
+     src/lib/ps2_vfs.cpp
+     src/lib/mod_vfs_table.cpp # GOW-Port (patch 71): read-only guest path overrides contributed by mods.
++    src/lib/gow_mod_patches.cpp # GOW-Port (patch 84): declarative guest-RAM data patches contributed by mods.
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
+     src/lib/vu/ps2_vu1_core.cpp

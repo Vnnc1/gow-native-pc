@@ -1,0 +1,161 @@
+VU1 x86-64 JIT: forward the whole-register writes of a VF register (GOW_VU1_VF_FWD=1, off by default)
+
+A statement that writes a VF register whole leaves the result in a register;
+re-reading the memory the store just wrote (a 16-byte store followed by a
+16-byte load) is something the CPU can only forward when the load follows the
+store closely, so the JIT now keeps the written value in xmm14 and takes the
+reads of that register from it (the caller's xmm14 is saved and restored by
+the epilogue that ends the chain).
+
+Only whole-register writes are forwarded: any other write to the register, or
+a helper call (which may write any VF register), drops the forwarded value
+again.
+
+The forwarding is off by default: the gain is inside the noise (-0.9 % on
+vu_ms), so it is a switch (GOW_VU1_VF_FWD=1) and not a change of behaviour.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -39,6 +39,16 @@
+ #define VU1X_SUPPORTED 0
+ #endif
+ 
++// Experimental VU1 switches (all OFF by default, none in the default path). Kept because each one is a measured,
++// documented alternative, not because it is expected to ship:
++//   GOW_GS_ASYNC_SUBMIT=1  patch 77, submit XGKICK packets through the GS worker's drain queue instead of parsing on
++//                          the VU1 thread. Ship deck t=15-45 s: vu_ms +1.5%, fps flat -> not used.
++//   GOW_VU1_ACC_REG=1      patch 78, keep VU1State.acc in a GPR/xmm15 for a whole block. Ship deck t=45-60 s:
++//                          vu_ms +0.33% -> not used.
++//   GOW_VU1_VF_FWD=1       patch 79, x64 JIT store->load forwarding of whole VF writes. vu_ms -0.9% (inside noise) ->
++//                          kept off, not in the default path.
++// Any of them changes VU1 codegen, so an A/B needs a fresh build and the vu1 verify path (GOW_VU1N_VERIFY=1).
++
+ #if VU1X_SUPPORTED
+ #if !defined(_WIN32)
+ #include <sys/mman.h>
+@@ -85,6 +95,30 @@
+         static const bool on = []
+         {
+             const char *v = std::getenv("GOW_VU1_ACC_REG");
++            return v && v[0] == '1';
++        }();
++        return on;
++#else
++        return false;
++#endif
++    }
++
++    // GOW-Port (patch 79): store -> load forwarding. A statement that writes a VF register whole leaves the result in
++    // xmm14, and the statements that read that register before anything else writes it take it from xmm14 instead of
++    // re-reading the memory the store just wrote (a 16-byte store followed by a 16-byte load the CPU can only forward
++    // at 4-5 cycles). Same rule as vu1n_gen.py's per-pair cache (`cache['next']`), so the two producers stay
++    // isomorphic: only whole-register writes are kept, any other write to the register (or a helper, which may write
++    // any other VF register) drops it. The store itself stays (exits and helpers read the state); the saving is the
++    // load, i.e. the store-to-load round trip.
++    // xmm14 is non-volatile on Windows x64, so the prologue parks the caller's value and the epilogue that ends the
++    // chain restores it; the JIT -> JIT jump into a body keeps it live, and the value is dead at a block's end (the
++    // cache is a per-block, compile-time fact).
++    inline bool vfFwd()
++    {
++#if defined(_WIN32)
++        static const bool on = []
++        {
++            const char *v = std::getenv("GOW_VU1_VF_FWD");
+             return v && v[0] == '1';
+         }();
+         return on;
+@@ -362,6 +396,7 @@
+     struct alignas(16) Frame
+     {
+         __m128 accSave;   // patch 78: caller's xmm15, restored by the epilogue that ends the chain
++        __m128 fwdSave;   // patch 79: caller's xmm14, restored by the epilogue that ends the chain
+         __m128 q[64];     // unclamped FMAC results of MAC writers (q{j})
+         __m128 nv[32];    // inline tier: nrm(vf[r]) kept for later reads of the same register in the block
+         uint32_t m[64];   // MAC values (m{j})
+@@ -1651,7 +1686,31 @@
+         const std::vector<Use> *use = nullptr;
+         size_t idx = 0;      // the statement being emitted
+         uint32_t cached = 0; // VF registers whose nrm() value is in frame.nv
++        int32_t fwd = -1;    // patch 79: the VF register whose last written value is still in xmm14
+     };
++    // patch 79: reads of the forwarded register come from xmm14 instead of the memory the store just wrote.
++    void emitVfRead(Ctx &cx, int x, uint32_t r)
++    {
++        if (vfFwd() && cx.fwd == static_cast<int32_t>(r))
++            cx.e.movaps(x, XMM14);
++        else
++            cx.e.movupsL(x, vfM(r));
++    }
++    // patch 79: a VF store that also maintains the forwarding register (whole-register writes only; any other write
++    // to the register drops the cached value, whatever the mask).
++    void emitVfStore(Ctx &cx, const Mem &m, int src, uint32_t mask, uint32_t r)
++    {
++        emitStf(cx.e, m, src, mask);
++        if (!vfFwd())
++            return;
++        if (cx.fwd == static_cast<int32_t>(r))
++            cx.fwd = -1;
++        if (mask == 15u)
++        {
++            cx.e.movaps(XMM14, src);
++            cx.fwd = static_cast<int32_t>(r);
++        }
++    }
+     // x = ldn(vf[r]) (vu1n::ldn), from frame.nv when an earlier statement left it there; stored there when a later
+     // statement reads the register normalised again before anything writes it. Uses xmm0, xmm3.
+     void loadNorm(Ctx &cx, int x, uint32_t r)
+@@ -1830,11 +1889,16 @@
+         {
+             if (k.toAcc && accReg()) // patch 78: ACC destination merges into the resident value
+                 emitStfReg(e, XMM15, XMM1, k.m);
++            else if (k.toAcc)
++                emitStf(e, stM(offsetof(VU1State, acc)), XMM1, k.m);
+             else
+-                emitStf(e, k.toAcc ? stM(offsetof(VU1State, acc)) : vfM(k.fd), XMM1, k.m);
++                emitVfStore(cx, vfM(k.fd), XMM1, k.m, k.fd); // patch 79: keeps the result for the following reads
+         }
+         if (slow)
++        {
+             cx.cold.push_back({slowAt, a.c.size(), hFmac, &k}); // the whole statement from the unchanged state
++            cx.fwd = -1; // the slow path runs the helper, which may write any VF register
++        }
+         if (k.mac && k.macM)
+             emitMacVal(e, k);
+         return true;
+@@ -2329,6 +2393,11 @@
+             E e{a, avxEnabled()};
+             e.movupsS(frM(offsetof(Frame, accSave)), XMM15);
+             e.movupsL(XMM15, stM(offsetof(VU1State, acc)));
++        }
++        if (vfFwd()) // patch 79: park the caller's xmm14 (the forwarding register)
++        {
++            E e{a, avxEnabled()};
++            e.movupsS(frM(offsetof(Frame, fwdSave)), XMM14);
+         }
+     }
+     uint32_t prologueSize()
+@@ -2399,6 +2468,7 @@
+                     emitCallHelper(a, st.fn, k);
+                     if (accReg())
+                         cx.e.movupsL(XMM15, stM(offsetof(VU1State, acc)));
++                    cx.fwd = -1; // patch 79: the helper may write any VF register
+                     toRet.push_back(a.jmp());
+                     a.patch(skip, a.c.size());
+                     continue;
+@@ -2411,6 +2481,7 @@
+                 }
+             }
+             cx.cached = 0u; // a helper may write any VF register
++            cx.fwd = -1;    // patch 79: and the forwarding register
+             if (accReg())   // patch 78: exact-engine call-outs (and XGKICK) see / may update state.acc
+                 cx.e.movupsS(stM(offsetof(VU1State, acc)), XMM15);
+             emitCallHelper(a, st.fn, k);
+@@ -2430,6 +2501,8 @@
+                 cx.e.movupsS(stM(offsetof(VU1State, acc)), XMM15);
+                 cx.e.movupsL(XMM15, frM(offsetof(Frame, accSave)));
+             }
++            if (vfFwd()) // patch 79: give the caller its xmm14 back
++                cx.e.movupsL(XMM14, frM(offsetof(Frame, fwdSave)));
+             a.addRsp(kStackBytes + 8u);
+             a.pop(R15); a.pop(R14); a.pop(R13); a.pop(R12); a.pop(RBP); a.pop(RBX);
+         };

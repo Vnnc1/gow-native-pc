@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <iostream>
 
+static QStringList warnings;
 static void require(bool ok, const char *message) { if (!ok) throw std::runtime_error(message); }
 static void write(const QString &path, const QByteArray &bytes) {
     QDir().mkpath(QFileInfo(path).absolutePath());
@@ -13,6 +14,9 @@ static void write(const QString &path, const QByteArray &bytes) {
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
+    qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &, const QString &message) {
+        if (type == QtWarningMsg && message.contains("regional build")) warnings << message;
+    });
     try {
         QTemporaryDir temporary;
         require(temporary.isValid(), "temporary directory");
@@ -38,8 +42,27 @@ int main(int argc, char **argv) {
         require(RegionalInstallations::read(root).isEmpty(), "foreign checkout rejected");
         bad = manifest; bad["profile_sha256"] = "wrong"; publish(bad);
         require(RegionalInstallations::read(root).isEmpty(), "stale profile rejected");
-        for (const auto *key : {"runner_sha256", "elf_sha256", "source", "framePc"}) {
-            auto broken = row; broken[key] = "wrong"; bad = manifest; bad["builds"] = QJsonArray{broken}; publish(bad);
+        // A stale fingerprint is the case that looked like "the launcher lost my game": it must say so, name the
+        // region, and stay out of the way enough to hide no paths or hashes.
+        warnings.clear();
+        const QString forged = QString(64, QLatin1Char('0'));
+        auto broken = row; broken["runner_sha256"] = forged;
+        bad = manifest; bad["builds"] = QJsonArray{broken}; publish(bad);
+        require(RegionalInstallations::read(root).isEmpty(), "mismatched runner rejected");
+        const auto diagnostic = warnings.join("\n");
+        require(diagnostic.contains("fingerprint mismatch"), "fingerprint mismatch explained");
+        require(diagnostic.contains("fixture"), "diagnostic names the region");
+        require(!diagnostic.contains(runner) && !diagnostic.contains(forged), "diagnostic hides paths and hashes");
+        QFile logFile(root + "/data/gow1/logs/launcher.log");
+        require(logFile.open(QIODevice::ReadOnly), "diagnostic log created");
+        const auto logged = QString::fromUtf8(logFile.readAll());
+        require(logged.contains("fingerprint mismatch") && !logged.contains(runner), "diagnostic logged without paths");
+        require(RegionalInstallations::read(root).isEmpty(), "repeat read still rejected");
+        const auto loggedAgain = [&] { QFile again(root + "/data/gow1/logs/launcher.log");
+            return again.open(QIODevice::ReadOnly) ? QString::fromUtf8(again.readAll()) : QString(); }();
+        require(loggedAgain.count("fingerprint mismatch") == 1, "diagnostic not repeated");
+        for (const auto *key : {"source", "framePc"}) {
+            auto other = row; other[key] = "wrong"; bad = manifest; bad["builds"] = QJsonArray{other}; publish(bad);
             require(RegionalInstallations::read(root).isEmpty(), "mismatched build rejected");
         }
         bad = manifest; bad["builds"] = QJsonArray{row, row}; publish(bad);

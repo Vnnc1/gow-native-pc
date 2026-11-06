@@ -1,0 +1,494 @@
+support the Asia SCAJ-97399 disc through one `code` field, without a second build
+
+The SCAJ-97399 image boots the Japanese executable byte for byte: ELF CRC CA052D22,
+`.text` SHA-1 8ed48ca88c73e7e340be3a8e7ff16b07825cb96c (1,690,724 bytes), the exact
+values the profile already records for Japan. The disc is not USA-compatible and never
+will be, and it does not need a build of its own either: the Japan build is the code it
+runs. Its shell is Chinese - the first boot rendered "新游戏" / "确定" over the Japanese
+logo - so the localization lives in the disc data while the executable stays Japanese.
+The profile's language_hints only see the Japanese build's internal English strings and
+return "en", which is why the region records `language = "zh"` by hand.
+
+The profile could not say any of that. `[[regions]]` tied disc identity to build
+identity, so a recognised serial without a build of its own was reported as
+"region_not_ported" and the launcher refused it, even when another region's validated
+build was byte-identical. Renaming the ELF is not a way out and is not what this does:
+the bytes decide.
+
+Second, a regional disc whose build is already registered stayed unsupported as well:
+identify.py never emitted `playable`, and that is the field the launcher's Install page
+reads to offer an edition, so the disc kept its "not registered" line after the build was
+registered. This patch makes identify.py look up the machine-local registry
+(data/<game>/regional-builds.json, written by register_region.py) and report
+playable/regional_installed only for a build whose runner and prepared executable still
+exist and whose measured CRC and .text match. The USA `compatible` flag is untouched: a
+regional disc never enters the USA generation path.
+
+The changes:
+- games/gow1/game.toml: the asia-97399 entry with the measurement and the Chinese shell.
+- tools/disc/identify.py: `code`/`code_label`; reason_code "region_alias" when the bytes
+  match another region's recorded identity but no build is registered, a mismatch message
+  when a serial does not match its recorded identity; playable/regional_installed/
+  reason_code "regional_installed"/regional_build when a registered build matches. A
+  registry entry whose files are gone is not offered: it records files, not promises.
+- tools/disc/prepare.py: extract and normalise a `code` disc, link its executable under
+  the name the named build keys on (the runtime registers its overrides and gates the
+  native integration by that file name), print the register_region.py command, and keep
+  the disc out of languages.json - that manifest feeds the USA pipeline and the primary
+  installation's Play list.
+- tools/pipeline/register_region.py: register the disc against the named region's
+  overlay and measured identity, and record `code` in the registry.
+- docs/disc-import.md: the regional table row and the rule.
+- tools/disc/import_test.py, tools/disc/prepare_test.py: data-free regressions, including
+  a registered build that makes the disc playable and one whose runner is gone.
+
+Verified on the real image (tested Windows machine, 2026-11-03), which means the Japan
+edition was built here to run it:
+
+- Japan build: isolated snapshot of the pinned runtime with regions/japan/runtime.patch,
+  regional codegen (6416 functions, 6340 recompiled, 0 decode failures, 0 unhandled
+  instructions, 0 errors), clang + Ninja Release, portable x86-64-v2, no LTCG, no PGO.
+- register_region.py registered that build for this region and wrote the registry entry.
+- The disc boots to its own title screen: the display-buffer dump shows the Chinese shell
+  over the Japanese logo, the log has no "no exact recompiled function" and no GL error.
+- identify.py with that registry present: playable true, regional_installed true,
+  reason_code regional_installed, regional_build asia-97399, label "God of War (Asia,
+  SCAJ-97399, Chinese)", language zh, compatible false. Without the registry (or with the
+  runner removed) the same disc reports reason_code region_alias and offers nothing.
+- Frame rate there, i3-4170 + HD 4400, in-process VU1 JIT, no recorded VU1/IOP native
+  code and no PGO: 8.4 guest fps at 1x internal scale, 24.5 at 0.5x (GS-bound).
+- prepare.py with its own --data: 16 files, layer1 2082352, SCAJ_973.99 also present as
+  SLPM_670.10 (hard link, same inode and bytes), no languages.json written.
+- register_region.py with the disc's own name: "Regional ELF identity mismatch"; with the
+  build's name: passes the overlay and identity checks and writes the entry.
+- tools/disc/prepare_test.py: 4 tests OK. tools/disc/import_test.py: 16 tests OK
+  (6 skipped, no chdman).
+
+Not verified, and deliberately not claimed: the launcher UI was not clicked through (the
+fields above are exactly what its Install page reads); gameplay past the title screen;
+AOT VU1/IOP capture and PGO are not in this build, and regional automatic AOT/PGO is
+disabled by design; Windows only.
+
+Usage, once the Japan edition is built and registered:
+
+  python -I tools/disc/prepare.py --game gow1 --data <its own data directory> <iso>
+  python -I tools/pipeline/register_region.py --region asia-97399 \
+      --runner <japan runner> --elf <that folder>/SLPM_670.10 \
+      --data <its own data directory>
+
+---
+diff --git a/docs/disc-import.md b/docs/disc-import.md
+index cca70cf..d744a2e 100644
+--- a/docs/disc-import.md
++++ b/docs/disc-import.md
+@@ -47,6 +47,7 @@ See [MAME's chdman documentation](https://docs.mamedev.org/tools/chdman.html).
+ | Japan | SLPM_670.10 | Exact measured image: isolated Windows build, opening gameplay validated; selectable when registered |
+ | Supplied Asia ISO | SCUS_973.99 | Built and tested in opening gameplay; executable identical to USA |
+ | Other Asia serial | SCAJ_300.10 | Recognized; this serial has not been validated |
++| Asia, second pressing | SCAJ_973.99 | Carries the Japanese executable byte for byte (CRC `CA052D22`, same `.text`): runs the Japan build through `code = "japan"`, its own disc data included |
+ | Europe / Australia | SCES_531.33 | Exact measured image: isolated Windows build, opening gameplay validated; selectable when registered |
+ | Europe alternate serial | SCES_515.33 | Recognized; no local disc/runtime validation |
+ | USA / Europe demos | SCUS_974.67 / SCED_534.31 | Explicitly excluded |
+@@ -57,6 +58,23 @@ Unknown serials are also blocked. Code-compatible translations of the USA
+ executable retain their existing validation. Renaming an ELF or selecting another
+ file extension does not bypass the code-signature check.
+ 
++A pressing can also carry another region's executable under its own serial. Such a
++region records `code = "<region id>"` in the profile, and identification reports
++`code`/`reason_code = "region_alias"` only when the disc's CRC **and** `.text` SHA-1
++equal that region's measured values: the bytes decide, never the serial. The disc
++keeps its own data, cards and saves; `prepare.py` also links its executable under
++the name that build keys on, and `register_region.py` registers it against that
++build's overlay. It never enters the USA generation path.
++
++The SCAJ-97399 image was inspected on 2026-11-03: ELF CRC `CA052D22`, `.text` SHA-1
++`8ed48ca88c73e7e340be3a8e7ff16b07825cb96c` (1,690,724 bytes, the Japanese executable
++byte for byte), two PAKs of 4.26 GB and 4.25 GB, 1663 TOC entries. Its shell is Chinese:
++the first boot on a Japan build rendered "新游戏" / "确定" over the Japanese logo, so the
++localization lives in the disc's textures while the executable stays the Japanese one.
++The profile's `language_hints` only find the Japanese build's internal English strings
++and cannot detect that, which is why the region records `language = "zh"` by hand.
++It boots the Japan build; no second build of identical code is asked for.
++
+ The supplied Japan disc was inspected on 2026-11-02:
+ 
+ - ELF CRC: `CA052D22`; `.text` SHA-1: `8ed48ca88c73e7e340be3a8e7ff16b07825cb96c`.
+diff --git a/games/gow1/game.toml b/games/gow1/game.toml
+index e2964ce..ac31f1c 100644
+--- a/games/gow1/game.toml
++++ b/games/gow1/game.toml
+@@ -68,6 +68,24 @@ known_text_sha1 = "8ed48ca88c73e7e340be3a8e7ff16b07825cb96c"
+ experimental_frame_pc = "0x183BB8"
+ experimental_menu_confirm = "circulo"
+ 
++# Asia, second pressing. Measured on 2026-11-03 from a supplied SCAJ-97399 image: its boot executable is the
++# Japanese one byte for byte (same CRC, same .text SHA-1 and size), so the disc runs the Japan build and never
++# the USA one. `code` names the region whose build runs this executable, without asking for a second build of
++# identical code; the disc data (movies, text, layout) stays its own. Its shell is Chinese: the first boot on a
++# Japan build (2026-11-03) rendered "新游戏" / "确定" over the Japanese logo, so the localization lives in the
++# disc's textures and the executable stays the Japanese one. The profile's language_hints only see the
++# Japanese build's internal strings and return "en", which is why this value is recorded by hand.
++[[regions]]
++id = "asia-97399"
++elf = "SCAJ_973.99"
++language = "zh"
++label = "God of War (Asia, SCAJ-97399, Chinese)"
++known_crc = "CA052D22"
++known_text_sha1 = "8ed48ca88c73e7e340be3a8e7ff16b07825cb96c"
++code = "japan"
++experimental_frame_pc = "0x183BB8"
++experimental_menu_confirm = "circulo"
++
+ [[regions]]
+ id = "asia"
+ elf = "SCAJ_300.10"
+diff --git a/tools/disc/identify.py b/tools/disc/identify.py
+index c9e6c19..ac7456c 100644
+--- a/tools/disc/identify.py
++++ b/tools/disc/identify.py
+@@ -5,6 +5,12 @@ usage: python -I tools/disc/identify.py <iso or folder> [...]      prints one JS
+ 
+ Fields: path, game, title, edition, kind (original | translation | unknown), language, label, elf, elf_crc,
+ compatible (the executable has the profile's game code), has_widescreen_movies, has_part2, problems[].
++A region with `code = "<region id>"` carries that region's executable byte for byte (the Asia SCAJ-97399 disc
++boots the Japanese one): it reports code/code_label and reason_code "region_alias" instead of asking for a
++second build of identical code.
++A regional disc whose measured CRC and .text SHA-1 match a build registered on this machine
++(data/<game>/regional-builds.json, written by tools/pipeline/register_region.py) reports playable and
++regional_installed: that is what the launcher offers on Install instead of recompiling it as another region.
+ Matching: SYSTEM.CNF's boot ELF name -> profile; ELF CRC -> known edition; else the ELF's .text SHA-1 decides
+ compatibility and the language is guessed from words in the profile's text files (language_hints).
+ """
+@@ -13,6 +19,7 @@ import os
+ import sys
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
++ROOT = os.path.dirname(os.path.dirname(HERE))
+ sys.path.insert(0, HERE)
+ sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'pipeline'))
+ import discfs  # noqa: E402
+@@ -41,6 +48,49 @@ def guess_language(disc, prof, toc):
+     return best
+ 
+ 
++def region_by_id(prof, region_id):
++    """The profile's region entry with that id (None when it is not recorded)."""
++    return next((r for r in prof.get('regions', []) if r['id'] == region_id), None) if region_id else None
++
++
++def code_region(prof, region):
++    """The region whose native build runs this region's executable (a disc that carries another region's code).
++
++    A pressing can reuse another region's executable under its own serial: the Asia SCAJ-97399 disc boots the
++    Japanese copy byte for byte. Such a region declares `code = "<region id>"` and shares that build instead of
++    asking for a second build of identical code; its own disc data (movies, text, layout) stays its own.
++    """
++    return region_by_id(prof, region.get('code'))
++
++
++def regional_builds(prof):
++    """The regional builds registered on this machine for the game (empty when none, or no registry).
++
++    The registry is written by tools/pipeline/register_region.py and never shipped: it binds a built runner and
++    its prepared disc to a region, with the exact identity it was validated with. Tests replace this function.
++    """
++    path = os.path.join(ROOT, 'data', prof['id'], 'regional-builds.json')
++    try:
++        with open(path, encoding='utf-8') as saved:
++            manifest = json.load(saved)
++    except (OSError, ValueError):
++        return []
++    return manifest.get('builds') or [] if manifest.get('schema') == 1 else []
++
++
++def installed_build(prof, region_id, elf_crc, text_sha1):
++    """The registered build that runs the executable measured as (elf_crc, text_sha1).
++
++    The region's own build wins; any build with the same code is the fallback, because a disc that carries
++    another region's executable (SCAJ-97399 boots the Japanese one) is still that code. A build whose runner or
++    prepared executable is gone is not offered: the registry records files, not promises.
++    """
++    builds = [b for b in regional_builds(prof)
++              if b.get('elf_crc') == elf_crc and b.get('text_sha1') == text_sha1
++              and os.path.isfile(b.get('runner') or '') and os.path.isfile(b.get('elf') or '')]
++    return next((b for b in builds if b.get('region') == region_id), builds[0] if builds else None)
++
++
+ def identify(path, cache=None):
+     original = os.path.abspath(path)
+     resolved = chd.resolve(path, cache)
+@@ -71,14 +121,37 @@ def identify_disc(disc, path):
+     out['elf_crc'] = discfs.pcsx2_crc(elf)
+     region = next((r for r in prof.get('regions', []) if r['elf'].upper() == elf_name.upper()), None)
+     if region:
++        code = code_region(prof, region)
+         out.update(edition=region['id'], kind='demo' if region.get('demo') else 'original',
+                    region=region['id'], language=region['language'], label=region['label'])
+         out['text_sha1'] = discfs.text_sha1(elf)
+-        out['expected_text_sha1'] = prof['executable']['text_sha1']
+-        out['reason_code'] = 'demo_excluded' if region.get('demo') else 'region_not_ported'
+-        out['problems'].append('Demo editions are excluded.' if region.get('demo') else
+-                               'Recognized regional edition; its executable/runtime mapping is not supported yet. '
+-                               'Renaming the ISO or executable does not make it compatible.')
++        out['expected_text_sha1'] = code.get('known_text_sha1') if code else prof['executable']['text_sha1']
++        expected = (code or region).get('known_crc'), (code or region).get('known_text_sha1')
++        if region.get('demo'):
++            out['reason_code'] = 'demo_excluded'
++            out['problems'].append('Demo editions are excluded.')
++        elif all(expected) and (out['elf_crc'], out['text_sha1']) == expected:
++            # the bytes are the recorded ones: either a registered build runs this disc, or its build is missing
++            if code:
++                out.update(code=code['id'], code_label=code['label'])
++            build = installed_build(prof, region['id'], out['elf_crc'], out['text_sha1'])
++            if build:
++                out.update(playable=True, regional_installed=True, reason_code='regional_installed',
++                           regional_build=build.get('region'))
++                out['problems'].append(f"Ready to play with the registered {build.get('region')} build.")
++            else:
++                out['reason_code'] = 'region_alias' if code else 'region_not_ported'
++                out['problems'].append(
++                    f"Runs the {(code or region)['label']} build: this disc's executable is that code. "
++                    'Register that build first (tools/pipeline/register_region.py).')
++        elif code:
++            out['reason_code'] = 'region_not_ported'
++            out['problems'].append(f"Recorded as {code['id']} code, but this executable is not it "
++                                   f"(CRC {out['elf_crc']}, .text {out['text_sha1']}). The bytes decide, not the serial.")
++        else:
++            out['reason_code'] = 'region_not_ported'
++            out['problems'].append('Recognized regional edition; its executable/runtime mapping is not supported yet. '
++                                   'Renaming the ISO or executable does not make it compatible.')
+         return out
+     try:
+         code_ok = bool(prof['executable']['text_sha1']) and discfs.text_sha1(elf) == prof['executable']['text_sha1']
+diff --git a/tools/disc/import_test.py b/tools/disc/import_test.py
+index 91a2e06..4ec9c2a 100644
+--- a/tools/disc/import_test.py
++++ b/tools/disc/import_test.py
+@@ -98,6 +98,53 @@ class ImportTests(TempTests):
+                     self.assertEqual(result['edition'], region['id'])
+                     self.assertEqual(result['reason_code'], 'demo_excluded' if region.get('demo') else 'region_not_ported')
+ 
++    def test_region_with_code_reuses_that_build_only_when_the_bytes_match(self):
++        profile = copy.deepcopy(identify.profiles.load('gow1'))
++        profile['executable']['text_sha1'] = discfs.text_sha1(elf())
++        region = next(r for r in profile['regions'] if r['id'] == 'asia-97399')
++        with patch.object(identify.profiles, 'all_profiles', return_value=[profile]), \
++                patch.object(identify, 'regional_builds', return_value=[]):
++            # The recorded identity is the Japanese executable; the synthetic one is not it.
++            result = identify.identify(iso(self.root / 'asia other code.iso', region['elf']))
++            self.assertNotIn('code', result)
++            self.assertEqual(result['reason_code'], 'region_not_ported')
++            # Same disc, same serial: once its measured identity is the shared one it reuses that build.
++            target = next(r for r in profile['regions'] if r['id'] == region['code'])
++            target['known_crc'] = discfs.pcsx2_crc(elf())
++            target['known_text_sha1'] = discfs.text_sha1(elf())
++            result = identify.identify(iso(self.root / 'asia same code.iso', region['elf']))
++            self.assertEqual(result['reason_code'], 'region_alias')
++            self.assertEqual(result['code'], 'japan')
++            self.assertEqual(result['label'], region['label'])
++            self.assertFalse(result['compatible'])  # it still never enters the USA generation path
++            self.assertNotIn('playable', result)     # nothing registered yet
++
++    def test_registered_build_makes_the_disc_playable(self):
++        profile = copy.deepcopy(identify.profiles.load('gow1'))
++        region = next(r for r in profile['regions'] if r['id'] == 'asia-97399')
++        target = next(r for r in profile['regions'] if r['id'] == region['code'])
++        target['known_crc'] = discfs.pcsx2_crc(elf())
++        target['known_text_sha1'] = discfs.text_sha1(elf())
++        runner, prepared = self.root / 'runner.exe', self.root / 'SLPM_670.10'
++        runner.write_bytes(b'runner')
++        prepared.write_bytes(elf())
++        build = {'region': region['id'], 'label': region['label'], 'runner': str(runner), 'elf': str(prepared),
++                 'elf_crc': target['known_crc'], 'text_sha1': target['known_text_sha1']}
++        profiles = patch.object(identify.profiles, 'all_profiles', return_value=[profile])
++        registry = patch.object(identify, 'regional_builds', return_value=[build])
++        with profiles, registry:
++            result = identify.identify(iso(self.root / 'asia registered.iso', region['elf']))
++            self.assertTrue(result['playable'])
++            self.assertTrue(result['regional_installed'])
++            self.assertEqual(result['reason_code'], 'regional_installed')
++            self.assertEqual(result['regional_build'], region['id'])
++            self.assertTrue(result['compatible'] is False)
++            # A registered build whose files are gone is not offered: the registry records files, not promises.
++            runner.unlink()
++            result = identify.identify(iso(self.root / 'asia missing runner.iso', region['elf']))
++            self.assertNotIn('playable', result)
++            self.assertEqual(result['reason_code'], 'region_alias')
++
+     def test_cli_returns_per_file_errors(self):
+         bad = self.root / 'bad.iso'
+         bad.write_bytes(b'bad')
+diff --git a/tools/disc/prepare.py b/tools/disc/prepare.py
+index 9234857..d42d31a 100644
+--- a/tools/disc/prepare.py
++++ b/tools/disc/prepare.py
+@@ -14,6 +14,11 @@ Output (under <data>/<game>/):
+   mc0/                    the one memory card folder: every disc folder's mc0 is a junction to it
+   languages.json          [{language, label, edition, elf, quality: "full"|"standalone"|"original"}], one per
+                           language (the best folder), plus "recompile_elf" (the executable the pipeline recompiles)
++A disc whose profile region declares `code = "<region id>"` carries that region's executable (the Asia SCAJ-97399
++disc boots the Japanese copy byte for byte): it is extracted and normalised like any other, its executable is also
++linked under the name that build keys on, and it is reported for register_region.py instead of entering
++languages.json, because that manifest feeds the USA pipeline and the primary installation's Play list. Pass a
++regional disc its own --data directory: regional cards and saves must not mix with the primary ones.
+ Discs whose executable is not the profile's game code are reported and skipped. Re-running is cheap: an already
+ extracted disc (same image size and time) is kept.
+ """
+@@ -35,6 +40,7 @@ import chd  # noqa: E402
+ import profile as profiles  # noqa: E402
+ 
+ SECTOR = discfs.SECTOR
++ROOT = os.path.dirname(os.path.dirname(HERE))
+ 
+ 
+ def say(msg):
+@@ -78,6 +84,25 @@ def extract(src, dst):
+     return dst
+ 
+ 
++def expose_for_build(folder, elf_name, build_elf):
++    """Give the disc's executable the name the build that runs it expects (same bytes, second name).
++
++    The runtime registers its per-game overrides and gates the native integration on the executable name it is
++    handed, so a disc that carries another edition's code (the Asia SCAJ-97399 image boots the Japanese copy)
++    has to be presented under that edition's name. The image is untouched: `.disc_layout` keeps describing the
++    disc as pressed, and the link is a second name for the same file.
++    """
++    source, link = os.path.join(folder, elf_name), os.path.join(folder, build_elf)
++    if elf_name == build_elf or not os.path.isfile(source):
++        return False
++    if not os.path.exists(link):
++        try:
++            os.link(source, link)
++        except OSError:
++            shutil.copy2(source, link)
++    return True
++
++
+ def normalise(folder, prof):
+     """make an extracted disc self-sufficient for the port (see the module docstring)"""
+     d = prof['disc']
+@@ -225,22 +250,43 @@ def main():
+     base = os.path.join(a.data, a.game)
+     card = os.path.join(base, 'mc0')
+     found = []
++    regional = []
+     for src in a.discs:
+         resolved = chd.resolve(src, os.path.join(a.data, 'imports', 'chd'))
+         info = identify.identify(resolved)
+         if info.get('game') != a.game:
+             say(f'skipped {src}: {"; ".join(info["problems"]) or "another game"}')
+             continue
+-        if not info.get('compatible'):
++        build = identify.region_by_id(prof, info.get('code'))
++        if not (info.get('compatible') or build):
+             say(f'skipped {src}: {"; ".join(info["problems"])}')
+             continue
+         say(f'{info["label"]} [{info["kind"]}] <- {src}')
+         folder = extract(resolved, os.path.join(base, 'discs', info['edition']))
+-        for note in normalise(folder, prof):
++        notes = normalise(folder, prof)
++        if build:
++            if expose_for_build(folder, info['elf'], build['elf']):
++                notes.append(f'{info["elf"]} is also {build["elf"]}: the {build["id"]} build keys on that name')
++            for note in notes:
++                say(f'  {note}')
++            if os.path.abspath(base) == os.path.abspath(os.path.join(ROOT, 'data', a.game)):
++                say('  this is the primary installation: a regional disc keeps its own cards and saves, '
++                    'so prepare it with its own --data')
++            junction(os.path.join(folder, 'mc0'), card)
++            regional.append(dict(info, folder=folder, build=build['id'], runner_elf=os.path.join(folder, build['elf'])))
++            continue
++        for note in notes:
+             say(f'  {note}')
+         junction(os.path.join(folder, 'mc0'), card)
+         found.append(dict(info, folder=folder))
++    for f in regional:
++        say(f'register {f["label"]}: python -I tools/pipeline/register_region.py --game {a.game} '
++            f'--region {f["edition"]} --runner "<the {f["build"]} runner>" --elf "{f["runner_elf"]}" '
++            '--data "<its own data directory>"')
+     if not found:
++        if regional:
++            say('only regional discs were given: nothing to write in languages.json (they are registered instead)')
++            return
+         sys.exit('no compatible disc of ' + prof['title'])
+     originals = [f for f in found if f['kind'] == 'original']
+     languages = {}
+diff --git a/tools/disc/prepare_test.py b/tools/disc/prepare_test.py
+index f09670e..7400c07 100644
+--- a/tools/disc/prepare_test.py
++++ b/tools/disc/prepare_test.py
+@@ -57,5 +57,25 @@ class MovieFallbackTests(unittest.TestCase):
+             self.assertEqual((root / 'INDEX').read_bytes(), first)
+ 
+ 
++class BuildAliasTests(unittest.TestCase):
++    def test_executable_gets_a_second_name_for_the_build_that_runs_it(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            source = Path(tmp) / 'SCAJ_973.99'
++            source.write_bytes(b'\x7fELF' + bytes(64))
++            self.assertTrue(prepare.expose_for_build(tmp, 'SCAJ_973.99', 'SLPM_670.10'))
++            alias = Path(tmp) / 'SLPM_670.10'
++            self.assertEqual(alias.read_bytes(), source.read_bytes())
++            self.assertEqual(source.read_bytes(), alias.read_bytes())  # the disc's own name stays
++            self.assertTrue(prepare.expose_for_build(tmp, 'SCAJ_973.99', 'SLPM_670.10'))  # idempotent
++            self.assertEqual(len(list(Path(tmp).iterdir())), 2)
++
++    def test_no_alias_without_a_second_name(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            self.assertFalse(prepare.expose_for_build(tmp, 'SCAJ_973.99', 'SLPM_670.10'))
++            (Path(tmp) / 'SLPM_670.10').write_bytes(b'executable')
++            self.assertFalse(prepare.expose_for_build(tmp, 'SLPM_670.10', 'SLPM_670.10'))
++            self.assertEqual(len(list(Path(tmp).iterdir())), 1)
++
++
+ if __name__ == '__main__':
+     unittest.main()
+diff --git a/tools/pipeline/register_region.py b/tools/pipeline/register_region.py
+index fe2dc1c..ea696ed 100644
+--- a/tools/pipeline/register_region.py
++++ b/tools/pipeline/register_region.py
+@@ -21,11 +21,16 @@ def register(root, game, region_id, runner, elf, data):
+     profile_path = root / 'games' / game / 'game.toml'
+     profile = tomllib.loads(profile_path.read_text(encoding='utf-8'))
+     region = next(r for r in profile['regions'] if r['id'] == region_id)
+-    if region.get('demo') or not (root / 'games' / game / 'regions' / region_id / 'runtime.patch').is_file():
++    # A region with `code` carries that region's executable (the Asia SCAJ-97399 disc boots the Japanese copy
++    # byte for byte): it shares the named region's overlay, build and measured identity, and keeps its own disc,
++    # runner registration and saves.
++    target = next((r for r in profile['regions'] if r['id'] == region.get('code')), None) if region.get('code') else None
++    build = target or region
++    if region.get('demo') or not (root / 'games' / game / 'regions' / build['id'] / 'runtime.patch').is_file():
+         raise ValueError('No validated regional overlay for this edition')
+     payload = elf.read_bytes()
+-    if (elf.name != region['elf'] or text_sha1(payload) != region['known_text_sha1']
+-            or pcsx2_crc(payload) != region['known_crc']):
++    if (elf.name != build['elf'] or text_sha1(payload) != build['known_text_sha1']
++            or pcsx2_crc(payload) != build['known_crc']):
+         raise ValueError('Regional ELF identity mismatch')
+     if not (elf.parent / '.disc_layout').is_file() or not (elf.parent / 'IOP_MOD').is_dir():
+         raise ValueError('Prepare and normalize the regional disc before registration')
+@@ -35,7 +40,7 @@ def register(root, game, region_id, runner, elf, data):
+     if source == (root / 'engine/runtime/PS2Recomp').resolve():
+         raise ValueError('A regional ELF must never use the USA build')
+     overrides = (source.parent / 'src/gow_overrides.cpp').read_text(encoding='utf-8')
+-    if region['elf'] not in overrides or profile['executable']['name'] in overrides:
++    if build['elf'] not in overrides or profile['executable']['name'] in overrides:
+         raise ValueError('Build source does not match the selected region')
+     manifest_path = root / 'data' / game / 'regional-builds.json'
+     manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {
+@@ -49,9 +54,12 @@ def register(root, game, region_id, runner, elf, data):
+                 for key, path in (('dataDir', data), ('runner', runner), ('elf', elf))):
+             raise ValueError('Regional installations must use separate runners, discs and data')
+     entry = dict(region=region_id, label=region['label'], elf=elf.as_posix(), runner=runner.as_posix(),
+-                 source=source.as_posix(), dataDir=data.as_posix(), framePc=region['experimental_frame_pc'],
+-                 elf_crc=region['known_crc'], text_sha1=region['known_text_sha1'],
++                 source=source.as_posix(), dataDir=data.as_posix(),
++                 framePc=build.get('experimental_frame_pc') or region.get('experimental_frame_pc'),
++                 elf_crc=build['known_crc'], text_sha1=build['known_text_sha1'],
+                  runner_sha256=digest(runner), elf_sha256=hashlib.sha256(payload).hexdigest(), quality='original')
++    if target:
++        entry['code'] = target['id']
+     manifest['builds'] = [r for r in manifest['builds'] if r['region'] != region_id] + [entry]
+     manifest['profile_sha256'] = digest(profile_path)
+     manifest_path.parent.mkdir(parents=True, exist_ok=True)

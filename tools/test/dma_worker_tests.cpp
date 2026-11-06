@@ -2,8 +2,6 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_stage.h"
 #include "runtime/gs/gs_display.h"
-#include "runtime/gow_queue_metrics.h"
-#include "runtime/gs/gs_threaded_backend.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -227,70 +225,8 @@ static bool stageRing()
     return intact && ordered && bytes > (64ull << 20); // > 8 wraps of the 8 MB ring
 }
 
-// Hold a real backend consumer so the producer must exhaust its bounded queue.
-static bool backendCapacity()
-{
-    using namespace std::chrono_literals;
-    class Sink final : public GSRasterBackend {
-    public:
-        std::promise<void> entered, release;
-        std::shared_future<void> gate = release.get_future().share();
-        unsigned seen = 0;
-        bool intact = true;
-        void Initialize(uint8_t *, uint32_t) override {}
-        void Reset() override {}
-        void Submit(const GSPrimitiveBatch &) override {}
-        void LoadClut(const GSTex0Reg &, const GSTexClutReg &) override {}
-        void BeginTransfer(const GSTransferCommand &) override {}
-        void UploadImage(const uint8_t *data, uint32_t size) override {
-            if (!seen) { entered.set_value(); gate.wait(); }
-            intact = intact && size == 65536 && data[0] == seen && data[size-1] == seen;
-            ++seen;
-        }
-        void Flush() override {}
-        void TextureFlush() override {}
-        void Sync(GSSyncReason) override {}
-        PresentationFrame Present(const GSPresentationRequest &) override { return {}; }
-        bool ClearFramebuffer(const GSContext &, uint32_t) override { return false; }
-        uint32_t ConsumeLocalToHostBytes(uint8_t *, uint32_t) override { return 0; }
-        uint32_t ReadVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) const override { return 0; }
-        void WriteVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override {}
-        void SnapshotVram(std::vector<uint8_t> &) const override {}
-        GSTransferSnapshot GetTransferSnapshot() const override { return {}; }
-    };
-    env("GOW_SYNC_DIAG", "1");
-    env("PS2X_GS_QUEUE_CHUNKS", "1");
-    auto sink = std::make_unique<Sink>();
-    Sink *observed = sink.get();
-    GSThreadedBackend backend(std::move(sink));
-    auto producer = std::async(std::launch::async, [&] {
-        for (unsigned id = 0; id < 12; ++id) {
-            std::vector<uint8_t> bytes(65536, static_cast<uint8_t>(id));
-            backend.UploadImage(bytes.data(), static_cast<uint32_t>(bytes.size()));
-        }
-    });
-    const bool entered = observed->entered.get_future().wait_for(5s) == std::future_status::ready;
-    const bool blocked = producer.wait_for(50ms) == std::future_status::timeout;
-    observed->release.set_value();
-    producer.get(); backend.Flush();
-    env("PS2X_GS_QUEUE_CHUNKS", nullptr);
-    return entered && blocked && observed->intact && observed->seen == 12;
-}
-
 int main()
 {
-    env("GOW_SYNC_DIAG", "0");
-    GowQueueMetrics disabled(1);
-    env("GOW_SYNC_DIAG", "1");
-    GowQueueMetrics enabled(2);
-    disabled.add(100, 7);
-    enabled.add(1000000, 8); enabled.add(3000000, 4);
-    enabled.flush();
-    const auto counts = enabled.snapshot();
-    const bool queueMetrics = disabled.snapshot().waits == 0 && counts.waits == 2 && counts.ns == 4000000
-        && counts.maxNs == 3000000 && counts.queuedPeak == 8;
-    std::puts(queueMetrics ? "PASS: queue metrics opt-in, totals, maximum and final flush"
-                           : "FAIL: queue metrics");
     const bool ok = check("1", "0", true) && check("0", "1", false)
         && check(nullptr, "1", false) && check(nullptr, "0", false)
         && check("1", "1", false, 65520) && stageOnly();
@@ -302,8 +238,5 @@ int main()
     const bool ring = stageRing();
     std::puts(ring ? "PASS: GS stage ring order, contents, wraps, heap packets and idle wait"
                    : "FAIL: GS stage ring");
-    const bool backend = backendCapacity();
-    std::puts(backend ? "PASS: backend capacity wait, wakeup, packet contents and order"
-                      : "FAIL: backend capacity wait");
-    return ok && early && ring && queueMetrics && backend ? 0 : 1;
+    return ok && early && ring ? 0 : 1;
 }

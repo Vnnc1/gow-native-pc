@@ -1,0 +1,97 @@
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -2,6 +2,7 @@
+ // Origen: PS2Recomp sotc-port, ac9efa070638ad3b3accd284de6f898d5ab271d1.
+ #include "runtime/gs/gs_threaded_backend.h"
+ #include "runtime/gs/gs_hw_backend.h"
++#include "runtime/gs/gs_sw_backend.h"
+ #include "runtime/gs/gs_shared_present.h"
+ #include "gs_inventory.h"
+ #include "ThreadPriority.h"
+@@ -135,8 +136,51 @@
+ 
+ std::unique_ptr<GSRasterBackend> GSThreadedBackend::MakeDefault()
+ {
+-    // GOW-Port: the native render-target renderer is the only GS renderer (no VRAM-emulating rasteriser).
+-    return std::make_unique<GSThreadedBackend>(std::make_unique<GSHwBackend>());
++    // gow-native-pc: PS2X_GS_RENDERER=sw (o PS2X_GS_HW=0) elige el rasterizador de software, que dibuja en la VRAM
++    // y no necesita OpenGL; =hw obliga al de hardware y desactiva la vuelta atrás. Antes PS2X_GS_HW no lo leía nadie
++    // y PS2X_GS_RENDERER no aparecía en el árbol: los dos eran interruptores muertos.
++    const char *renderer = std::getenv("PS2X_GS_RENDERER");
++    const char *hardware = std::getenv("PS2X_GS_HW");
++    bool software = false;
++    bool forced = false;
++    if (renderer && std::strcmp(renderer, "sw") == 0)
++        software = true;
++    else if (renderer && std::strcmp(renderer, "hw") == 0)
++        forced = true;
++    else if (hardware && std::strcmp(hardware, "0") == 0)
++        software = true;
++    if (software)
++    {
++        std::fprintf(stderr, "[gs-sw] software rasterizer selected (PS2X_GS_RENDERER=sw)\n");
++        auto backend = std::make_unique<GSThreadedBackend>(std::make_unique<GSSwBackend>());
++        backend->m_software = true;
++        return backend;
++    }
++    auto backend = std::make_unique<GSThreadedBackend>(std::make_unique<GSHwBackend>());
++    backend->m_hwForced = forced;
++    return backend;
++}
++
++void GSThreadedBackend::checkRendererFailure()
++{
++    // gow-native-pc: sin OpenGL el renderizador de hardware no puede dibujar y la ventana se queda con el cuadro
++    // magenta para siempre; en ese momento se cambia al rasterizador de software.
++    if (m_software || m_hwForced)
++        return;
++    if (GSSharedPresent::GetRendererFailure() == GSSharedPresent::RendererFailure::NoContext)
++        FallbackToSoftware();
++}
++
++void GSThreadedBackend::FallbackToSoftware()
++{
++    if (m_software || m_hwForced)
++        return;
++    m_software = true;
++    std::fprintf(stderr, "[gs-sw] OpenGL unavailable, falling back to the software rasterizer\n");
++    auto software = std::make_unique<GSSwBackend>();
++    software->Initialize(m_vram, m_vramSize);
++    m_inner = std::move(software);
++    m_sharedPresentation.store(m_inner->UsesSharedPresentation(), std::memory_order_release);
+ }
+ 
+ void GSThreadedBackend::SetEnabledByDefault(bool enabled)
+@@ -289,6 +333,7 @@
+         case Op::Submit:
+             if (!discardDraws())
+                 m_inner->Submit(readAt<GSPrimitiveBatch>(payload));
++            checkRendererFailure();
+             break;
+         case Op::LoadClut:
+         {
+@@ -321,6 +366,7 @@
+             std::memcpy(&draw, payload, offsetof(GSPrimitiveBatch, state));
+             if (!discardDraws())
+                 m_inner->Submit(draw);
++            checkRendererFailure();
+             break;
+         case Op::Run:
+         {
+@@ -346,6 +392,7 @@
+             std::memcpy(runVerts.data(), counts + n, static_cast<size_t>(n) * 3u * sizeof(GSVertex));
+             if (!discardDraws())
+                 m_inner->SubmitRun(draw.state, runVerts.data(), counts, n);
++            checkRendererFailure();
+             break;
+         }
+         case Op::Present:
+@@ -368,6 +415,8 @@
+ 
+ void GSThreadedBackend::Initialize(uint8_t *vram, uint32_t vramSize)
+ {
++    m_vram = vram;
++    m_vramSize = vramSize;
+     RunOnWorker([&] {
+         m_inner->Initialize(vram, vramSize);
+         m_sharedPresentation.store(m_inner->UsesSharedPresentation(), std::memory_order_release);

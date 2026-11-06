@@ -1,0 +1,27 @@
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -349,6 +349,15 @@
+     reset();
+ }
+ 
++// Invariants of the run path (patch 66/74/75):
++//  - A run is a contiguous sequence of primitives with the *same* draw state, submitted as one backend record. The
++//    frontend keeps at most one open run (m_runValid); a state change, the size bound, or any non-draw command that
++//    must reach the backend in order closes it first. Everything else would reorder the guest's packet stream.
++//  - Every backend entry point that is not a draw (UploadImage, Present, readbacks, VRAM snapshots, framebuffer clears,
++//    state changes) calls flushRun() before touching the backend, so the open run cannot be left behind in the queue.
++//    flushRun is idempotent (no open run -> no-op) and the only place that resets m_runValid/m_runPrims.
++//  - The run buffer is frontend-only state: it is written by submitDraw and read by flushRun on the same thread; the
++//    backend copies the record before returning (SubmitRun), so the buffer can be reused immediately.
+ void GS::submitDraw(const GSPrimitiveBatch &batch)
+ {
+     if (!m_runEnabled)
+@@ -382,6 +391,8 @@
+     ++m_runPrims;
+ }
+ 
++// Closes the open run, if any, and hands it to the backend. Must be called before any backend operation that has to
++// observe the guest's packet order (see the invariants above); a no-op when no run is open.
+ void GS::flushRun()
+ {
+     if (!m_runValid)

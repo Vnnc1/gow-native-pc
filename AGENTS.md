@@ -108,21 +108,6 @@ library without game data; Linux/Steam Deck performance remains unvalidated.
 
 ## Performance target for public builds
 
-Before proposing or rerunning performance experiments, read
-[`docs/research/performance-experiments.md`](docs/research/performance-experiments.md).
-It indexes regressions, neutral/invalid comparisons and gains with missing acceptance
-criteria. Reuse those results; do not repeat the same rejected experiment merely because
-a new agent/chat starts. A retest must cite the previous experiment ID and document a
-materially changed implementation, workload, hardware/toolchain or measurement flaw first.
-For partial gains, validate the missing criterion instead of repeating completed checks.
-Routine correctness regression tests still apply. Append new results and decisions to
-the ledger and `docs/tested-hardware.md`; never erase negative or interrupted evidence.
-
-Performance improvements must be part of the normal first-install build and launch defaults. Do not require
-players to toggle diagnostic flags, install external tuning tools or rerun optimization stages to activate a
-shipped improvement. Existing compiled installations still need a matching updated runner. RX 580 results are
-local evidence only; they do not establish a gain on the i3-10110U/Intel UHD or weaker PCs.
-
 Target stable 60 guest frames/s on modest and powerful supported PCs. The i5-8265U laptop and Xeon/RX 580 desktop
 are separate validation targets; compare revisions on the same hardware/settings and never transfer their FPS or
 build-time results between machines. Measure frame pacing and first-visit stalls, and require visible gameplay
@@ -130,42 +115,7 @@ with sound before claiming a tier ready. Preserve portable CPU fallbacks and acc
 The laptop has not yet met the 60 fps target. Follow the hardware-tier acceptance gates in
 `docs/research/roadmap-2026-10-27.md`; do not promise universal performance or classify an untested tier as supported.
 
-Patch 61 keeps shared presentation acquisition nonblocking when the GS publisher
-holds its mutex. The host-thread snapshot owns the existing reading slot; never
-recycle it until normal host release, and reset it on host lifecycle changes.
-`gow_shared_present_tests` exercises production acquisition with fake fences and
-is part of `verify`. This removes one lock wait, not all host/backend/driver waits;
-see GPU-02 in the performance ledger before extending its performance claims.
-
 ## Player diagnostic reports
-
-The 2026-11-05 [system audit](docs/research/system-audit-2026-11-05.md) records
-confirmed defects, test failures and vendor-tool limitations. Patch 76 validates
-GS raster shader links and releases temporary shader objects; `gow_shader_program_tests`
-injects creation/compile/link failures in verify. Patch 77 resets audio resampling
-phase with its output queue; `gow_sound_regression` checks reset/fresh-stream parity.
-Neither patch establishes a gameplay FPS or audio-dropout improvement.
-Patch 78 adds bounded `GOW_AUDIO_TRACE=1` events for transition diagnosis. Normal
-`main` uses `_Exit`, so flush explicitly after joining the producer and stopping
-audio; a destructor alone is insufficient. Dumps must remain outside callbacks.
-`session-game-smoke.py --audio-trace` rejects missing end markers or overflow.
-Event `t_us` is relative to the begin marker; collector dump time is not event time.
-Patch 79 snapshots producer context only at publication under the output mutex;
-never read producer-only pending context from the callback. Reason totals count
-published audio frames, not call counts or execution time.
-Patch 80 extends movie-clock catch-up only to USA `0x189A88` entered from
-`0x18979C` in the final display-drain loop. Preserve both entry/caller gates,
-the existing one-field cap and original/resume delegation; do not generalize
-this to all sound RPC calls or regional overrides. `movie-tail-tests.py` is in verify.
-
-`launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
-identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
-per session, and invokes the same detached collector. `tools/pipeline/package_diagnostics.py` packages it with
-an explicitly supplied runner; `installer` option `GOW_DIAGNOSTIC_SETUP` gives it a separate uninstall key,
-folder and shortcuts. Never add disc files or cards to this package. The normal launcher's CMake ownership
-checks remain unchanged. `session_summary.h` derives human/JSON summaries only from bounded report files;
-unknown metrics stay absent, and queue/scoped timings must not be presented as GPU frame time. Validate with
-`tools/test/session_diagnostics.py`, packaged UI/game smoke and `tools/test/verify_setup.py`.
 
 `launcher/src/session_diagnostics.*` implements the independent `gow-session` collector and local report export.
 It must keep collecting when the launcher closes, preserve actual child exit codes, and stop only its own child.
@@ -190,22 +140,26 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **In-game menu (patch 39)**: F1 opens the game menu (`gow_trucos.cpp`: Graphics, Cheats, Save tabs), F2 opens it on
   the cheats, Ctrl+F1 opens the ImGui runtime debugger. Graphics changes are live for the session through the header-only
   `runtime/gow_ajustes_vivo.h` (read once from GOW_SCALER, GOW_SHARPEN, TOBIICHI_FXAA, GOW_ANISO, TOBIICHI_ASPECTO,
-  TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings. TOBIICHI_PANTALLA = completa | sin_bordes |
+  TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings.   TOBIICHI_PANTALLA = completa | sin_bordes |
   ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
-- **GS primitive grouping (patch 66)**: integrated directly after 58, without the delivery's 59–65 changes.
-  Individual submissions remain the default (`PS2X_GS_RUN=0`); `=1` opts into equal-state groups of up to 64 primitives.
-  The laptop A/B improved mean FPS but regressed p95/p99 in its last pair; do not promote the default on that evidence.
-  Patch 67's empty alpha-pass elimination is also opt-in (`GOW_GS_ALPHA_PRUNE=1`): the notebook comparison favored
-  its reference in all three pairs. Keep the default off and the exhaustive `gow_gs_alpha_tests` in verify.
-  `gs-run-ab.py --compare grouping|alpha|scaler --gpu-samples` uses private disc/card roots and optional Windows PDH
-  engine counters. GPU busy time is not power draw; report the busiest engine, not a sum of independent engines.
-  Timing/capture runs are not FPS benchmarks; scaler comparisons change output filtering and must disclose that.
-  Preserve flush ordering at state/transfer/CLUT/TEXFLUSH/FINISH/presentation/readback boundaries and GIF packet ends.
-  Inactive vertex tails must use `GSVertex{}` defaults (`q=1`), never read multiple vertices from a single local.
-  `gow_gs_run_tests` in `verify` compares the production frontend and worker queue against the individual path.
-  `tools/test/gs-run-ab.py` uses one executable, frames-only timing and private disc/card roots for visible A/B tests.
-  Window percentile medians are not pooled frame-time percentiles. Keep captures separate from FPS runs.
+- **Graphics settings coverage** (`launcher/qml/PaginaGrafico.qml`): the Graphics tab exposes every picture, texture
+  and renderer variable the runtime reads — the original quality controls, the texture-pack controls from patch 52
+  (`GOW_TEXTURE_PACK_MB`, `_STATS`, `GOW_TEX_PCSX2_NAMES`, `GOW_GS_HW_TEXDUMP`), presentation (`GOW_PROGRESIVO`,
+  `TOBIICHI_ASPECTO` with fixed ratios, `PS2X_GS_DIRECT_PRESENT`, `GOW_GL_MAX_MINOR`), the GS pipeline switches
+  (patches 59/61/66/69/72/74/77) and the renderer diagnostics. Pipeline and diagnostic switches sit behind
+  "Advanced renderer options" and are labelled with their variable name. Defaults reproduce the shipped build:
+  on-by-default switches write "1" (the runtime only checks for "0"), set-means-on switches are removed when off,
+  and numeric defaults are removed so the runtime's own value applies. A new switch needs a `Settings` property,
+  `restablecer()`, the `jugar()` play map, `Lanzador::iniciar`, `Textos.js` + `idiomas/*.js`, and both
+  `session_diagnostics.cpp` allowlists, and `tools/mods/gow_mods_cli.py`'s `ENV_ALLOWED` (plus an `EFFECT_PRESETS`
+  entry when a mod should offer it); `tools/test/launcher-env-contract.py` and `tools/test/regional-play-ui.py`
+  guard the chain. `GOW_TEX_PCSX2_NAMES` is launcher-owned and stays in `ENV_RESERVED`: a mod must not redirect
+  the exported texture-name list. Never expose a variable without a `getenv` reader: `GOW_RENDER_HEIGHT`, `GOW_GS_TIER`,
+  `GOW_FPS_TARGET`, `GOW_MIN/MAX_SCALE`, `GOW_TEX_PRELOAD`, `PS2X_GS_ESCALA`, `TOBIICHI_FILTRO` and
+  `PS2X_GS_SHADER_CACHE_DIR` exist only in design docs or are dead; `PS2X_GS_FOG_OFF` has a reader but the game
+  never draws with GS fog, so exposing it would be a switch that changes nothing. All renderer switches are read
+  once at startup: changing one needs a game restart (the F1 menu only handles patch 39's live atomics).
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16),
   GOW_QTE_HOLD / _HZ (accessibility: a held button becomes the presses the minigames ask for, engine/patches/53; the
@@ -285,9 +239,6 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **Runtime code**: edit in `engine/runtime/`, then turn the change into a new `engine/patches/NN-name.patch` (git diff
   in engine/runtime, with a header saying what/why/measured result). Patches apply in order; a later patch may depend
   on an earlier one. Keep each patch to one concern.
-  Changes to the profile's `runtime.overrides` also require `sync,build`: the runner compiles owned copies under
-  `ps2xRuntime/src/runner`, not `engine/runtime/src` directly. A successful `fetch,build` can leave the previous
-  override in the executable. Check synchronization and runner identity before accepting a gameplay comparison.
 - **Moving the patches to a newer runtime commit**: `tools/pipeline/patches.ps1 start -Onto <commit or ref>` turns
   engine/patches into a commit stack (branch gow-patches, worktree engine/runtime-patches) and rebases it with git's
   3-way merge; resolve conflicts there (`git add`, `git rebase --continue`), then `patches.ps1 export` rewrites only the
@@ -362,8 +313,6 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
   without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
   holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
-  Automatic configure also rejects missing, malformed or mismatched manifests; without a matching shipped profile,
-  it preserves the rejected local profile and configures without PGO. Never silently reuse stale optimization data.
 - Texture packs (runtime patch 52): PCSX2's replacement names, so PCSX2 packs work unchanged; the name code mirrors
   `GSTextureCache::HashCacheKey` (blocks or unswizzled rows, 32-bit palette, PSM/TW/TH/TEXA bits). Never commit or ship
   packs, dumps or screenshots of them. `GOW_TEX_PCSX2_NAMES=<file>` lists the names a session draws.
@@ -429,17 +378,6 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 ## Direct launch and diagnostics
 
-Patch 73 is a USA-only high logic-rate experiment: `GOW_EXPERIMENTAL_LOGIC_FPS=120|240`,
-unset/60/invalid means the original 60 Hz path. It changes the measured timestep
-and the frame-end wait only; fixed steps, movies and other callers retain their
-original waits. Presentation follows game flips in the experimental mode, while
-VBlank/audio clocks stay unchanged. `EeScheduler::currentEeCycle()` is EE-executor-only.
-Never enable it for regional overlays or add it to default boot profiles.
-`logic-rate-tests.py` is part of verify; `gs-run-ab.py --compare logic-rate` uses
-real-time input/windows, private cards and `GOW_DELTA_DIAG`. A speed ratio near
-one does not validate frame-counted QTEs, combos or collision behavior. See
-`docs/research/experimental-logic-rate.md` for evidence and limitations.
-
 Patches 36–37 add opt-in `GOW_SYNC_DIAG=1` worker/GS-stage wait aggregates and bounded isolated MSCAL task replay.
 `tools/test/worker-ab.py` separates FPS, intrusive timing and capture modes; it uses private cards and stops only its
 own child. `tools/test/vu1-task-replay.py` validates local task corpora with `gow_vu1_tasks` from the verify build.
@@ -454,57 +392,3 @@ and write `standalone.log` beside the executable (patch 25). Never package this 
 The Performance diagnostics toggle enables audio buffer/rate, IOP drift, VU1 and performance counters.
 `tools/test/sound_regression.cpp` covers positive/negative SPU2 master-volume overflow (patch 24).
 See `docs/research/audio-standalone-mods-2026-10-26.md` for unresolved scene, HUD and mod acceptance criteria.
-
-Patch 68 is an opt-in CPU countdown candidate (`GOW_FINISH_COUNTDOWN=1`, default off).
-It wraps only USA GoW resume PCs 0x17A328/0x17A32C and batches existing quiet
-checkpoints; retain generated polling/calls and full timer/IOP/event checkpoints.
-`tools/test/finish-countdown-tests.py` extracts the owned `engine/runtime/src/gow_overrides.cpp`,
-not the generated runner copy, and is part of verify. `gs-run-ab.py --scene ship_guard`
-checks encounter state, zone and cross-run position bounds; it is not a frozen replay.
-Do not equate sampler RIP occupancy (which includes waits) with thread CPU utilization.
-
-Patch 69 gates the timed GS dump clock read; keep its first-draw origin and eligible
-first-batch trigger. `gs-run-ab.py --task-capture` is an intrusive diagnostic mode
-with a 32-record cap; never present those session FPS as a benchmark or export its
-local game-derived task files. See the scene-bottleneck report for rejected combat
-comparisons and the separately validated exact-input VU1 corpus.
-
-Patch 70 adds test-only `f<N>` pad/capture times and frame-window boundaries.
-`ship_arrival_frames` compares the first 360 rendered arrival frames; it is not sustained combat.
-The harness requires matching frame-indexed trajectories and consecutive pad observations.
-Pad-observed intervals are not GPU latency; exact audio snapshots can straddle one device callback.
-Missing five-second windows and unavailable exact dropped-audio counts must remain null.
-Patch 71's JIT chain adapter is opt-in (`GOW_VU1X_CHAIN_INLINE=1`), default off.
-`gs-run-ab.py --compare vu1-inline` forces JIT-only in both variants and checks effective markers;
-do not present those results as the shipped hybrid mode. Preserve the original chain/AOT/DLL path.
-Run the methodology tests, full verify and identical-task replay for changes to these contracts.
-
-Performance continuation checkpoint (2026-11-04):
-`docs/research/render-delivery-2026-11-04/resume-checkpoint.md` records the user-requested pause,
-unaccepted scalar-outline/encounter-anchor drafts, evidence and pending validation. Read it before
-resuming this investigation. Drafts under that report's `drafts/` are not ordinal runtime patches;
-never apply/package them automatically. A later explicit user request to resume supersedes the pause.
-
-Queue backpressure diagnostics (patch 59): `GOW_SYNC_DIAG=1` also emits `[gow-queue]`
-for stage-ring capacity (queue 1, bytes) and backend capacity (queue 2, chunks).
-These producer waits include scheduling and can overlap existing VU/GS timers.
-Keep timing opt-in, preserve queue ordering/limits, and test the collector parser
-with `tools/test/session_diagnostics.py`. Semantics: `docs/reporting-bugs.md`.
-
-Patch 60 bounds decoded GS texture allocations by bytes (128 MiB, excluding the active oversized texture)
-and reuses existing storage after invalidation. Render targets, replacement packs and driver staging are
-outside this budget. `gow_texture_budget_tests` is in verify; `gow_texture_upload_test` is an explicitly
-run, real-OpenGL CT32/T8/T4 pixel check, not a headless test. `session-game-smoke.py --texture-cache`
-checks `[gs-cache]` counters. Keep reference validity during eviction and preserve cache-key dimensions/formats.
-Detailed private-kit reports enable `GOW_GS_HW_STATS`; normal FPS collection keeps it off.
-
-Experimental renderer patches 72–74 remain default-off: `GOW_GS_SAMPLER_CACHE`,
-`GOW_GS_FAST_SHADER`, `GOW_GS_ALPHA_BOUNDS`. Preserve reference paths, upload-time
-sampler invalidation, per-program uniform locations and optional shader fallback.
-Alpha bounds exclude texture-alpha-dependent draws. `verify` includes sampler
-state and alpha interval tests. `gow_renderer_variants_test` plus
-`tools/test/renderer-variants.py` is an explicit real-OpenGL color comparison,
-not headless GPU validation. Patch 75 `GOW_GS_VARIANT_DIAG` adds test-only counters.
-See GS-07/08/09 in the performance ledger before proposing default promotion.
-Future Vulkan/Direct3D and automatic launcher selection are proposals only in
-`docs/research/graphics-api-roadmap.md`; no such backend or selector is implemented.

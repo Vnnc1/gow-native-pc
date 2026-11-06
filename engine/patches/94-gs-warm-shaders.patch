@@ -1,0 +1,41 @@
+GS shaders: the CLUT-from-target program is linked during init instead of on its first draw
+(GOW_GS_WARM_SHADERS=0 keeps the lazy path)
+
+`ensureClutProgram()` links the CLUT-from-target program the first time a draw needs a palette that lives in a render
+target, so the driver's compile happened inside the frame that first needed it. `ensure()` now calls it during init,
+restores the default framebuffer it leaves bound (nothing outside clutFromTarget may see it) and prints
+`[gs-warm] clut program compiled during init (X ms)`.
+
+Measured, ship deck, Asia disc, 0.5x, HD Graphics 4400: 13.5 ms and 15.7 ms in two runs, at init; the first
+CLUT-from-target draw links nothing. The window-level frame metrics do not move (13.5 ms is below the spike
+threshold and the first use already lands in the load for this scene): first steady window p50 20.2 ms vs 19.0..19.3
+ms, p95 38.3 ms vs the same band, and no `[gow-frame-spike]` before t=18 in either run, so there is no measured
+stutter improvement either. Kept default on because the cost is one-time and now sits in the load instead of in a
+frame; set GOW_GS_WARM_SHADERS=0 for the lazy behaviour.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 1a5489c..2f7a2e3 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1026,6 +1026,21 @@ struct GSHwBackend::Impl
+                 g.BindVertexArray(vao);
+             }
+         }
++        // gow-native-pc (patch 94): the CLUT-from-target program is linked lazily, on the first draw whose palette lives
++        // in a render target. That is a one-time compile in the middle of the frame that first needs it; doing it here
++        // moves the cost into the load. GOW_GS_WARM_SHADERS=0 keeps the lazy behaviour.
++        static const bool warmShaders = !(std::getenv("GOW_GS_WARM_SHADERS") && std::getenv("GOW_GS_WARM_SHADERS")[0] == '0');
++        if (warmShaders)
++        {
++            const auto began = std::chrono::steady_clock::now();
++            if (ensureClutProgram())
++            {
++                // ensureClutProgram leaves its own framebuffer bound; nothing outside clutFromTarget may see it.
++                g.BindFramebuffer(kFramebuffer, 0);
++                std::fprintf(stderr, "[gs-warm] clut program compiled during init (%.1f ms)\n",
++                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
++            }
++        }
+         if (const char *s = std::getenv("PS2X_GS_HW_SCALE"))
+             scale = std::clamp(static_cast<float>(std::atof(s)), 0.25f, 4.0f);
+         std::fprintf(stderr, "[gs-hw] render-target renderer ready, scale %.2f (%s)\n", scale,

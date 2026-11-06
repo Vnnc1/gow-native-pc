@@ -22,6 +22,8 @@ qt_add_executable(gow-launcher WIN32
     src/installer_backend.h
     src/mando.cpp
     src/mando.h
+    src/mods_model.cpp
+    src/mods_model.h
 )
 if(WIN32)
     target_sources(gow-launcher PRIVATE gow-launcher.rc)
@@ -60,6 +62,7 @@ set(ARCHIVOS_QML
     qml/PaginaPartidas.qml
     qml/PaginaTrucos.qml
     qml/PaginaOtros.qml
+    qml/PaginaMods.qml
 )
 # The QML files sit at the module root (no "qml/"), so their folder's implicit import is the module itself and
 # Tema (the theme) loads as a singleton.
@@ -88,16 +91,6 @@ if(WIN32)
 endif()
 
 install(TARGETS gow-launcher gow-session RUNTIME DESTINATION bin)
-
-if(WIN32)
-    qt_add_executable(gow-diagnostics WIN32 diagnostics/main.cpp diagnostics/diagnostic_kit.cpp
-        diagnostics/diagnostic_kit.h src/session_diagnostics.cpp src/session_diagnostics.h)
-    target_include_directories(gow-diagnostics PRIVATE src)
-    target_compile_definitions(gow-diagnostics PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}-diagnostics")
-    target_link_libraries(gow-diagnostics PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 psapi comdlg32)
-    qt_add_resources(gow-diagnostics diagnostic_ui PREFIX "/" FILES diagnostics/Main.qml qml/Textos.js
-        qml/idiomas/fr.js qml/idiomas/de.js qml/idiomas/it.js qml/idiomas/ru.js qml/idiomas/zh.js)
-endif()
 
 # Explicit regression target; never included in the player package.
 add_executable(gow_region_tests EXCLUDE_FROM_ALL ../tools/test/regional_launcher_test.cpp)

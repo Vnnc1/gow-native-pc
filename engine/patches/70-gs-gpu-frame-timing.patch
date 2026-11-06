@@ -1,0 +1,135 @@
+gs-native-pc (patch 70): GPU-side frame timing (GOW_GS_GPU_PROFILE=1)
+
+`gs_ms` is thread busy time. It cannot separate CPU submission from the GPU still drawing, so every
+discussion about "the GS costs 11 ms" was ambiguous: is it the submit path or is the iGPU saturated?
+
+This wires the timestamp queue that already existed (include/runtime/gs/gs_gpu_profile.h, exercised by
+ps2xTest) into the backend: two GL_TIMESTAMP counters per frame - opened by the first primitive after a
+Present, closed by the next Present - so the pair covers exactly one frame's draws. Results are read four
+frames later, and only through GL_QUERY_RESULT_AVAILABLE, so nothing stalls. Off by default: each timestamp
+is a driver round trip.
+
+First measurement, 0.5x Asia disc, PS2X_GS_WORKER=1, i3-4170 + HD 4400, 25 s:
+
+    [gs-gpu] frames=4 gpu_ms=5.38 max_ms=10.18
+    [gs-gpu] frames=4 gpu_ms=7.94 max_ms=17.08
+    [gow-perf] gs_ms=1437 / 5 s over ~125 frames -> 11.5 ms per frame
+
+So the GPU is busy 5-8 ms of an 11.5 ms GS window: roughly half of the GS time is CPU submission, and
+the iGPU has ~40 % idle. Consequence for the next step: lowering the internal resolution cannot buy much
+here (already known from the discard run), and the queue/expand path is where the GS time actually is.
+VU1 (~24 ms per frame in the same window) is still the wall for the frame as a whole.
+
+Files: PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 9bdffbf..c4a488e 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -4,6 +4,7 @@
+ #include "gs_texture_store.h"
+ #include "runtime/gs/gs_swizzle.h"
+ #include "gs_gl.h"
++#include "../gs_gpu_profile.h" // GPU-side frame timing (GOW_GS_GPU_PROFILE=1)
+ #include "../gs_gpu_helpers.h"
+ // gow-native-pc (patch 52): texture packs (PCSX2 names: XXH3-64, dependency xxhash; PNGs decoded by raylib's loader, declared
+ // here instead of including raylib.h, which clashes with the Win32 headers: LoadImage is also a Win32 macro)
+@@ -697,6 +698,82 @@ struct GSHwBackend::Impl
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+ 
++    // GPU-side frame timing (GOW_GS_GPU_PROFILE=1). `gs_ms` is thread busy time: it cannot tell CPU submission
++    // apart from the GPU still drawing. Two GL_TIMESTAMP counters per frame do; the queue reads them four frames
++    // later so nothing stalls (gs_gpu_profile.h, already exercised by ps2xTest). Opt-in: each timestamp costs a
++    // driver round trip and some drivers are slow at it.
++    GSGpuProfile::Queue gpuProfile;
++    bool gpuProfileOn = std::getenv("GOW_GS_GPU_PROFILE") != nullptr;
++    GLuint gpuBeginQuery = 0, gpuEndQuery = 0;
++    bool gpuSampleOpen = false, gpuNeedBegin = true;
++
++    GLuint takeQuery()
++    {
++        const Api &g = gl();
++        if (!gpuProfile.freeQueries.empty())
++        {
++            const GLuint q = gpuProfile.freeQueries.back();
++            gpuProfile.freeQueries.pop_back();
++            return q;
++        }
++        GLuint q = 0;
++        g.GenQueries(1, &q);
++        return q;
++    }
++
++    // Called before the first draw of a frame; no-op when profiling is off or a sample is still open.
++    void beginGpuSample()
++    {
++        if (!gpuProfileOn || gpuSampleOpen || !gpuNeedBegin || !gl().QueryCounter || !gl().GenQueries)
++            return;
++        gpuBeginQuery = takeQuery();
++        gpuEndQuery = takeQuery();
++        gl().QueryCounter(gpuBeginQuery, kTimestamp);
++        gpuSampleOpen = true;
++        gpuNeedBegin = false;
++    }
++
++    // Called from Present, after the frame's draws: closes the sample and reports whatever windows are ready.
++    void endGpuSample()
++    {
++        const Api &g = gl();
++        if (gpuProfileOn && gpuSampleOpen)
++        {
++            g.QueryCounter(gpuEndQuery, kTimestamp);
++            if (gpuProfile.sampleAllowed())
++                gpuProfile.pending.push_back({0u, gpuBeginQuery, gpuEndQuery, {}});
++            gpuProfile.endFrame();
++            gpuSampleOpen = false;
++        }
++        gpuNeedBegin = true;
++        if (!gpuProfileOn || gpuProfile.pending.empty())
++            return;
++        gpuProfile.collect(
++            [&](uint32_t id)
++            {
++                GLuint64 available = 0;
++                g.GetQueryObjectui64v(id, kQueryResultAvailable, &available);
++                return available != 0;
++            },
++            [&](uint32_t id)
++            {
++                GLuint64 ns = 0;
++                g.GetQueryObjectui64v(id, kQueryResult, &ns);
++                return static_cast<uint64_t>(ns);
++            },
++            [](const GSGpuProfile::Window &w)
++            {
++                if (w.count[0] == 0u)
++                    return;
++                uint64_t maxNs = 0u;
++                for (const auto &sample : w.rasterTimes) // kind 0 samples: (duration ns, info)
++                    maxNs = std::max(maxNs, sample.first);
++                std::fprintf(stderr, "[gs-gpu] frames=%llu gpu_ms=%.2f max_ms=%.2f\n",
++                             static_cast<unsigned long long>(w.count[0]), double(w.ns[0]) / 1e6 / double(w.count[0]),
++                             double(maxNs) / 1e6);
++            });
++    }
++
+     // gow-native-pc (patch 62): GOW_GS_COST=1 splits the GS worker's per-primitive (submit) and per-batch (drawOne) cost.
+     // Unset: one predictable branch per call, nothing else. `submit` runs on the GS worker (see the queue in gs_frontend).
+     struct Cost
+@@ -2278,6 +2355,7 @@ struct GSHwBackend::Impl
+ 
+     void submit(const GSPrimitiveBatch &b)
+     {
++        beginGpuSample(); // first primitive after a Present opens the frame's GPU window (opt-in)
+         // patch 62: whole per-primitive cost of this worker (all exit paths, including the skips)
+         const bool costOn = cost.on;
+         struct SubmitCost
+@@ -3494,6 +3572,7 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
+     if (!d.ensure())
+         return frame;
+     d.flushPending();
++    d.endGpuSample(); // closes the frame's GPU window: the timestamps cover exactly this frame's draws
+     ++d.presentCount;
+     d.dumpAfterSkip = false;
+     d.frameBatch = 0;

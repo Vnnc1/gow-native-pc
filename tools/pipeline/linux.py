@@ -62,7 +62,7 @@ def jobs():
 
 
 def fetch(root):
-    config = tomllib.loads((root / 'engine/runtime.toml').read_text())
+    config = tomllib.loads((root / 'engine/runtime.toml').read_text(encoding='utf-8'))
     runtime = root / 'engine/runtime'
     if not runtime.exists():
         run(['git', 'clone', config['repository'], runtime])
@@ -103,14 +103,14 @@ class Pipeline:
         self.source = self.runtime / 'PS2Recomp'
         self.data = ROOT / 'data' / args.game
         self.build = ROOT / 'data/build-linux' / args.game
-        self.profile = tomllib.loads((ROOT / 'games' / args.game / 'game.toml').read_text())
+        self.profile = tomllib.loads((ROOT / 'games' / args.game / 'game.toml').read_text(encoding='utf-8'))
         self.count = args.jobs or jobs()
 
     def python(self, script, *args):
         run([sys.executable, '-I', ROOT / script, *args])
 
     def elf(self):
-        return Path(json.loads((self.data / 'languages.json').read_text())['recompile_elf'])
+        return Path(json.loads((self.data / 'languages.json').read_text(encoding='utf-8'))['recompile_elf'])
 
     def configure(self):
         extra = []
@@ -121,10 +121,10 @@ class Pipeline:
             if profile_heads:
                 sources.append(self.runtime / profile_heads)
             heads = {line.strip().lower() for p in sources if p.exists()
-                     for line in p.read_text().splitlines() if re.fullmatch('[0-9a-fA-F]+', line.strip())}
+                     for line in p.read_text(encoding='utf-8').splitlines() if re.fullmatch('[0-9a-fA-F]+', line.strip())}
             text = '\n'.join(sorted(heads)) + '\n'
             target = self.data / 'vu1n_heads.txt'
-            if not target.exists() or target.read_text() != text:
+            if not target.exists() or target.read_text(encoding='utf-8') != text:
                 atomic_text(target, text)
             extra += [f'-DPS2X_VU1_MICROCODE_DIR={captures}',
                       f'-DPS2X_VU1_GENERATOR_SOURCE={self.runtime / self.profile["runtime"]["vu1_generator"]}',

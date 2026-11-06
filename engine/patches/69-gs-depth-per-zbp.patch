@@ -1,0 +1,166 @@
+gs-native-pc (patch 69): one depth buffer per ZBP
+
+A RenderTarget owned one depth texture and attached it for whatever ZBP the draw used. ZBP is an address
+in VRAM, so two ZBPs are two different depth regions; reusing one texture means the second buffer starts
+with the first one's contents (and, with the game's Z-inversion shadow passes, with the wrong sign too).
+
+Measured first: zbpchg in GOW_GS_HW_STATS counts re-attachments, ~2000 per 5 s at 0.5x, so this is a live
+path, not a theoretical one. The depth-texture line then shows the real scope: exactly one target in the
+opening level (fbp=348) alternates between zbp 68 and 15c, every frame.
+
+Implementation: RenderTarget keeps `depthByZbp` (zbp -> GL texture). Switching to a ZBP whose texture
+already exists only re-attaches it with FramebufferTexture2D - no clear, no allocation - and a new ZBP
+creates one more. Capped at four per target (kDepthsPerTarget); past that the attached texture is reused
+and `zbpfull` counts it, because unbounded growth is worse than a wrong depth. destroy() deletes the map.
+
+Counts with the fix on / off, same 25 s run (the number of "[gs-hw] depth" lines is the evidence, since a
+reused texture prints nothing):
+  on  : 5 depth textures, fbp=348 holds zbp 68 *and* 15c
+  off : 4 depth textures (GOW_GS_DEPTH_PER_ZBP=0 restores the old behaviour)
+Frame distribution unchanged within the scene-drift noise (26.2 vs 23.8 guest fps means, 25 s each), which
+is expected: one extra 32x256 depth texture and one re-attach per switch.
+
+Not verified: pixels. The Z-sampling paths (findReinterpretSource, the shuffle source) read the *attached*
+depth for `t.zbp`, so a ZBP that has a texture but is not attached is now not matched at all - before it
+was matched with another buffer's contents. Missing is the safer of the two, but it needs a frame
+comparison against a recording to call it done.
+
+Files: PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 7077e2e..9bdffbf 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -543,6 +543,9 @@ void main()
+     struct RenderTarget
+     {
+         GLuint color = 0, depth = 0, fbo = 0;
++        // GS keeps one depth region per ZBP: a target that switches ZBP must not read the other buffer's contents.
++        // `depth` is the one currently attached (what the Z-sampling and shuffle paths see); this owns them all.
++        std::unordered_map<uint32_t, GLuint> depthByZbp;
+         uint32_t fbp = 0, fbw = 1; // PS2 page base and width in 64 px units
+         uint8_t psm = 0;
+         uint32_t zbp = ~0u;
+@@ -688,6 +691,8 @@ struct GSHwBackend::Impl
+         uint64_t ringWraps = 0, oversizedBatches = 0; // vertex ring pressure: > 2 wraps/frame means the ring is too small
+         uint64_t ringStalls = 0;    // wraps that had to wait for the GPU (a stall; a high count points at the ring size)
+         uint64_t zbpChanges = 0;    // depth re-attached to a different ZBP on the same target (stale depth contents)
++        uint64_t zbpFallback = 0;   // a ZBP past kDepthsPerTarget reused the attached depth (should stay 0)
++        uint64_t depthTextures = 0; // depth textures created (per-ZBP buffers); a jump here means new targets/zbps
+         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+@@ -975,7 +980,15 @@ struct GSHwBackend::Impl
+         const Api &g = gl();
+         if (t.fbo) g.DeleteFramebuffers(1, &t.fbo);
+         if (t.color) g.DeleteTextures(1, &t.color);
+-        if (t.depth) g.DeleteTextures(1, &t.depth);
++        for (const auto &kv : t.depthByZbp)
++            if (kv.second)
++                g.DeleteTextures(1, &kv.second);
++        bool owned = false;
++        for (const auto &kv : t.depthByZbp)
++            if (kv.second == t.depth)
++                owned = true;
++        if (t.depth && !owned) // a depth made before the per-ZBP map existed
++            g.DeleteTextures(1, &t.depth);
+         t = {};
+     }
+ 
+@@ -1002,28 +1015,66 @@ struct GSHwBackend::Impl
+         std::fprintf(stderr, "[gs-hw] render target fbp=%u fbw=%u -> %ux%u\n", fbp, t.fbw, t.glW, t.glH);
+     }
+ 
++    // GS keeps one depth region per ZBP (it is an address in VRAM), so a draw that switches ZBP must get a different
++    // depth buffer, not the previous contents with a new label. Four covers double/triple buffering plus a post pass;
++    // past that the attached texture is reused and counted (`zbpfull`): unbounded growth is worse than a wrong depth.
++    // GOW_GS_DEPTH_PER_ZBP=0 restores the single-texture behaviour, for A/B and for rolling back.
++    static constexpr size_t kDepthsPerTarget = 4;
++
+     void attachDepth(RenderTarget &t, uint32_t zbp)
+     {
+         const Api &g = gl();
+-        if (!t.depth)
++        static const bool perZbp = !(std::getenv("GOW_GS_DEPTH_PER_ZBP") && std::getenv("GOW_GS_DEPTH_PER_ZBP")[0] == '0');
++        const auto makeDepth = [&]()
+         {
+-            g.GenTextures(1, &t.depth);
+-            g.BindTexture(kTexture2D, t.depth);
++            GLuint depth = 0;
++            g.GenTextures(1, &depth);
++            g.BindTexture(kTexture2D, depth);
+             g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kDepthComponent32F), t.glW, t.glH, 0, kDepthComponent, kFloat, nullptr);
+             g.TexParameteri(kTexture2D, kTextureMinFilter, kNearest);
+             g.TexParameteri(kTexture2D, kTextureMagFilter, kNearest);
+             g.BindFramebuffer(kFramebuffer, t.fbo);
+-            g.FramebufferTexture2D(kFramebuffer, kDepthAttachment, kTexture2D, t.depth, 0);
++            g.FramebufferTexture2D(kFramebuffer, kDepthAttachment, kTexture2D, depth, 0);
+             g.ClearDepth(0.0);
+             g.Clear(kDepthBufferBit);
++            t.depthByZbp[zbp] = depth;
++            t.depth = depth;
++            t.zbp = zbp;
++            ++stats.depthTextures;
++            // One line per depth buffer (a handful per session): the count of these lines is the A/B evidence for
++            // GOW_GS_DEPTH_PER_ZBP, since a reused texture prints nothing.
++            std::fprintf(stderr, "[gs-hw] depth fbp=%u zbp=%x -> %ux%u (%zu for this target)\n", t.fbp, zbp, t.glW, t.glH,
++                         t.depthByZbp.size());
++        };
++        if (!perZbp)
++        {
++            if (!t.depth)
++                makeDepth();
++            else if (t.zbp != zbp)
++                ++stats.zbpChanges; // counted only: this is the behaviour the switch restores
++            t.zbp = zbp;
++            return;
+         }
+-        else if (t.zbp != zbp)
++        const auto it = t.depthByZbp.find(zbp);
++        if (it != t.depthByZbp.end())
+         {
+-            // A different ZBP is different VRAM, so the depth now in this texture belongs to another buffer. Counted
+-            // first: whether the game really does this decides if the stale contents matter (GOW_GS_HW_STATS zbpchg).
+-            ++stats.zbpChanges;
++            if (t.depth != it->second) // the texture for this ZBP already exists: re-attach, do not clear
++            {
++                g.BindFramebuffer(kFramebuffer, t.fbo);
++                g.FramebufferTexture2D(kFramebuffer, kDepthAttachment, kTexture2D, it->second, 0);
++                t.depth = it->second;
++                ++stats.zbpChanges;
++            }
++            t.zbp = zbp;
++            return;
++        }
++        if (t.depth && t.depthByZbp.size() >= kDepthsPerTarget)
++        {
++            ++stats.zbpFallback;
++            t.zbp = zbp;
++            return;
+         }
+-        t.zbp = zbp;
++        makeDepth();
+     }
+ 
+     // ---- textures -------------------------------------------------------------------------------------------------
+@@ -3249,16 +3300,17 @@ struct GSHwBackend::Impl
+         if (now - stats.last < std::chrono::seconds(5))
+             return;
+         stats.last = now;
+-        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu ringStalls=%llu oversized=%llu zbpchg=%llu textures=%zu\n",
++        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu ringStalls=%llu oversized=%llu zbpchg=%llu zbpfull=%llu depthTex=%llu textures=%zu\n",
+                      (unsigned long long)stats.shuffles, (unsigned long long)stats.shuffleDraws, (unsigned long long)stats.draws,
+                      (unsigned long long)stats.batches, (unsigned long long)stats.texDecodes, (unsigned long long)stats.texHits,
+                      (unsigned long long)stats.texReuse, (unsigned long long)stats.skippedPsm, (unsigned long long)stats.skippedPrim,
+                      (unsigned long long)stats.unsupportedBlend, (unsigned long long)stats.ringWraps,
+                      (unsigned long long)stats.ringStalls, (unsigned long long)stats.oversizedBatches,
+-                     (unsigned long long)stats.zbpChanges, textures.size());
++                     (unsigned long long)stats.zbpChanges, (unsigned long long)stats.zbpFallback,
++                     (unsigned long long)stats.depthTextures, textures.size());
+         stats.shuffles = stats.shuffleDraws = stats.draws = stats.batches = stats.texDecodes = stats.texHits = stats.texReuse =
+             stats.skippedPsm = stats.skippedPrim = stats.unsupportedBlend = stats.ringWraps = stats.ringStalls =
+-            stats.oversizedBatches = stats.zbpChanges = 0;
++            stats.oversizedBatches = stats.zbpChanges = stats.zbpFallback = stats.depthTextures = 0;
+     }
+ 
+     RenderTarget *findTarget(uint32_t fbp)
