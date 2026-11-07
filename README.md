@@ -11,15 +11,14 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-0.4.0-crimson)
+![version](https://img.shields.io/badge/version-0.5.0-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 </div>
 
-**Linux / Steam Deck:** an experimental native source-build entry point is available.
-See [Linux build instructions and remaining validation](docs/linux.md). There is
-no validated Linux binary release or Steam Deck performance claim yet.
+**Linux / Steam Deck (experimental):** native launcher, build pipeline and Linux installer are available for testing.
+See [installation and remaining validation](docs/linux.md). Steam Deck hardware and performance are not yet validated.
 
 > [!IMPORTANT]
 > This repository contains **no game files**. You need your own **legally acquired copy of God of War** (the game,
@@ -36,12 +35,13 @@ no validated Linux binary release or Steam Deck performance claim yet.
 > **The project is not finished yet.** The game is playable, but it is not 100%: a locked 60 fps is not reached in
 > every scene, only the opening areas have been measured in depth, and some issues remain (see
 > [Known limitations](#known-limitations)). It gets better with every release, and more will be added as the community
-> needs it — **texture packs, a Linux port, ISO mods** and other features are planned (see [Roadmap](#roadmap)).
+> needs it — texture packs, ISO patching and experimental Linux are now available; further work is in the [Roadmap](#roadmap).
 > Bug reports with the launcher's session report help a lot: [`docs/reporting-bugs.md`](docs/reporting-bugs.md).
 
 ## Contents
 
 - [What is this?](#what-is-this)
+- [What's new in 0.5.0](#whats-new-in-050)
 - [What's new in 0.4.0](#whats-new-in-040)
 - [What's new in 0.3.1](#whats-new-in-031)
 - [Required: the PS2Recomp runtime](#required-the-ps2recomp-runtime)
@@ -71,15 +71,55 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
   downloaded automatically; a loading screen shows overall progress, estimated time remaining and tips.
 - **One ISO is enough**: the original (USA) or a recognised fan translation. With several ISOs (e.g. the original and
   a translation) every language becomes playable and the launcher **asks which language you want to play in**.
-- **Built for speed**: each release ships a profile-guided optimisation (PGO) profile trained on exactly its runtime,
-  so every install is built with it, on any CPU and without a training build. The first-play preparation records the
+- **Built for speed**: Windows builds can use a matching profile-guided optimisation (PGO) profile. The 0.5.0 package
+  ships without a pre-trained profile; local training remains available. The first-play preparation records the
   game's VU1/IOP code in one run and builds it in as native code.
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
-  ("Hold instead of mashing" in the Controls tab).
+  ("Hold instead of mashing" in the Accessibility tab), alongside stick gestures and texture packs.
 - **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
 - **Launcher in nine languages**: English, Portuguese, Spanish, Turkish, French, German, Italian, Russian and
   Simplified Chinese.
+
+## What's new in 0.5.0
+
+- **Experimental Linux:** native launcher, build pipeline and `.run` installer for testing on Linux PCs and
+  Steam Deck. Built and smoke-tested in WSL; real Steam Deck performance and compatibility remain unvalidated.
+- **ISO and CHD import:** verified CHD conversion to a local ISO cache before recompilation; original images stay intact.
+- **Regional editions:** USA and the tested USA-compatible Asia disc; Japan and Europe have isolated Windows builds
+  validated through opening gameplay. They require a matching registered build and are not automatically compiled
+  by the USA pipeline. Demos are excluded. See [regional compatibility](docs/disc-import.md).
+- **Accessibility page:** texture-pack selection and input assistance in one place. PCSX2-format PNG replacements
+  can change the game's appearance; packs are not included. Quality and compatibility depend on the pack.
+- **Keyboard/mouse improvements:** held Ctrl + Space and Ctrl + WASD chords are preserved; default evade is Alt + WASD.
+  Optional stick gestures (default G) help with stick-based minigames. L1/L2/R1/R2 repetition is individually opt-in.
+- **Movie audio:** fixed stale audio from one movie corrupting the next movie's PT-BR voices (patch 54).
+  Earlier sound-effect fixes are retained; this is not a claim that every cutscene or transition is fixed.
+- **Build time:** large native IOP modules compile in parallel parts (patch 55). On the recorded Xeon test, the longest
+  unit fell from 126.5 s to 24.5 s; this is not the total installation time. Further reductions remain a goal toward 1.0.0.
+- **Graphics:** existing internal scaling, sharpening, FXAA and external-tool borderless mode remain available.
+  DLSS, including DLSS 5, is not integrated. See [upscaling](#upscaling-and-external-tools).
+
+The target remains stable **60 guest FPS**, with continued work for slower computers. Recorded measurements do not
+establish a locked 60 FPS across all mid-range PCs or the entire game. See [tested hardware](docs/tested-hardware.md)
+and the full [0.5.0 changelog](CHANGELOG.md#v050--2026-11-02).
+
+Setup and troubleshooting: [Accessibility, keyboard assistance and texture packs](docs/accessibility.md).
+
+### Linux experimental download
+
+From [Releases](https://github.com/Vnnc1/gow-native-pc/releases), download
+`gow-native-pc-linux-x86_64-ubuntu26.04-experimental.run` and its `.sha256`, then run:
+
+```sh
+bash gow-native-pc-linux-x86_64-ubuntu26.04-experimental.run
+bash "$HOME/.local/share/gow-native-pc-0.5.0/start-linux.sh"
+```
+
+Install the matching system dependencies first; this uses Ubuntu 26.04 libraries and is not a universal AppImage.
+The installer refuses an existing destination to protect games and saves. Import your own compatible disc in the
+launcher to compile the game. SteamOS and other distributions may require rebuilding the launcher from source;
+see [Linux installation and limitations](docs/linux.md). The Windows steps below still use `gow-native-pc-setup.exe`.
 
 ## What's new in 0.4.0
 
@@ -128,7 +168,7 @@ Earlier releases (0.3.0: Early FINISH, PGO in the install, the F1 menu, the VU1 
 Without the runtime nothing can be recompiled or run. It is **not part of this repository**: **Install and build**
 in the launcher or the `fetch` stage of `build.cmd` clones it into `engine/runtime/` as pinned in
 [`engine/runtime.toml`](engine/runtime.toml) (Tobiichi-Port, which bundles ran-j's PS2Recomp with Waffle565's and
-KIexster's extensions) and applies [`engine/patches`](engine/patches) (01–53 in this release).
+KIexster's extensions) and applies [`engine/patches`](engine/patches) (01–58 in this release).
 
 ## Requirements
 
@@ -161,8 +201,8 @@ The base path is recorded in `data/build-root.txt`; the launcher reads it automa
 2. In the launcher → **Install** tab:
    1. **Download tools** — portable copies are downloaded once, with SHA-256 verification, without changing your PATH;
    2. **Add ISO / CHD…** — select one or more compatible disc images; the launcher identifies the game and language;
-   3. **Install and build** — downloads the runtime, prepares the disc and compiles the game with the release's PGO
-      profile. Leave **Prepare the first play (recommended)** enabled: a copy of the game plays itself for four
+   3. **Install and build** — downloads the runtime, prepares the disc and compiles the game. A matching shipped PGO
+      profile is used when available; 0.5.0 does not include one. Leave **Prepare the first play (recommended)** enabled: a copy of the game plays itself for four
       minutes, **hidden and muted**, recording the VU1/IOP code it uses, and that code is compiled in.
 3. Pick a **graphics profile** (Graphics page), check **Controls** if you play on the keyboard, then **PLAY**.
 
@@ -174,8 +214,8 @@ See [disc formats and regional compatibility](docs/disc-import.md).
 
 Build time depends on the CPU, RAM, storage and downloads; the game's ~6,400 recompiled functions are compiled on your
 PC. On the test PC (Xeon E5-2666 v3, 20 threads, 16 GB) the whole installation took **about 30 minutes** when it still
-trained its own PGO profile (0.3.x); with the release's profile it no longer needs the instrumented build and the
-training run. On a 2-core/4-thread laptop CPU (i3-10110U) an install took **about 75 minutes**. These are references,
+trained its own PGO profile (0.3.x). A matching shipped profile can avoid that training, but v0.5.0 ships without one.
+On a 2-core/4-thread laptop CPU (i3-10110U) an install took **about 75 minutes**. These are historical references,
 not deadlines. A game installed with an older version shows **"FPS optimisation recommended (PGO)"** on the Home page.
 
 ### From a terminal
@@ -235,9 +275,13 @@ screen, place PNG, JPG or WebP images in `data/gow1/loading/`.
 
 ## Performance
 
-The game is capped at 60 frames by design (its logic follows the PS2's 60 Hz VBlank). Every measurement, with the code
+By default, the game keeps its original 60 Hz frame pacing. Every measurement, with the code
 and settings used: [`docs/tested-hardware.md`](docs/tested-hardware.md). Results vary between machines — treat them as
 a reference.
+
+An opt-in **120/240 logic-rate experiment** is available for development tests, disabled by default.
+The local laptop tests did not reach these gameplay rates; host presentation frequency is not guest FPS.
+See [instructions, results and remaining validation](docs/research/experimental-logic-rate.md).
 
 On the project's **Xeon E5-2666 v3 / 16 GB / Radeon RX 580 2048SP** test PC (full screen 1080p, internal resolution 2×,
 PGO, Early FINISH), the opening ship averages **about 55 fps**, with heavy-combat windows around **50–53 fps**; a
@@ -255,8 +299,8 @@ from other machines are welcome: turn on **Audio and compilation diagnostics** f
 
 - **Built in:** internal resolution (the game really draws 2×, 3×… more pixels), a sharp scaler (bicubic + adaptive
   sharpening), FXAA and anisotropic filtering — all in Launcher → Graphics, most also live in the F1 menu.
-- **DLSS / FSR 2–3 / XeSS:** not available. They need motion vectors and a DirectX 12/Vulkan renderer; the PS2 graphics
-  unit (OpenGL here) provides neither. DLSS also needs an NVIDIA RTX card.
+- **DLSS (including DLSS 5), FSR 2–3 and XeSS:** not integrated in this port. The existing borderless option
+  enables external capture/scaling tools; it does not install DLSS or establish compatibility with a particular tool version.
 - **External tools** such as Lossless Scaling (scaling / frame generation), ReShade (OpenGL) and OBS see the game in
   **borderless** mode (Launcher → Graphics → *Allow external tools*). They are not officially tested and may add latency;
   frame generation works best when the game already runs at a steady rate.
@@ -291,12 +335,15 @@ diagnostics are optional and can reduce FPS. See [`docs/reporting-bugs.md`](docs
 
 - A locked 60 fps is not reached in heavy combat yet (see [Performance](#performance)).
 - Only the opening areas (the ship) have been measured in depth; later areas may behave differently.
-- Short hitches with audio gaps can occur at area transitions; the PT-BR cutscene audio has a known channel-alignment
-  issue ([`docs/research/cutscene-audio-2026-10-26.md`](docs/research/cutscene-audio-2026-10-26.md)).
+- Short hitches with audio gaps can still occur at area transitions. The reproduced PT-BR movie channel-alignment
+  defect is fixed by patch 54; other scenes still need testing. Missing or cropped video on a repacked disc may require
+  the original disc; see [translations](docs/translations.md).
+- Some replacement packs can show transparent enemies. The observed pack/runtime interaction remains unresolved;
+  compare the same scene without replacements when reporting it.
 - 2-core/4-thread laptop CPUs run the game at about 20 fps in combat (see [Performance](#performance)).
 - If you see image glitches, turn off **Finish frames early** (and **Fast VU**, if you turned it on) in Launcher →
   Performance and report it.
-- Windows only for now.
+- Linux is experimental; Steam Deck, regional Linux builds and broad GPU compatibility remain unvalidated.
 
 ## Roadmap
 
@@ -306,9 +353,9 @@ The full plan, with measurement gates for each item: [`docs/research/roadmap-202
 |---|---|---|
 | 1 | Build and recompilation quality | Largely done in 0.3.0 (pinned toolchain, caching, verify, faster install with PGO); a sub-20-minute install is next |
 | 2 | Stable 60 fps | Early FINISH and PGO done; next: static VU1 timing (the remaining ~14% in heavy combat), native VU1 ops still interpreted |
-| 3 | Audio | PT-BR cutscene alignment and transition gaps |
-| 4 | Mods and texture packs | ISO patches, file overrides ([`docs/research/audio-standalone-mods-2026-10-26.md`](docs/research/audio-standalone-mods-2026-10-26.md)); texture dump and replacement is designed, not implemented ([`docs/research/texture-replacement.md`](docs/research/texture-replacement.md)) |
-| 5 | Linux port | The runtime and launcher already have Linux code paths; the build pipeline needs porting and testing on real hardware |
+| 3 | Audio | PT-BR movie alignment fixed (patch 54); investigate remaining transitions and scenes |
+| 4 | Mods and texture packs | PCSX2-format replacements and ISO xdelta patching implemented; improve compatibility and mod management |
+| 5 | Linux port | Native pipeline and experimental installer implemented; validate real Steam Deck hardware and portable dependencies |
 | 6 | Image quality | Spatial upscaling, widescreen HUD fixes |
 | 7 | God of War II foundation | Game-specific code isolated per profile ([`games/gow2/README.md`](games/gow2/README.md)) |
 

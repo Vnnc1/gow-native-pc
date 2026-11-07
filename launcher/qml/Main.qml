@@ -49,13 +49,13 @@ ApplicationWindow {
         property string anisotropico: "1" // anisotropic texture filtering: 1 = off, 2..16 (GOW_ANISO)
         property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_HW_SCALE)
     property bool dibujoHardware: true // false = software rasterizer, for a GPU without OpenGL 4.3 (PS2X_GS_RENDERER=sw)
-        property int fpsLimite: 120
+        property int fpsLimite: 60
         property bool vsync: false
         property bool mostrarFps: false
         property string elf: ""
         property string iso: ""
         property string ejecutable: ""
-        property bool saltarVideos: true // skip the pre-rendered movies
+        property bool saltarVideos: false // native movies include sound
         property bool arranqueRapido: false // used to shorten the game's opening (see Component.onCompleted)
         property int versionAjustes: 0
         property bool controlesDmc5: true
@@ -219,17 +219,22 @@ ApplicationWindow {
         ajustes.alto = pantalla.ancho / pantalla.alto < 1.7 ? 800 : 720
         ajustes.aspecto = aspectoPorDefecto()
         ajustes.estirar = false
-        // the "Balanced" profile of the Graphics page
-        ajustes.filtro = "fsr"
+        // Match the current first-launch defaults, including diagnostic and experimental options.
+        ajustes.filtro = "bilineal"
         ajustes.nitidez = 0.8
         ajustes.fxaa = true
-        ajustes.anisotropico = "4"
+        ajustes.anisotropico = "1"
         ajustes.resolucionInterna = "2"
         // the game makes at most 60 frames; a higher window rate only repeats them
         ajustes.fpsLimite = 60
         ajustes.vsync = false
         ajustes.mostrarFps = false
-        ajustes.saltarVideos = true
+        ajustes.saltarVideos = false
+        ajustes.finAnticipado = true
+        ajustes.vuRapida = false
+        ajustes.diagnostics = false
+        ajustes.autoNative = false
+        ajustes.usarPacoteTexturas = false
         ajustes.arranqueRapido = false
         ajustes.controlesDmc5 = true
         ajustes.mando = ""
@@ -305,7 +310,7 @@ ApplicationWindow {
         }
         // Mods (launcher patch 73): stage the enabled profile and hand the environment to the runner. With no mod,
         // prepararEntorno returns an empty map (and clears stale mod variables) so the original game is untouched.
-        var modPrep = modeloMods.prepararEntorno(ajustes.usarPacoteTexturas ? ajustes.pacoteTexturas : "")
+        var modPrep = modeloMods.prepararEntorno(ajustes.usarPacoteTexturas ? ajustes.pacoteTexturas : "", elegido.elf, elegido.runner)
         if (!modPrep.ok) {
             dialogoError.texto = Tema.t("modsError")
             dialogoError.detalle = modPrep.error

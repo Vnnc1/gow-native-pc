@@ -1,0 +1,22 @@
+Expose optional renderer variant coverage for GPU regression tests.
+Counters describe work since the last stats flush, not GPU execution time.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -3050,7 +3050,15 @@
+     std::fprintf(stderr, "[gs-sampler-config] cache=%u\n", m_impl->samplerCache ? 1u : 0u);
+     std::fprintf(stderr, "[gs-alpha-config] prune=%u\n", m_impl->alphaPrune ? 1u : 0u);
+ }
+-GSHwBackend::~GSHwBackend() = default;
++GSHwBackend::~GSHwBackend()
++{
++    // Test-only counters since the last stats flush; no extra hot-path timing.
++    const char *diag = std::getenv("GOW_GS_VARIANT_DIAG");
++    if (diag && diag[0] == '1')
++        std::fprintf(stderr, "[gs-variant-end] fast=%llu full=%llu avoided=%llu bounds=%llu\n",
++            (unsigned long long)m_impl->fastDraws, (unsigned long long)m_impl->fullDraws,
++            (unsigned long long)m_impl->samplerCallsSaved, (unsigned long long)m_impl->alphaBoundsDraws);
++}
+ 
+ void GSHwBackend::Initialize(uint8_t *vram, uint32_t vramSize)
+ {

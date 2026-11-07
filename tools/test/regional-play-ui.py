@@ -93,7 +93,9 @@ Item {
         property bool stale: false
         property bool requiresRebuild: false
         function refresh() {}
-        function prepararEntorno(path) { return {ok: true, env: {}} }
+        property string selectedElf: ""
+        property string selectedRunner: ""
+        function prepararEntorno(path, elf, runner) { selectedElf = elf; selectedRunner = runner; return {ok: true, env: {}} }
     }
     UI.Main { id: page }
     function check(ok, message) { if (!ok) throw new Error(message) }
@@ -102,12 +104,33 @@ Item {
         onTriggered: {
             try {
                 check(page.listo, "registered installations must be playable")
+                var settings = page.ajustesGuardados
+                var defaults = {}
+                var resetKeys = ["filtro", "nitidez", "fxaa", "anisotropico", "resolucionInterna",
+                    "fpsLimite", "vsync", "mostrarFps", "saltarVideos", "finAnticipado", "vuRapida",
+                    "diagnostics", "autoNative", "usarPacoteTexturas"]
+                for (var key of resetKeys) defaults[key] = settings[key]
+                settings.filtro = "fsr"
+                settings.anisotropico = "16"
+                settings.fpsLimite = 240
+                settings.saltarVideos = true
+                settings.finAnticipado = false
+                settings.vuRapida = true
+                settings.diagnostics = true
+                settings.autoNative = true
+                settings.usarPacoteTexturas = true
+                settings.pacoteTexturas = "/private/textures"
+                page.restablecer()
+                for (var key of resetKeys)
+                    check(settings[key] === defaults[key], "reset differs from first launch: " + key)
+                check(settings.pacoteTexturas === "/private/textures", "reset must preserve file paths")
                 for (var region of ["europe", "japan"]) {
                     page.ajustesGuardados.textoJuego = "region:" + region
                     page.jugar()
                     var args = lanzador.lastPlay
                     check(args.ejecutable === "/"+region+"/runner", "wrong regional runner")
                     check(args.elf === "/"+region+"/ELF", "wrong regional ELF")
+                    check(modeloMods.selectedElf === args.elf && modeloMods.selectedRunner === args.ejecutable, "mod identity differs from selected game")
                     check(args.partidas === "/"+region+"/data/saves", "shared saves")
                     check(page.carpetaPartidas === args.partidas, "Saves page disagrees with gameplay")
                     check(lanzador.lastSaves === args.partidas, "Saves list was not refreshed after changing region")

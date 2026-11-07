@@ -1,0 +1,30 @@
+// Embed the manifest explicitly for llvm-rc, including per-monitor DPI and asInvoker.
+#include <windows.h>
+
+1 RT_MANIFEST "setup.manifest"
+
+1 ICON "../launcher/icon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 3,0,0,0
+PRODUCTVERSION 3,0,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "God of War Native PC Setup"
+            VALUE "ProductName", "God of War Native PC"
+            VALUE "CompanyName", "gow-native-pc"
+            VALUE "FileVersion", "3.0.1.0"
+            VALUE "ProductVersion", "3.0.1.0"
+            VALUE "OriginalFilename", "gow-native-pc-setup.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

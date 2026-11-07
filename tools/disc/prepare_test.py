@@ -11,6 +11,36 @@ import prepare
 
 
 class MovieFallbackTests(unittest.TestCase):
+    def test_widescreen_fallback_uses_remapped_entry(self):
+        placeholder = b'placeholder' * 300
+        cases = [('known placeholder', placeholder, 50000, True),
+                 ('valid movie with formerly empty entry', b'v' * len(placeholder), 4, False),
+                 ('empty current entry', b'\0' * 4, 50000, True)]
+        for label, payload, old_size, replace in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                profile = {'disc': {'toc': 'INDEX', 'paks': ['PART0', 'PART1'],
+                                   'widescreen_movie_ext': '.WIDE', 'movie_ext': '.MOV',
+                                   'widescreen_placeholders': [{'size': len(placeholder),
+                                       'sha256': hashlib.sha256(placeholder).hexdigest()}]}}
+                original = b''.join(struct.pack('<12sIII', n, part, size, sector)
+                                    for n, part, size, sector in [
+                                        (b'A.MOV', 0, 9000, 10),
+                                        (b'A.WIDE', 0, len(payload), 0),
+                                        (b'A.WIDE', 1, old_size, 100)])
+                (root / 'INDEX').write_bytes(original)
+                (root / 'PART0').write_bytes(payload)
+                prepare.normalise(tmp, profile)
+                first = (root / 'INDEX').read_bytes()
+                entries = prepare.discfs.parse_toc(first)
+                expected = (0, 9000, 10) if replace else (0, len(payload), 0)
+                self.assertEqual(entries[1][2:], expected)
+                self.assertEqual(entries[2][2:], expected)
+                self.assertEqual((root / 'INDEX.orig').read_bytes(), original)
+                self.assertEqual((root / 'PART0').read_bytes(), payload)
+                prepare.normalise(tmp, profile)
+                self.assertEqual((root / 'INDEX').read_bytes(), first)
+
     def test_guest_irx_case_aliases_and_existing_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

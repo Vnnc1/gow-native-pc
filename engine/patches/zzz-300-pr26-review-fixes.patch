@@ -1,0 +1,249 @@
+PR 26 integration review fixes on the renderer paths that run by default.
+1) Vertex ring (patches 59/67/68, zzz-001): four segments with one fence each instead of one fence per lap.
+   Leaving a segment fences the draws that read it; entering one waits on the fence taken three segments
+   earlier, so a wrap normally waits for nothing. zzz-001 was correct but fenced the lap being left and waited
+   on it at once: a full CPU/GPU drain every 32 MB, i.e. a periodic hitch on slow GPUs. Chunks never straddle a
+   segment; a chunk larger than one segment (8 MB; the largest batch measured is 84 KB) takes the callers'
+   existing spill buffers. Only the persistent map is fenced: BufferSubData is ordered by the driver. Timeout,
+   WAIT_FAILED and a null fence still fall back to glFinish, never to an unconfirmed overwrite.
+2) Op::Run encoder (patch 66): the zero tail of a primitive with fewer than three vertices was read from one
+   GSVertex as if it were three (stack over-read for points and empty primitives, ASan in
+   render-delivery-tests submit_run/0, /1, /255), and `base += kGsRunMaxPrims` in the loop header could wrap
+   at UINT32_MAX. Both were already fixed in fix-chore's patch 66; restored here on top of the PR chain.
+3) glBufferStorage on a 4.3 context is kept only when the driver lists ARB_buffer_storage (a non-null entry
+   point is not support on every Windows driver); otherwise the ring uses BufferSubData. One stderr line says
+   which path a session took.
+4) Queue record guard (patch 89): Op::Vertices required sizeof(GSPrimitiveBatch), but the compact encoder writes
+   only offsetof(GSPrimitiveBatch, state) (the state travels in its own DrawState record). Every primitive
+   submitted outside a run with PS2X_GS_COMPACT_QUEUE on (the default) was dropped as "record payload
+   truncated", i.e. PS2X_GS_RUN=0 drew nothing through the threaded backend. gow_gs_run_tests caught it.
+5) PS2X_GS_RUN is read per GS again (patch 66 had made it a function static, read once per process), as in
+   fix-chore. No runtime cost difference: the constructor runs once per session.
+Validation: tools/test/render-delivery-tests.py (extracted production bodies, mock GL, ASan): 12/12;
+gow_gs_run_tests (production frontend + threaded queue, run on/off, compact on/off): pass.
+No FPS claim; the GPU-side effect needs the laptop A/B in docs/research/pr26-integration.md.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+index 32ca33b..b5e5893 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+@@ -8,6 +8,7 @@
+ #include <clocale>
+ #include <cstdlib>
+ #include <cstdio>
++#include <cstring>
+ #include <mutex>
+ #include <string_view>
+ 
+@@ -122,6 +123,34 @@ namespace
+         // (without it the frame has no device hash): optional, so a 4.3 context keeps the GPU renderer
+         std::string storageMissing;
+         load(a.BufferStorage, "glBufferStorage", storageMissing);
++        // Integration patch zzz-300: a non-null pointer is not support. Some Windows drivers return an entry point for
++        // every name they know, and the vertex ring (patch 59) maps its 32 MB store persistently when BufferStorage is
++        // set. Below a 4.4 context, keep it only when the driver lists ARB_buffer_storage; otherwise both users fall
++        // back (ring: BufferSubData, frame hash: none), which is the path a 4.3-class iGPU is meant to take.
++        if (a.BufferStorage && s_contextMinor < 4)
++        {
++            using GetIntegervFn = void (*)(GSGL::GLenum, GSGL::GLint *);
++            using GetStringiFn = const unsigned char *(*)(GSGL::GLenum, GSGL::GLuint);
++            GetIntegervFn getIntegerv = nullptr;
++            GetStringiFn getStringi = nullptr;
++            std::string ignored;
++            load(getIntegerv, "glGetIntegerv", ignored);
++            load(getStringi, "glGetStringi", ignored);
++            constexpr GSGL::GLenum kNumExtensionsQuery = 0x821D, kExtensionsName = 0x1F03;
++            bool listed = false;
++            GSGL::GLint count = 0;
++            if (getIntegerv && getStringi)
++                getIntegerv(kNumExtensionsQuery, &count);
++            for (GSGL::GLint i = 0; i < count && !listed; ++i)
++            {
++                const unsigned char *name = getStringi(kExtensionsName, static_cast<GSGL::GLuint>(i));
++                listed = name && std::strcmp(reinterpret_cast<const char *>(name), "GL_ARB_buffer_storage") == 0;
++            }
++            if (!listed)
++                a.BufferStorage = nullptr;
++            std::fprintf(stderr, "[gs-gl] OpenGL 4.%d: ARB_buffer_storage %s\n", s_contextMinor,
++                         listed ? "listed, persistent vertex ring on" : "not listed, vertex ring uses BufferSubData");
++        }
+         load(a.MapBufferRange, "glMapBufferRange", missing);
+         load(a.UnmapBuffer, "glUnmapBuffer", missing);
+         load(a.GenQueries, "glGenQueries", missing);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 7a48cb3..3f9b657 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -629,13 +629,18 @@ struct GSHwBackend::Impl
+     float scale = 2.0f;
+     GLuint program = 0, vao = 0, vbo = 0;
+     // GOW-Port (patch 59): one vertex ring instead of a glBufferData per batch. A batch hands the GPU an offset with
+-    // glBindVertexBuffer and writes its vertices into a persistently mapped window; a ring wrap waits on a fence taken
+-    // at the previous wrap, so the memory reused there has long been consumed.
++    // glBindVertexBuffer and writes its vertices into a persistently mapped window. The ring is split into
++    // kRingSegments segments with one fence each (integration patch zzz-300): leaving a segment fences the draws that
++    // read it, entering one waits on the fence taken when it was last left (kRingSegments - 1 segments earlier), so
++    // a wrap never drains the whole GPU queue.
+     static constexpr uint32_t kVertexRingBytes = 32u << 20;
+-    static constexpr uint32_t kRingOverflow = 0xFFFFFFFFu; // ringAppend: the chunk cannot fit in the ring
++    static constexpr uint32_t kRingSegments = 4;
++    static constexpr uint32_t kRingSegmentBytes = kVertexRingBytes / kRingSegments;
++    static constexpr uint32_t kRingOverflow = 0xFFFFFFFFu; // ringAppend: the chunk cannot fit in one segment
+     GLuint vertexRingOffset = 0;
++    uint32_t vertexRingSegment = 0;
+     uint8_t *vertexRingMap = nullptr;
+-    GLsync vertexFence = nullptr;
++    GLsync vertexSegmentFence[kRingSegments] = {};
+     bool vertexRing = false;
+     GLuint spillVbo = 0; // only for a chunk larger than the ring; the ring itself is immutable, so it cannot be respecified
+     GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+@@ -2371,7 +2376,7 @@ struct GSHwBackend::Impl
+             if (vertexRing)
+             {
+                 const uint32_t off = ringAppend(q.data(), q.size() * sizeof(ShuffleVertex));
+-                if (off == kRingOverflow) // larger than the whole ring: use this VAO's own buffer instead
++                if (off == kRingOverflow) // larger than one ring segment: use this VAO's own buffer instead
+                 {
+                     g.BindBuffer(kArrayBuffer, shuffleVbo);
+                     g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(q.size() * sizeof(ShuffleVertex)), q.data(), kStreamDraw);
+@@ -2888,40 +2893,60 @@ struct GSHwBackend::Impl
+     }
+ 
+     // Copies a chunk into the persistent vertex ring and returns its offset. Shared by the draw batches and the shuffle
+-    // passes (patch 61); the caller binds binding 0 with its own stride. A wrap waits for all draws
+-    // submitted in the current lap before any storage is reused. Returns kRingOverflow, without touching the ring, when the
+-    // chunk cannot fit at all: wrapping there would reset the offset and copy past the end of the mapped storage.
++    // passes (patch 61); the caller binds binding 0 with its own stride and issues the draw before the next append. A
++    // chunk never straddles two segments: one that does not fit in the rest of the current segment starts the next one.
++    // Leaving a segment fences every draw that reads it; entering a segment waits on the fence taken when it was last
++    // left. With four segments that fence is three segments old, so the wait is normally already signalled and a wrap
++    // no longer drains the whole GPU queue (zzz-001 fenced the lap being left and waited on it immediately). Only the
++    // persistent map needs fences: BufferSubData (no ARB_buffer_storage) is synchronised by the driver. Returns
++    // kRingOverflow, without touching the ring, for a chunk larger than one segment (the callers' own buffers take it).
++    void waitRingSegment(uint32_t segment)
++    {
++        const Api &g = gl();
++        GLsync &fence = vertexSegmentFence[segment];
++        if (!fence)
++            return; // never used yet
++        GLenum status = g.ClientWaitSync(fence, 0, 0);
++        if (status == kTimeoutExpired)
++        {
++            ++stats.ringStalls; // the GPU is a whole ring behind: a visible stall, not a silent overwrite
++            status = g.ClientWaitSync(fence, kSyncFlushCommandsBit, 1000000000ull);
++        }
++        const bool complete = status == kAlreadySignaled || status == kConditionSatisfied;
++        g.DeleteSync(fence);
++        fence = nullptr;
++        // A timeout or WAIT_FAILED cannot authorize overwriting a range the GPU may still read.
++        if (!complete)
++            g.Finish();
++    }
++
+     uint32_t ringAppend(const void *data, size_t bytes)
+     {
+         const Api &g = gl();
+         const uint32_t need = static_cast<uint32_t>((bytes + 63u) & ~static_cast<size_t>(63u));
+-        if (need > kVertexRingBytes)
++        if (need > kRingSegmentBytes)
+         {
+             ++stats.oversizedBatches;
+             return kRingOverflow;
+         }
+-        if (vertexRingOffset + need > kVertexRingBytes)
++        const uint32_t segmentEnd = (vertexRingSegment + 1u) * kRingSegmentBytes;
++        if (vertexRingOffset + need > segmentEnd)
+         {
+-            // Fence the draws submitted in THIS lap before recycling their storage.
+-            if (vertexFence) g.DeleteSync(vertexFence);
+-            vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
+-            bool complete = false;
+-            if (vertexFence)
++            if (vertexRingMap)
+             {
+-                auto status = g.ClientWaitSync(vertexFence, 0, 0);
+-                if (status == kTimeoutExpired)
+-                {
+-                    ++stats.ringStalls;
+-                    status = g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, 1000000000ull);
+-                }
+-                complete = status == kAlreadySignaled || status == kConditionSatisfied;
+-                g.DeleteSync(vertexFence);
+-                vertexFence = nullptr;
+-            }
+-            // Null fences, timeout and WAIT_FAILED cannot authorize overwriting a mapped range.
+-            if (!complete) g.Finish();
+-            vertexRingOffset = 0;
+-            ++stats.ringWraps;
++                GLsync &left = vertexSegmentFence[vertexRingSegment];
++                if (left)
++                    g.DeleteSync(left); // cannot happen (entering waited on it), kept for safety
++                left = g.FenceSync(kSyncGpuCommandsComplete, 0);
++                if (!left)
++                    g.Finish(); // no fence to wait on later: complete the segment's draws now
++            }
++            vertexRingSegment = (vertexRingSegment + 1u) % kRingSegments;
++            if (vertexRingSegment == 0u)
++                ++stats.ringWraps;
++            if (vertexRingMap)
++                waitRingSegment(vertexRingSegment);
++            vertexRingOffset = vertexRingSegment * kRingSegmentBytes;
+         }
+         const uint32_t at = vertexRingOffset;
+         if (vertexRingMap)
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 98a15fa..18a7442 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -416,8 +416,9 @@ GS::GS()
+     : m_backend(GSThreadedBackend::MakeDefault())
+ {
+     // gow-native-pc (patch 66): primitives of one draw state go to the backend as one run by default; PS2X_GS_RUN=0
+-    // restores one backend call per primitive.
+-    static const bool runEnabled = []
++    // restores one backend call per primitive. Read per GS (not a function static, zzz-300): the constructor runs
++    // once per session anyway, and gow_gs_run_tests switches the setting between frontends in one process.
++    const bool runEnabled = []
+     {
+         const char *v = std::getenv("PS2X_GS_RUN");
+         return !(v && v[0] == '0');
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 835ce57..a7e7aef 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -343,7 +343,7 @@ void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBa
+         case Op::WriteVram: return sizeof(WriteVramArgs);
+         case Op::Sync: return sizeof(GSSyncReason);
+         case Op::DrawState: return sizeof(GSDrawState);
+-        case Op::Vertices: return sizeof(GSPrimitiveBatch);
++        case Op::Vertices: return offsetof(GSPrimitiveBatch, state); // compact record: vertices only (zzz-300)
+         case Op::Run: return 4u; // header; the n-dependent size is checked below
+         case Op::Present: return sizeof(GSPresentationRequest);
+         case Op::Call: return sizeof(const std::function<void()> *);
+@@ -536,7 +536,7 @@ void GSThreadedBackend::SubmitRun(const GSDrawState &state, const GSVertex *vert
+         ++g_gsRunOverflows;
+         reportRunAnomaly("primCount over the run bound");
+     }
+-    for (uint32_t base = 0u; base < primCount; base += kGsRunMaxPrims)
++    for (uint32_t base = 0u; base < primCount;)
+     {
+         const uint32_t n = std::min(kGsRunMaxPrims, primCount - base);
+         const uint32_t payloadSize = 4u + n + n * 3u * static_cast<uint32_t>(sizeof(GSVertex));
+@@ -552,11 +552,15 @@ void GSThreadedBackend::SubmitRun(const GSDrawState &state, const GSVertex *vert
+             m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(src), reinterpret_cast<const uint8_t *>(src + vc));
+             if (vc < 3u)
+             {
+-                // Unused vertices are zeroed once here so a decoder does not have to special-case them.
+-                const GSVertex empty{};
+-                m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&empty), reinterpret_cast<const uint8_t *>(&empty) + (3u - vc) * sizeof(GSVertex));
++                // Unused vertices are default-initialized (q=1, like fillRunPrimitive) so a decoder does not have to
++                // special-case them. The tail must come from a real array: one GSVertex read as up to three was a
++                // stack over-read for points and empty primitives (render-delivery-tests submit_run/0, /1, /255).
++                static const std::array<GSVertex, 3> empty{};
++                m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(empty.data()),
++                              reinterpret_cast<const uint8_t *>(empty.data() + (3u - vc)));
+             }
+         }
++        base += n; // not in the for header: base + kGsRunMaxPrims could wrap at UINT32_MAX
+     }
+     if (m_open.size() >= kPublishBytes)
+         PublishLocked();

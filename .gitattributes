@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+*.sh text eol=lf
+# Runtime patches are applied with git apply to the runtime checkout: keep them byte for byte (a CRLF checkout made every
+# patch fail to apply in the fetch stage of a fresh clone on Windows)
+*.patch -text

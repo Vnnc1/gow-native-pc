@@ -346,7 +346,9 @@ class Package:
 
 
 class Context:
-    def __init__(self, repo: Path, mods: Path):
+    def __init__(self, repo: Path, mods: Path, selected_elf: Path | None = None, selected_runner: Path | None = None):
+        self.selected_elf = selected_elf
+        self.selected_runner = selected_runner
         self.repo = repo
         self.mods = mods
         self.packages_dir = mods / "packages"
@@ -386,10 +388,42 @@ def gather_fingerprint(ctx: Context) -> dict[str, Any]:
                 builds = [item for item in loaded if isinstance(item, dict)]
         except (OSError, json.JSONDecodeError):
             builds = []
-    build = builds[0] if builds else {}
+    build = {}  # Registration order never identifies the selected game.
     executable = profile.get("executable", {}) if isinstance(profile.get("executable"), dict) else {}
     editions = profile.get("editions", []) if isinstance(profile.get("editions"), list) else []
     default_region = str(editions[0].get("id", "unknown")) if editions and isinstance(editions[0], dict) else "unknown"
+
+    runner_hash = ""
+    elf_hash = ""
+    if bool(ctx.selected_elf) != bool(ctx.selected_runner):
+        raise ManagerError("Select both an ELF and its runner", 2)
+    if ctx.selected_elf is not None:
+        elf, runner = ctx.selected_elf.resolve(), ctx.selected_runner.resolve()
+        if not elf.is_file() or not runner.is_file():
+            raise ManagerError("Selected ELF or runner is missing", 2)
+        # Use the same ELF parser as identification and regional registration.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "disc"))
+        from discfs import text_sha1, pcsx2_crc
+        payload = elf.read_bytes()
+        actual_text, actual_crc = text_sha1(payload), pcsx2_crc(payload)
+        elf_hash, runner_hash = hashlib.sha256(payload).hexdigest(), sha256_file(runner)
+        matches = [item for item in builds
+                   if Path(item.get("elf", "")).resolve() == elf
+                   and Path(item.get("runner", "")).resolve() == runner]
+        if matches:
+            build = matches[0]
+            if (build.get("elf_sha256") != elf_hash or build.get("runner_sha256") != runner_hash
+                    or build.get("text_sha1") != actual_text or build.get("elf_crc") != actual_crc):
+                raise ManagerError("Selected regional build identity changed; validate it again", 2)
+        elif elf.name != executable.get("name") or actual_text != executable.get("text_sha1"):
+            raise ManagerError("Selected ELF has no matching validated build", 2)
+        cache = runner.parent.parent / "CMakeCache.txt"
+        source = next((line.split("=", 1)[1] for line in cache.read_text(encoding="utf-8").splitlines()
+                       if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL=")), "")
+        expected_source = build.get("source") or str(ctx.repo / "engine/runtime/PS2Recomp")
+        if not source or Path(source).resolve() != Path(expected_source).resolve():
+            raise ManagerError("Selected runner belongs to a different source tree", 2)
+        build = {**build, "elf_crc": actual_crc, "text_sha1": actual_text}
 
     runtime = ctx.repo / "engine" / "runtime"
     try:
@@ -411,14 +445,15 @@ def gather_fingerprint(ctx: Context) -> dict[str, Any]:
         # An isolated build's "region" is the disc edition and its "code" is the code region; the base profile
         # has no such pair, so use the serial and the first edition id. Both values are accepted by target.regions.
         "edition": str(build.get("region") or executable.get("serial") or "unknown"),
-        "region": str(build.get("code") or default_region),
+        "region": str(build.get("code") or build.get("region") or default_region),
         "elfCrc": str(build.get("elf_crc") or executable.get("crc") or "").upper(),
         "textSha1": str(build.get("text_sha1") or executable.get("text_sha1") or ""),
         "runtimeCommit": commit,
         "patchChainHash": chain.hexdigest(),
+        "runnerSha256": runner_hash,
+        "elfSha256": elf_hash,
     }
     record = {"schema": SCHEMA, **fields, "fingerprintId": digest(stable_json(fields)), "generatedAt": iso(now())}
-    record["runnerSha256"] = build.get("runner_sha256", "")
     return record
 
 
@@ -1338,6 +1373,22 @@ def build_plan(ctx: Context, profile: str, packages: dict[tuple[str, str], Packa
             if drop is package:
                 break
 
+    # Conflicts can remove a provider after eligibility. Recompute the transitive
+    # dependency closure before any environment, texture or guest patch is merged.
+    while True:
+        removed = False
+        for package in ordered:
+            if package.key not in kept:
+                continue
+            missing = [spec for spec in declared_mods(package, "requires")
+                       if not _requirement_present(packages, kept, spec)]
+            if missing:
+                kept.pop(package.key)
+                exclude(package, f"missing requirement {', '.join(missing)} after conflict resolution")
+                removed = True
+        if not removed:
+            break
+
     # Phase 2: merge only the survivors. `ordered` is ranked, so the first writer of a key is the
     # higher-priority mod (which is what the "higher-ranked mod wins" warnings say).
     for package in ordered:
@@ -1582,20 +1633,15 @@ def deactivate(ctx: Context, reason: str = "") -> None:
 # -------------------------------------------------------------------------------------------------------------- launching
 
 def runner_and_elf(ctx: Context) -> tuple[Path, Path]:
-    builds_path = ctx.repo / "data" / "gow1" / "regional-builds.json"
-    build = json.loads(builds_path.read_text(encoding="utf-8"))["builds"][0]
-    runner = Path(build["runner"])
-    elf = Path(build["elf"])
-    if not runner.is_file():
-        raise ManagerError(f"runner not found: {runner}", 5)
-    if not elf.is_file():
-        raise ManagerError(f"guest ELF not found: {elf}", 5)
-    return runner, elf
+    if ctx.selected_elf is None or ctx.selected_runner is None:
+        raise ManagerError("run requires --selected-elf and --selected-runner before the command", 5)
+    gather_fingerprint(ctx)  # Revalidate hashes and source ownership immediately before starting.
+    return ctx.selected_runner.resolve(), ctx.selected_elf.resolve()
 
 
 def sanitized_environ() -> dict[str, str]:
     env = dict(os.environ)
-    for key in ("GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_TEXTURE_PACK"):
+    for key in ("GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_MOD_VFS_LOG", "GOW_MOD_PATCH_TABLE", "GOW_MOD_PATCH_LOG", "GOW_TEXTURE_PACK"):
         env.pop(key, None)
     return env
 
@@ -1614,6 +1660,8 @@ def run_game(ctx: Context, label: str, seconds: int, no_mods: bool, extra: dict[
     run_dir = ctx.runs_dir / f"{stamp}-{label or 'run'}"
     run_dir.mkdir(parents=True, exist_ok=True)
     env = sanitized_environ()
+    env["GOW_MC0"] = str(run_dir / "card.ps2")
+    env["GOW_SAVES_DIR"] = str(run_dir / "saves")
     active_plan = None
     if not no_mods:
         active_plan = json.loads((ctx.hooks_dir / "plan.json").read_text(encoding="utf-8"))
@@ -2358,6 +2406,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="God of War native port mod manager")
     parser.add_argument("--repo", default=str(default_repo), help="checkout root (defaults to GOW_REPO_ROOT or the script's checkout)")
     parser.add_argument("--mods-dir", default=str(default_mods), help="mod data folder (defaults to GOW_MODS_DIR or data/mods)")
+    parser.add_argument("--selected-elf", type=Path, help="actual ELF selected for this launch")
+    parser.add_argument("--selected-runner", type=Path, help="actual runner selected for this launch")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name: str, func, help_text: str) -> argparse.ArgumentParser:
@@ -2431,7 +2481,7 @@ def main(argv: list[str] | None = None) -> int:
     p = add("selftest", cmd_selftest, "run the manager's isolated checks")
 
     args = parser.parse_args(argv)
-    ctx = Context(Path(args.repo).resolve(), Path(args.mods_dir).resolve())
+    ctx = Context(Path(args.repo).resolve(), Path(args.mods_dir).resolve(), args.selected_elf, args.selected_runner)
     try:
         return args.func(ctx, args)
     except ManagerError as error:

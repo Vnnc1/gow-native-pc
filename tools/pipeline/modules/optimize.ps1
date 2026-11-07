@@ -2,8 +2,8 @@
 # An instrumented copy of the game (its own build folder) plays the [optimize] pad script with the hardware renderer and
 # the sound path running, like a player, but hidden and silent (GOW_WINDOW_HIDDEN, engine/patches/15; GOW_AUDIO=0 with
 # GOW_AUDIO_PCM=NUL keeps the audio stream paced at volume 0); closing its window writes the profile (engine/patches/12),
-# which is merged into gow.profdata and used by every later clang build. A new recompile leaves it partly stale (those
-# functions are just not profiled).
+# which is merged into gow.profdata and used by later clang builds with a matching manifest. Unmatched profiles stay
+# on disk but are not applied automatically; a fitting shipped profile or new training restores PGO.
 # A launcher update that changed the runtime patches marks the profile stale (data\pgo-stale.txt, tools/pipeline/update.ps1;
 # the launcher then recommends this step again). A new profile clears it when it was trained on the current runtime: this
 # run fetched it, or no rebuild after an update is pending.
@@ -29,7 +29,7 @@ if ($Stages -contains 'pgo') {
     $vars = @{ LLVM_PROFILE_FILE = (Join-Path $pgoDir 'run-%p.profraw'); GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_PAD_TEST_NO_CAPTURE = '1'
                PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; GOW_GS_EARLY_FINISH = '1'; GOW_WINDOW_HIDDEN = '1'
                TOBIICHI_PANORAMICO = '16:9'; TOBIICHI_FXAA = '1'; PS2X_GS_HW_SCALE = '2'
-               GOW_VU1_FAST = '1'; GOW_VU1N_X64 = '1'; GOW_AUDIO = '0'; GOW_AUDIO_PCM = 'NUL'; GOW_PAD_GUION = $prof.optimize.pad_script }
+               GOW_VU1_FAST = '0'; GOW_VU1N_X64 = '1'; GOW_AUDIO = '0'; GOW_AUDIO_PCM = 'NUL'; GOW_PAD_GUION = $prof.optimize.pad_script }
     if (Get-ChildItem -Path $vu1 -Filter *.bin -ErrorAction SilentlyContinue | Select-Object -First 1) { $vars.GOW_VU1_CAPTURA = $vu1 }
     Invoke-GameRecording (Join-Path $genBld 'ps2xRuntime/ps2EntryRunner.exe') $elf $secs $vars 60000
     # Second segment: the title / legal / menu path. The pad script reaches it first, but 240 s of ship deck is ~95 % of
@@ -77,7 +77,7 @@ if ($Stages -contains 'tune' -and -not $tuneWithProfile) {
     $vars = @{ LLVM_PROFILE_FILE = (Join-Path $pgoDir 'run-%p.profraw'); GOW_SKIP_FMV = '1'; GOW_PAD_TEST = '1'; GOW_PAD_TEST_NO_CAPTURE = '1'
                PS2X_GS_WORKER = '1'; GOW_GS_FINISH_ASINCRONO = '1'; GOW_GS_EARLY_FINISH = '1'; GOW_WINDOW_HIDDEN = '1'
                TOBIICHI_PANORAMICO = '16:9'; TOBIICHI_FXAA = '1'; PS2X_GS_HW_SCALE = '2'
-               GOW_VU1_FAST = '1'; GOW_VU1N_X64 = '1'; GOW_AUDIO = '0'; GOW_AUDIO_PCM = 'NUL'; GOW_PAD_GUION = $prof.optimize.pad_script
+               GOW_VU1_FAST = '0'; GOW_VU1N_X64 = '1'; GOW_AUDIO = '0'; GOW_AUDIO_PCM = 'NUL'; GOW_PAD_GUION = $prof.optimize.pad_script
                GOW_VU1_CAPTURA = $vu1; PS2X_IOP_DUMP_MODULES = $iopMods; GOW_VU1_CAPTURE_MISSES = '1' }
     Invoke-GameRecording (Join-Path $genBld 'ps2xRuntime/ps2EntryRunner.exe') $elf $secs $vars 60000
     $raw = @(Get-ChildItem $pgoDir -Filter '*.profraw' | Where-Object Length -gt 0)
@@ -137,13 +137,13 @@ function Invoke-PgoCheck {
     }
     Show-ProfileCoverage
     $ninja = Join-Path $bld 'build.ninja'
-    Need (Test-Path $ninja) "configured build folder ($bld)"
+    Need $ninja "configured build folder ($bld)"
     if (-not (Select-String -Path $ninja -SimpleMatch '-fprofile-instr-use' -List)) { throw "$bld was built without the profile (no -fprofile-instr-use)" }
     if (Select-String -Path $ninja -SimpleMatch '-fprofile-instr-generate' -List) { throw "$bld is the instrumented (generate) build, not the profile-use build" }
     $hash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash
     if (-not (Select-String -Path $ninja -SimpleMatch "-DGOW_PGO_REVISION=$hash" -List)) { throw 'the build used a different profile (stale configure): re-run configure' }
     $runner = Join-Path $bld 'ps2xRuntime\ps2EntryRunner.exe'
-    Need (Test-Path $runner) "runner ($runner)"
+    Need $runner "runner ($runner)"
     $nmPath = Join-Path $script:llvmBin 'llvm-nm.exe'
     if (Test-Path $nmPath) {
         $nm = & $nmPath $runner 2>$null | Out-String

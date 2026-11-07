@@ -19,7 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CPP = ROOT / 'launcher/src/lanzador.cpp'
 QML = ROOT / 'launcher/qml/Main.qml'
-RUNTIME = ROOT / 'engine/runtime'
+# Optional --runtime <dir>: check another runtime checkout (a scratch copy with the patch chain applied).
+RUNTIME = Path(sys.argv[sys.argv.index('--runtime') + 1]) if '--runtime' in sys.argv else ROOT / 'engine/runtime'
 
 # GPU selectors written by aplicarTarjeta() are consumed by the OS/driver loader,
 # not by any C++ source in the runtime.

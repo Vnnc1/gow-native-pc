@@ -1,3 +1,10 @@
+# downloaded runtime, generated data (discs, saves, recorded microcode, logs, Qt), builds
+engine/runtime/
+engine/runtime-patches/
+data/
+launcher/build/
+launcher/build-clang/
+# never commit game files
 # Never commit game files, disc-derived data or third-party binaries.
 # This repository ships source, patches and docs only: the runtime is fetched
 # (build.cmd -Stages fetch) and every game file comes from the user's own disc.
@@ -80,6 +87,8 @@ generado/
 *.tar
 *.tar.gz
 *.lnk
+# profile-guided data packaged into a release (tools/pipeline: package), never committed
+games/*/pgo/
 
 # --- Logs, caches, screenshots, local config ---
 *.log

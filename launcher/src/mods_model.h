@@ -76,7 +76,7 @@ public:
     // inherited from a previous session.
     // Plans the current selection without staging it, to show conflicts/missing files before playing.
     Q_INVOKABLE QVariantMap analizar();
-    Q_INVOKABLE QVariantMap prepararEntorno(const QString &pacoteManual);
+    Q_INVOKABLE QVariantMap prepararEntorno(const QString &pacoteManual, const QString &elf, const QString &runner);
     // Restores the original game files (the CLI undoes the staging transaction).
     Q_INVOKABLE bool descartar();
     // Installs an unpacked mod folder as data/mods/packages/<id>@<version>.

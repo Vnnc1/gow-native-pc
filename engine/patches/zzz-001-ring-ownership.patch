@@ -1,0 +1,47 @@
+Fence the current vertex-ring generation before reuse. Mock GL tests pass; no FPS claim.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -2901,8 +2901,8 @@
+     }
+ 
+     // Copies a chunk into the persistent vertex ring and returns its offset. Shared by the draw batches and the shuffle
+-    // passes (patch 61); the caller binds binding 0 with its own stride. A wrap waits on the fence taken at the previous
+-    // wrap, so the memory reused there has long been consumed. Returns kRingOverflow, without touching the ring, when the
++    // passes (patch 61); the caller binds binding 0 with its own stride. A wrap waits for all draws
++    // submitted in the current lap before any storage is reused. Returns kRingOverflow, without touching the ring, when the
+     // chunk cannot fit at all: wrapping there would reset the offset and copy past the end of the mapped storage.
+     uint32_t ringAppend(const void *data, size_t bytes)
+     {
+@@ -2915,19 +2915,24 @@
+         }
+         if (vertexRingOffset + need > kVertexRingBytes)
+         {
++            // Fence the draws submitted in THIS lap before recycling their storage.
++            if (vertexFence) g.DeleteSync(vertexFence);
++            vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
++            bool complete = false;
+             if (vertexFence)
+             {
+-                if (g.ClientWaitSync(vertexFence, 0, 0) == kTimeoutExpired)
++                auto status = g.ClientWaitSync(vertexFence, 0, 0);
++                if (status == kTimeoutExpired)
+                 {
+-                    // One second already means the GPU is far behind. Waiting is the only safe move: returning here and
+-                    // overwriting the lap would feed the queue vertices that are being read right now (torn geometry
+-                    // that is nearly impossible to trace back). Block instead, and make it visible.
+                     ++stats.ringStalls;
+-                    g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, ~0ull);
++                    status = g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, 1000000000ull);
+                 }
++                complete = status == kAlreadySignaled || status == kConditionSatisfied;
+                 g.DeleteSync(vertexFence);
+-            }
+-            vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
++                vertexFence = nullptr;
++            }
++            // Null fences, timeout and WAIT_FAILED cannot authorize overwriting a mapped range.
++            if (!complete) g.Finish();
+             vertexRingOffset = 0;
+             ++stats.ringWraps;
+         }

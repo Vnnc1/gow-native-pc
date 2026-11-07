@@ -1,0 +1,117 @@
+Restore the base decoded-texture byte budget alongside PR 26 source-hash reuse.
+Cap decoded uploads at 128 MiB (not total GPU memory). Preserve same-shape storage.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1,5 +1,6 @@
+ // GOW-Port: render-target GS renderer, see include/runtime/gs/gs_hw_backend.h.
+ #include "runtime/gs/gs_hw_backend.h"
++#include "runtime/gs/gs_texture_budget.h"
+ #include "runtime/gow_ajustes_vivo.h"
+ #include "gs_texture_store.h"
+ #include "runtime/gs/gs_swizzle.h"
+@@ -535,6 +536,7 @@
+         uint32_t blockLo = 0, blockHi = 0;
+         bool valid = false;
+         uint64_t lastUse = 0;
++        uint64_t allocatedBytes = 0;
+         uint64_t pcsx2Hash = 0;   // gow-native-pc (patch 52): the texture's PCSX2 hash (texture packs), while pcsx2Hashed
+         bool pcsx2Hashed = false;
+         uint64_t srcHash = 0;     // gow-native-pc (patch 61): hash of the GS memory span this image was decoded from
+@@ -715,6 +717,8 @@
+     double firstRawZ = 0.0;
+ 
+     std::unordered_map<uint64_t, Texture> textures;
++    static constexpr uint64_t textureBudget = 128u * 1024u * 1024u;
++    uint64_t textureBytes = 0, textureEvictions = 0, textureReuses = 0;
+     std::vector<RenderTarget> targets;
+     uint64_t useCounter = 0, writeSeq = 0;
+     struct UploadRecord { uint32_t lo, hi; uint64_t seq; };
+@@ -1631,7 +1635,16 @@
+             g.GenTextures(1, &tex.id);
+         g.BindTexture(kTexture2D, tex.id);
+         g.PixelStorei(kUnpackAlignment, 4);
+-        g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), tex.width, tex.height, 0, kRgba, kUnsignedByte, pixels.data());
++        const uint64_t incoming = static_cast<uint64_t>(tex.width) * tex.height * 4u;
++        const bool reuseStorage = tex.allocatedBytes == incoming;
++        reserveTexture(tex, incoming);
++        if (reuseStorage)
++        {
++            ++textureReuses;
++            g.TexSubImage2D(kTexture2D, 0, 0, 0, tex.width, tex.height, kRgba, kUnsignedByte, pixels.data());
++        }
++        else
++            g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), tex.width, tex.height, 0, kRgba, kUnsignedByte, pixels.data());
+         tex.valid = true;
+         if (textures.size() > 6000u)
+             evictOld();
+@@ -1816,7 +1829,16 @@
+             g.GenTextures(1, &tex.id);
+         g.BindTexture(kTexture2D, tex.id);
+         g.PixelStorei(kUnpackAlignment, 1);
+-        g.TexImage2D(kTexture2D, 0, 0x8229 /*R8*/, tex.width, tex.height, 0, 0x1903 /*RED*/, kUnsignedByte, indices.data());
++        const uint64_t incoming = static_cast<uint64_t>(tex.width) * tex.height;
++        const bool reuseStorage = tex.allocatedBytes == incoming;
++        reserveTexture(tex, incoming);
++        if (reuseStorage)
++        {
++            ++textureReuses;
++            g.TexSubImage2D(kTexture2D, 0, 0, 0, tex.width, tex.height, 0x1903 /*RED*/, kUnsignedByte, indices.data());
++        }
++        else
++            g.TexImage2D(kTexture2D, 0, 0x8229 /*R8*/, tex.width, tex.height, 0, 0x1903 /*RED*/, kUnsignedByte, indices.data());
+         g.TexParameteri(kTexture2D, kTextureMinFilter, kNearest);
+         g.TexParameteri(kTexture2D, kTextureMagFilter, kNearest);
+         tex.valid = true;
+@@ -1870,6 +1892,12 @@
+         return id;
+     }
+ 
++    void reserveTexture(Texture &tex, uint64_t bytes)
++    {
++        gsReserveTextureBytes(textures, tex, textureBytes, bytes, textureBudget,
++            [&](Texture &old) { ++textureEvictions; if (old.id) gl().DeleteTextures(1, &old.id); });
++    }
++
+     void evictOld()
+     {
+         const Api &g = gl();
+@@ -1877,6 +1905,8 @@
+         {
+             if (it->second.lastUse + 3000u < useCounter)
+             {
++                textureBytes -= it->second.allocatedBytes;
++                ++textureEvictions;
+                 if (it->second.id)
+                     g.DeleteTextures(1, &it->second.id);
+                 it = textures.erase(it);
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_texture_budget.h
+@@ -0,0 +1,27 @@
++#pragma once
++#include <cstdint>
++
++// Evict least-recently-used uploads before allocating storage. The active texture's
++// reference must survive; a single oversized texture is allowed to exceed the budget.
++template<class Map, class Texture, class Release>
++void gsReserveTextureBytes(Map &textures, Texture &active, uint64_t &bytes,
++                           uint64_t incoming, uint64_t budget, Release release)
++{
++    bytes -= active.allocatedBytes;
++    active.allocatedBytes = 0;
++    const uint64_t available = incoming < budget ? budget - incoming : 0;
++    while (bytes > available)
++    {
++        auto oldest = textures.end();
++        for (auto it = textures.begin(); it != textures.end(); ++it)
++            if (&it->second != &active && it->second.allocatedBytes &&
++                (oldest == textures.end() || it->second.lastUse < oldest->second.lastUse))
++                oldest = it;
++        if (oldest == textures.end()) break;
++        bytes -= oldest->second.allocatedBytes;
++        release(oldest->second);
++        textures.erase(oldest);
++    }
++    active.allocatedBytes = incoming;
++    bytes += incoming;
++}

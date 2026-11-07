@@ -106,3 +106,25 @@ Validation commands: `build.cmd -Stages verify`, then `build.cmd -Stages launche
 The verify stage includes stage-only wait accounting, worker/stage self-wait guards, barrier opt-out/small packets,
 configuration snapshots, capture noninterference, all replay backends, corrupted input and deliberate digest mismatch.
 Actual machine results belong in `docs/tested-hardware.md`; this document describes the contract, not test outcomes.
+
+## GS queue experiment (patch 59)
+
+`worker-ab.py --experiment stage-spin --mode fps --pairs 3 --seconds 120 --warmup 60`
+compares the existing 50-us stage spin (variant 1) against immediate sleep
+(variant 0). Both keep the large VIF barrier off and GS early FINISH on. No
+production default changes. Use `--runner` for the isolated build. The same
+command with `--mode timing --pairs 1` collects queue capacity waits separately;
+these intrusive timings must not be used as FPS comparisons.
+
+Reports include `queue_whole_session` sums and maxima, including final flushes.
+These intervals are not aligned to the post-warm-up FPS selection. Queue limits
+and stage-spin overrides are included in diagnostic exports. Compare on the same
+hardware, with visible gameplay and sound; restricting a Xeon's affinity does not
+validate notebook performance or thermal behavior.
+
+For a source change, use `--experiment build --baseline-runner <old.exe>
+--runner <new.exe> --mode fps --pairs 3`. Variant 0 is the baseline and variant 1
+is the candidate. Both use the same environment: GS early FINISH on, large VIF
+barrier off, stage spin 50 us. The report records both executable hashes and
+checks them before each run. Preserve the baseline before rebuilding; keep its
+runtime dependencies available. Compilation/profiling must finish before FPS runs.

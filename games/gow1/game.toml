@@ -31,9 +31,12 @@ iop_modules_dir = "IOP_MOD"    # the game loads its IRX modules as IOP_MOD/<name
 text_files = ["R_PERM.WAD", "R_SHELL.WAD"]   # where a translation's text lives
 widescreen_movie_ext = ".PSW"  # the 16:9 movies; the port plays them, so a disc without them maps them to .PSS
 movie_ext = ".PSS"
-# The standalone PT-BR disc has a reduced SEMO01.PSW that never completes playback.
+# The standalone PT-BR disc has reduced SEMO widescreen placeholders that cannot complete playback.
 # Match exact bytes, not a general size threshold: short valid movies must survive.
-widescreen_placeholders = [{size = 16388, sha256 = "98117b3548648b5aec8843bd95fd0187f7b59411b8e0f70d403ce25d0e6c190c"}]
+widescreen_placeholders = [
+    {size = 16388, sha256 = "98117b3548648b5aec8843bd95fd0187f7b59411b8e0f70d403ce25d0e6c190c"},
+    {size = 114692, sha256 = "97a80e440f6ca7d6253069629351d78984826ebb50d738832af7bc901640702a"},
+]
 
 [build]
 unity_batch = 16
@@ -45,6 +48,37 @@ pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadra
 
 [diagnostics]
 frame_pc = "0x1837B8"          # vid::Flip: guest frames, distinct from host presentation rate
+
+[diagnostics.scenes.ship_guard]
+# Private blank-card benchmark: initial ship encounter, no movement/camera input.
+# A 50-unit envelope allows observed block/knockback motion; not a frozen replay.
+# Holding block and refilling health keep the initial arena active without deaths.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,g0:l1*600"
+god_mode = true
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+
+[diagnostics.scenes.ship_frames]
+# Rejected combat pilot: arrival/knockback still diverges. Keep gates mandatory;
+# do not use its timing as a valid comparison until trajectories match.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,f0:l1*100000"
+god_mode = true
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+frame_begin = 240
+frame_end = 840
+trajectory_tolerance = 25.0
+
+[diagnostics.scenes.ship_arrival_frames]
+# Rendered arrival before combat, not an FMV or paused menu. The zero-length
+# frame entry suppresses leftover menu confirms without pressing a gameplay key.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,f0:l1*0"
+god_mode = false
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+frame_begin = 0
+frame_end = 360
+trajectory_tolerance = 25.0
 
 # Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
 # accepted as a translation, and its language is guessed from the words below.

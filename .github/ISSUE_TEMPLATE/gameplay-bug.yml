@@ -1,0 +1,38 @@
+name: Gameplay bug or performance report
+description: Report a crash, visual/audio defect or performance problem with session evidence.
+title: "[Game] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        In the launcher, use Other → Export report ZIP after reproducing the problem and closing the game.
+        Review the ZIP before sharing. Never attach an ISO, extracted game files, saves or credentials.
+        You can describe the problem in your preferred language.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Area and steps to reproduce
+      description: Include the area/save point, first visit or repeat visit, and the approximate time or session marker.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Describe crashes, stutters, slow motion, graphics or sound problems. Include frequency.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Session report ZIP
+      description: Drop the reviewed ZIP here. If export failed, describe that failure and attach the available log instead.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Build and test context
+      description: Release/commit, CPU, GPU, driver, settings, plugged-in/battery and whether detailed diagnostics were enabled. Note modifications or anything the report could not collect.
+    validations:
+      required: true

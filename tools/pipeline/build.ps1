@@ -15,7 +15,7 @@
 #              data/<game>/pgo/gow.profdata, and the game is rebuilt with it (profile-guided optimisation)
 #   pgo-check  verifies that -BuildRoot really uses a profile that fits this install (manifest, coverage, flags, no
 #              profiling runtime); run it after a pgo or tune build, or before packaging a profile-guided release
-#   tune       install path with first-play preparation: one instrumented -O1 build plays the pad script once,
+#   tune       install path with first-play preparation: one instrumented -O3 build plays the pad script once,
 #              recording the VU1/IOP code (as optimize) and the profile (as pgo); one final build uses both
 #   optimize   the game plays itself (profile [optimize]: pad script, seconds), hidden and muted (engine/patches/15), recording
 #              the VU1 microcode and IOP modules it uses, then "native" (only the VU1 / IOP code is rebuilt: patch 16)

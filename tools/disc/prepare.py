@@ -156,6 +156,8 @@ def normalise(folder, prof):
     if wide and movie:
         mapped = 0
         for i, name, part, size, sector in toc:
+            # Missing-part remapping above may have changed the payload being inspected.
+            part, size, sector = struct.unpack_from('<III', raw, i + 12)
             if name.endswith(wide) and (size <= SECTOR or is_placeholder(part, size, sector)):
                 base = name[:-len(wide)] + movie
                 if base in part0 and part0[base][0] > size:

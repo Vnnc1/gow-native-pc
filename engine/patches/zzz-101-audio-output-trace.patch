@@ -1,0 +1,265 @@
+Bounded opt-in audio output trace for AUDIT-01 transition underruns.
+GOW_AUDIO_TRACE=1 records reset/publication identity, producer age and
+callback wait/deficit timing under the existing output mutex. No new callback
+logging or allocation; explicit post-join audio shutdown flushes before main
+uses _Exit. Destructor dump remains idempotent. Diagnostic only; no buffering
+or resampling change or performance gain claim.
+Validation: full verify (18 CTest groups and VU1 differential/replay checks),
+traced mixer regression and a 120-second visible smoke passed all 12 gates.
+Transition undersupply remains; see AUDIO-01 for measured limits.
+
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.h
+@@ -12,10 +12,12 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <mutex>
++#include <memory>
+ #include <vector>
+ 
+ namespace ps2x::iop::detail
+ {
++    struct SoundOutputTrace;
+     class SoundEngine
+     {
+     public:
+@@ -24,6 +26,8 @@
+         static constexpr uint32_t CyclesPerSample = 768u;  // IOP 36.864 MHz / 48 kHz
+ 
+         SoundEngine();
++        ~SoundEngine();
++        void dumpOutputTrace(); // after producer and audio callback have stopped
+         void reset();
+ 
+         // ---- LIBSD API (entry codes as libsd: (id << 8) | (voice << 1) | core; master volumes have bit 7 set) ----
+@@ -120,6 +124,7 @@
+         std::vector<int32_t> m_mix;   // gow-native-pc: mixBatch accumulators, [core][side][frame]
+         mutable std::mutex m_outputMutex;
+         double m_resamplePhase = 0.0; // drainOutput: fractional read position when playing back faster
++        std::unique_ptr<SoundOutputTrace> m_outputTrace;
+         uint64_t m_lastCycle = 0;
+         uint64_t m_targetCycle = 0; // the latest advanceTo time (frames up to it are mixed by flushPending at the latest)
+     };
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+--- a/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_engine.cpp
+@@ -1,4 +1,5 @@
+ #include "sound_engine.h"
++#include "sound_output_trace.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -44,7 +45,24 @@
+ 
+     SoundEngine::SoundEngine() : m_ram(RamHalfwords)
+     {
++        const char *trace = std::getenv("GOW_AUDIO_TRACE");
++        if (trace && std::strcmp(trace, "1") == 0) {
++            m_outputTrace = std::make_unique<SoundOutputTrace>();
++            std::fprintf(stderr, "[gow-audio-trace] begin=1 t_us=%llu capacity=%zu\n",
++                (unsigned long long)m_outputTrace->now(), SoundOutputTrace::Capacity);
++        }
+         reset();
++    }
++
++    SoundEngine::~SoundEngine()
++    {
++        // PS2Runtime stops/joins its audio callback before destroying the IOP sound engine.
++        dumpOutputTrace();
++    }
++
++    void SoundEngine::dumpOutputTrace()
++    {
++        if (m_outputTrace) m_outputTrace->dump();
+     }
+ 
+     void SoundEngine::reset()
+@@ -55,6 +73,7 @@
+         m_streamHalf = {};
+         {
+             std::lock_guard<std::mutex> lock(m_outputMutex);
++            if (m_outputTrace) m_outputTrace->reset(m_outputTrace->now(), m_output.size() / 2u);
+             m_output.clear();
+             m_resamplePhase = 0.0;
+         }
+@@ -778,6 +797,7 @@
+         m_output.insert(m_output.end(), m_batch.begin(), m_batch.end());
+         if (m_output.size() > kMaxBufferedFrames * 2u)
+             m_output.erase(m_output.begin(), m_output.begin() + static_cast<std::ptrdiff_t>(m_output.size() / 2u & ~size_t{1}));
++        if (m_outputTrace) m_outputTrace->publish(m_outputTrace->now(), samples);
+     }
+ 
+     size_t SoundEngine::pendingFrames() const
+@@ -793,7 +813,9 @@
+     // stall) is cut back.
+     size_t SoundEngine::drainOutput(int16_t *stereo, size_t maxFrames, size_t maxLatencyFrames)
+     {
++        const uint64_t traceStart = m_outputTrace ? m_outputTrace->now() : 0;
+         std::lock_guard<std::mutex> lock(m_outputMutex);
++        const uint64_t traceAcquired = m_outputTrace ? m_outputTrace->now() : 0;
+         size_t available = m_output.size() / 2u;
+         size_t dropped = 0;
+         double rate = 1.0;
+@@ -859,6 +881,8 @@
+                 maxRate = 1.0;
+             }
+         }
++        if (m_outputTrace) m_outputTrace->drained(traceStart, traceAcquired, m_outputTrace->now(),
++            available, maxFrames, frames);
+         return frames;
+     }
+ }
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/core/sound_output_trace.h b/PS2Recomp/ps2xIOP/src/emulator/core/sound_output_trace.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xIOP/src/emulator/core/sound_output_trace.h
+@@ -0,0 +1,76 @@
++#pragma once
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++
++namespace ps2x::iop::detail
++{
++// Diagnostic only. Calls are serialized by the existing output mutex; dump after audio shutdown.
++struct SoundOutputTrace
++{
++    using Clock = std::chrono::steady_clock;
++    struct Event {
++        uint64_t kind, t, available, requested, produced, wait, drain, callbackGap;
++        uint64_t producerKnown, producerAge, producerGap, lastBatch, resets, publications, totalPublished;
++    };
++    static constexpr size_t Capacity = 512;
++    std::array<Event, Capacity> events{};
++    size_t count = 0;
++    uint64_t overflow = 0, resets = 0, publications = 0, totalPublished = 0;
++    uint64_t lastPublication = 0, producerGap = 0, lastBatch = 0, lastCallback = 0;
++    bool producerKnown = false, callbackKnown = false, dumped = false;
++    const Clock::time_point origin = Clock::now();
++
++    uint64_t now() const {
++        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - origin).count());
++    }
++    void record(uint64_t kind, uint64_t t, uint64_t observed, uint64_t available,
++                uint64_t requested = 0, uint64_t produced = 0, uint64_t wait = 0,
++                uint64_t drain = 0, uint64_t callbackGap = 0) {
++        if (count == Capacity) { ++overflow; return; }
++        events[count++] = {kind, t, available, requested, produced, wait, drain, callbackGap,
++            producerKnown, producerKnown ? observed - lastPublication : 0, producerGap,
++            lastBatch, resets, publications, totalPublished};
++    }
++    void reset(uint64_t t, uint64_t available) {
++        ++resets;
++        record(0, t, t, available);
++        producerKnown = false;
++        lastBatch = producerGap = 0;
++    }
++    void publish(uint64_t t, uint64_t frames) {
++        producerGap = producerKnown ? t - lastPublication : 0;
++        producerKnown = true;
++        lastPublication = t;
++        lastBatch = frames;
++        ++publications;
++        totalPublished += frames;
++    }
++    void drained(uint64_t started, uint64_t acquired, uint64_t ended, uint64_t available,
++                 uint64_t requested, uint64_t produced) {
++        const uint64_t gap = callbackKnown ? started - lastCallback : 0;
++        if (produced < requested || acquired - started >= 1000 || ended - acquired >= 1000)
++            record(produced < requested ? 1 : 2, started, acquired, available,
++                   requested, produced, acquired - started, ended - acquired, gap);
++        lastCallback = started;
++        callbackKnown = true;
++    }
++    void dump(std::FILE *output = stderr) {
++        if (dumped) return;
++        dumped = true;
++        for (size_t i = 0; i < count; ++i) {
++            const auto &e = events[i];
++            std::fprintf(output, "[gow-audio-trace] kind=%llu t_us=%llu available=%llu requested=%llu produced=%llu wait_us=%llu drain_us=%llu callback_gap_us=%llu producer_known=%llu producer_age_us=%llu producer_gap_us=%llu last_batch=%llu resets=%llu publications=%llu total_published=%llu\n",
++                (unsigned long long)e.kind, (unsigned long long)e.t, (unsigned long long)e.available,
++                (unsigned long long)e.requested, (unsigned long long)e.produced, (unsigned long long)e.wait,
++                (unsigned long long)e.drain, (unsigned long long)e.callbackGap, (unsigned long long)e.producerKnown,
++                (unsigned long long)e.producerAge, (unsigned long long)e.producerGap, (unsigned long long)e.lastBatch,
++                (unsigned long long)e.resets, (unsigned long long)e.publications, (unsigned long long)e.totalPublished);
++        }
++        std::fprintf(output, "[gow-audio-trace] end=1 events=%zu overflow=%llu resets=%llu publications=%llu total_published=%llu\n",
++            count, (unsigned long long)overflow, (unsigned long long)resets,
++            (unsigned long long)publications, (unsigned long long)totalPublished);
++    }
++};
++}
+diff --git a/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h b/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+--- a/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h
++++ b/PS2Recomp/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+@@ -52,6 +52,7 @@
+         // GOW-Port: salida del SPU2 emulado, estereo intercalado a 48 kHz. Puede llamarse desde el hilo de audio del
+         // host. Si hay mas de maxLatencyFrames acumulados, se descartan los mas antiguos.
+         size_t drainAudio(int16_t *stereo, size_t maxFrames, size_t maxLatencyFrames = SIZE_MAX);
++        void dumpAudioTrace(); // caller has stopped the producer and audio callback
+ 
+     private:
+         class Impl;
+diff --git a/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp b/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp
+--- a/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp
++++ b/PS2Recomp/ps2xIOP/src/iop_subsystem.cpp
+@@ -312,6 +312,11 @@
+         return m_impl->emulator.drainAudio(stereo, maxFrames, maxLatencyFrames);
+     }
+ 
++    void IopSubsystem::dumpAudioTrace()
++    {
++        m_impl->emulator.dumpAudioTrace();
++    }
++
+     DebugSnapshot IopSubsystem::debugSnapshot() const
+     {
+         DebugSnapshot snapshot;
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h
+--- a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h
++++ b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.h
+@@ -41,6 +41,7 @@
+ 
+         // GOW-Port: 48 kHz stereo samples produced by the native sound engine (SoundEngine::drainOutput).
+         size_t drainAudio(int16_t *stereo, size_t maxFrames, size_t maxLatencyFrames);
++        void dumpAudioTrace(); // caller has stopped the producer and audio callback
+         [[nodiscard]] uint64_t cycles() const noexcept;
+         [[nodiscard]] uint64_t instructions() const noexcept;
+         [[nodiscard]] uint32_t loadedModuleCount() const noexcept;
+diff --git a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
+--- a/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/PS2Recomp/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -1196,6 +1196,11 @@
+         return m_impl->memory.sound().drainOutput(stereo, maxFrames, maxLatencyFrames);
+     }
+ 
++    void IopEmulator::dumpAudioTrace()
++    {
++        m_impl->memory.sound().dumpOutputTrace();
++    }
++
+     uint64_t IopEmulator::cycles() const noexcept
+     {
+         return m_impl->totalCycles;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2776,6 +2776,16 @@
+         gameThread.join();
+     }
+ 
++    // main uses _Exit after run, so diagnostic records cannot rely on destructors.
++    const char *audioTrace = std::getenv("GOW_AUDIO_TRACE");
++    if (audioTrace && std::strcmp(audioTrace, "1") == 0)
++    {
++#if !defined(PLATFORM_VITA)
++        stopSpu2Audio();
++#endif
++        if (m_iopSubsystem) m_iopSubsystem->dumpAudioTrace();
++    }
++
+     if (m_debugUiInitialized && m_debugUiShutdownCallback)
+     {
+         m_debugUiShutdownCallback(*this, m_debugUiUserData);

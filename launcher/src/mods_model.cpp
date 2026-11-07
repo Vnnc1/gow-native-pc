@@ -605,7 +605,7 @@ QVariantMap ModsModel::analizar()
     return salida;
 }
 
-QVariantMap ModsModel::prepararEntorno(const QString &pacoteManual)
+QVariantMap ModsModel::prepararEntorno(const QString &pacoteManual, const QString &elf, const QString &runner)
 {
     QVariantMap salida;
     salida.insert(QStringLiteral("ok"), false);
@@ -626,7 +626,8 @@ QVariantMap ModsModel::prepararEntorno(const QString &pacoteManual)
     setBusy(true);
     leerEstado();
 
-    const Salida planSalida = ejecutar({QStringLiteral("plan"), QStringLiteral("-p"), profile(), QStringLiteral("--json")}, 25000);
+    const QStringList identity{QStringLiteral("--selected-elf"), elf, QStringLiteral("--selected-runner"), runner};
+    const Salida planSalida = ejecutar(identity + QStringList{QStringLiteral("plan"), QStringLiteral("-p"), profile(), QStringLiteral("--json")}, 25000);
     if (!planSalida.ok) {
         salida.insert(QStringLiteral("error"), planSalida.error);
         return salida;
@@ -684,7 +685,7 @@ QVariantMap ModsModel::prepararEntorno(const QString &pacoteManual)
         return salida;
     }
 
-    const Salida aplicado = ejecutar({QStringLiteral("apply"), QStringLiteral("-p"), profile()}, 60000);
+    const Salida aplicado = ejecutar(identity + QStringList{QStringLiteral("apply"), QStringLiteral("-p"), profile()}, 60000);
     if (!aplicado.ok) {
         salida.insert(QStringLiteral("error"), aplicado.error);
         return salida;
@@ -694,6 +695,13 @@ QVariantMap ModsModel::prepararEntorno(const QString &pacoteManual)
     leerEstado();
     if (!m_active || m_staging.isEmpty()) {
         salida.insert(QStringLiteral("error"), QStringLiteral("The mod activation did not produce a staging folder."));
+        return salida;
+    }
+
+    QFile activatedFile(modsDir() + QStringLiteral("/hooks/plan.json"));
+    if (!activatedFile.open(QIODevice::ReadOnly) ||
+        QJsonDocument::fromJson(activatedFile.readAll()).object().value(QStringLiteral("planId")) != plan.value(QStringLiteral("planId"))) {
+        salida.insert(QStringLiteral("error"), QStringLiteral("The selected build or mods changed during preparation. Try again."));
         return salida;
     }
 
