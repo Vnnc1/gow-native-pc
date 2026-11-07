@@ -80,7 +80,8 @@ def fetch(root):
         run(git + ['read-tree', 'HEAD'], env=env)
         trees = [output(git + ['write-tree'], env=env)]
         for patch in patches:
-            run(git + ['apply', '--cached', patch], env=env)
+            # Retired patches may contain documentation only, as in the Windows chain.
+            run(git + ['apply', '--cached', '--allow-empty', patch], env=env)
             trees.append(output(git + ['write-tree'], env=env))
         touched = output(git + ['diff', '--name-only', 'HEAD', trees[-1]], env=env).splitlines()
         run(git + ['read-tree', 'HEAD'], env=env)
@@ -92,7 +93,7 @@ def fetch(root):
         if current not in trees:
             raise RuntimeError('Runtime differs from the patch chain; preserve local work before retrying')
         for patch in patches[trees.index(current):]:
-            run(git + ['apply', patch])
+            run(git + ['apply', '--allow-empty', patch])
 
 
 class Pipeline:

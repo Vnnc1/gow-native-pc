@@ -1,0 +1,21 @@
+Keep gameplay PGO off the build-time VU1 generator.
+
+The generator shares function names with the runner but executes a different workload.
+Keep strict profile mismatch errors on the runtime and runner; only this tool opts out
+of profile use. Instrumentation/link flags remain available for instrumented runtime libraries.
+Validation: the previously failing generator compiles and links with the same local
+profile; PGO eligibility regression checks pass. No gameplay performance measured.
+
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -604,6 +604,10 @@
+     if(PS2X_VU1_IMAGES)
+         add_executable(ps2x_vu1_generator "${PS2X_VU1_GENERATOR_SOURCE}")
+         target_link_libraries(ps2x_vu1_generator PRIVATE ps2_runtime)
++        # Gameplay profiles do not describe this build-time tool's main or inline functions.
++        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++            target_compile_options(ps2x_vu1_generator PRIVATE -fno-profile-instr-use)
++        endif()
+         set(PS2X_VU1_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/vu1_generado")
+         set(PS2X_VU1_GENERATED_PARTS)
+         foreach(part RANGE 0 12)
