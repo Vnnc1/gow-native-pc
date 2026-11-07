@@ -1,5 +1,16 @@
 # Tested hardware and results
 
+## fix-chore on i3-10110U / Intel UHD (2026-11-07)
+
+2C/4T 15 W notebook, 12 GB, UHD driver 26.20.100.7870, AC, owner's power plan kept for all runs; the CPU throttles
+(per-frame cost of all threads rose up to 2x between pairs), so decisions are within-pair. VU1 is the limit: ~93 % of
+its worker busy in the heavy ship section, 26-36 ms per guest frame (EE 11-15, GS 10-14), native coverage complete;
+`chain` is 40-58 % of VU1 block time and the XGKICK frontend 16-18 %. v0.5.0 vs fix-chore (3 FPS pairs): the heavy
+section ran ~10-15 % slower on fix-chore and p95 was worse in 3/3; cause not isolated. PR 26 renderer set: no
+demonstrated benefit on this CPU-bound machine. Patch 76 chain warm: neutral; `GOW_VU1_FAST`: at most ~6 % VU1 cost.
+New zzz-302/304 halve wrap-blend draws and barriers (FPS unchanged here); zzz-303 restores the markers that the A/B
+harness needs. Audio starves under sustained VU1 saturation. Details: [report](research/i3-10110u-2026-11-07.md).
+
 ## Experimental high logic rate (2026-11-05, i5-8265U / UHD 620)
 
 Patch 73 adds opt-in 120/240 logic rates; original 60 Hz remains the default.

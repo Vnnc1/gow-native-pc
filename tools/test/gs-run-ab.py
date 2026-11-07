@@ -168,7 +168,14 @@ def efficiency_environment(mode, variant):
 PR26_FLAGS = {"ring": "GOW_GS_HW_RING", "texreuse": "GOW_GS_TEXREUSE", "depth-zbp": "GOW_GS_DEPTH_PER_ZBP",
               "state-cache": "GOW_GS_STATE_CACHE", "run-state": "PS2X_GS_RUN_STATE_FAST", "warm-shaders": "GOW_GS_WARM_SHADERS"}
 
+# Comparisons of a later default-on switch: every PR 26 switch and grouping stay at the shipped value, so the
+# variable under test is the only difference from what players run. zzz-302: wrapping-blend triangle grouping.
+SHIPPED_FLAGS = {"wrap-group": "GOW_GS_WRAP_GROUP",
+                 "chain-warm": "GOW_VU1_CHAIN_WARM"}  # patch 76: successor-slot prefetch in VU1 chain()
+
 def pr26_environment(mode, variant):
+    if mode in SHIPPED_FLAGS:
+        return {**{flag: "1" for flag in PR26_FLAGS.values()}, SHIPPED_FLAGS[mode]: str(variant)}
     if mode != "pr26" and mode not in PR26_FLAGS:
         return {}
     return {flag: str(variant if mode in (name, "pr26") else 1) for name, flag in PR26_FLAGS.items()}
@@ -176,7 +183,7 @@ def pr26_environment(mode, variant):
 def grouping_for(mode, variant, fixed):
     if mode in ("grouping", "pr26"):
         return variant
-    return 1 if mode in PR26_FLAGS else fixed  # PR 26 comparisons keep the shipped grouping default
+    return 1 if mode in PR26_FLAGS or mode in SHIPPED_FLAGS else fixed  # keep the shipped grouping default
 
 def completed_child(meta, events, helper_code):
     exits = [e for e in events if e.get("type") == "process_exit"]
@@ -195,7 +202,7 @@ def main():
     p.add_argument("--capture", action="store_true", help="Functional screenshots only; not a benchmark")
     p.add_argument("--timing", action="store_true", help="Intrusive section timing; not an FPS benchmark")
     p.add_argument("--compare", choices=("grouping", "alpha", "scaler", "scale", "countdown", "vu1", "vu1-inline", "logic-rate", "sampler", "shader", "alpha-bounds", "efficiency",
-                                            "pr26", *PR26_FLAGS, "vu1-fast"), default="grouping",
+                                            "pr26", *PR26_FLAGS, *SHIPPED_FLAGS, "vu1-fast"), default="grouping",
                    help="vu1 compares binaries; vu1-inline uses one binary and forces JIT-only in both variants")
     p.add_argument("--logic-fps", type=int, choices=(120, 240), default=120, help="Experimental candidate for --compare logic-rate; reference is original 60 Hz")
     p.add_argument("--task-capture", action="store_true", help="Intrusive, bounded VU1 task recording for exact input replay; not an FPS benchmark")
@@ -203,7 +210,15 @@ def main():
     p.add_argument("--grouping", type=int, choices=(0, 1), default=0, help="Fixed grouping for alpha/scaler comparisons")
     p.add_argument("--gpu-samples", action="store_true", help="Optional Windows PDH engine busy-time samples every 2 s")
     p.add_argument("--hidden", action="store_true", help="Background sessions; no visible-play performance claim")
+    p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                   help="Extra GOW_/PS2X_ diagnostic variable for both variants (repeatable); recorded in settings.json")
     a = p.parse_args()
+    extra_env = {}
+    for item in a.env:
+        name, sep, value = item.partition("=")
+        if not sep or not name.startswith(("GOW_", "PS2X_")):
+            p.error(f"--env takes GOW_/PS2X_ NAME=VALUE, got {item!r}")
+        extra_env[name] = value
     if (a.compare == "vu1") != bool(a.reference_runner):
         p.error("--compare vu1 requires --reference-runner, which is exclusive to that comparison")
     if a.capture and a.timing:
@@ -266,6 +281,7 @@ def main():
                    TOBIICHI_PANTALLA="ventana", GOW_AUDIO_STATS="1")
         env.update(efficiency_environment(a.compare, variant))
         env.update(pr26_environment(a.compare, variant))
+        env.update(extra_env)
         if a.compare == "vu1-fast":
             env["GOW_VU1_FAST"] = str(variant)  # launcher "fast VU" option; changes VU1 float semantics
         if a.compare == "alpha":
@@ -377,10 +393,13 @@ def main():
         checks = {"exit_zero": completed_child(meta, events, proc.returncode), "graceful": not any(e["type"] == "forced_termination" for e in events),
                   "gameplay_before_warmup": gameplay_before_warmup(log, warmup), "windows": stats["windows"] >= (1 if window else 3),
                   "frames": stats["frame_windows"] >= (1 if window else 3), "effective_setting": f"[gs-run-config] enabled={grouped}" in log,
-                  "queue_healthy": "[gs-run] queue record issue:" not in log,
+                  # the runtime's anomaly line (gs_threaded_backend.cpp); the older wording is still rejected
+                  "queue_healthy": "[gs-run] dropped a queue record:" not in log and "[gs-run] queue record issue:" not in log,
                   "player_saves_unchanged": save_inventory(root / "data" / a.game, elf.parent) == original_saves}
         stats["helper_exit_code"] = proc.returncode
         stats["exit_metadata_recovered"] = "exit_code" not in meta and checks["exit_zero"]
+        if a.compare == "wrap-group":
+            checks["effective_wrap_group"] = f"[gs-wrap-config] group={variant}" in log
         if a.compare in (*EFFICIENCY_FLAGS, "efficiency"):
             configured = efficiency_environment(a.compare, variant)
             checks["effective_efficiency_settings"] = all(marker in log for marker in (

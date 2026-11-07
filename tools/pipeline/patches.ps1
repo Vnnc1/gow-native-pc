@@ -135,7 +135,10 @@ if ($Action -eq 'start') {
         if (-not $target) { throw "$Onto is not a commit of the runtime repository" }
         $null = G $wt @('update-ref', $baseRef, $target)
         Write-Host "rebasing $(@(G $wt @('rev-list', "$runtimeCommit..$branch")).Count) patches onto $target"
-        $out = G $wt @('rebase', '--onto', $target, $runtimeCommit, $branch) -Allow
+        # The rebase rewrites the generated commits, so it needs a committer too: without a configured git identity
+        # it stopped after the first pick with the change staged and no commit. Authors are kept from the stack.
+        $committer = @('-c', 'user.name=gow-native-pc patches', '-c', 'user.email=patches@gow-native-pc.invalid')
+        $out = G $wt ($committer + @('rebase', '--onto', $target, $runtimeCommit, $branch)) -Allow
         $out | ForEach-Object { Write-Host $_ }
         if ($script:gitRc -ne 0) {
             Write-Host "`nconflict: resolve the files in $wt, git add them and run git rebase --continue there" -ForegroundColor Yellow

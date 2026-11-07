@@ -1,0 +1,76 @@
+# zzz-304-gs-wrap-shared-edges: exact disjointness for zzz-302's wrapping-blend triangle groups.
+#
+# Measured on i3-10110U / Intel UHD (data/perf-i3-10110u/01-diag-wrap): every wrapping-blend batch of the opening
+# route had 4 triangles (two quads), and zzz-302's padded bounding boxes made the two halves of each quad "touch", so
+# grouping issued draws == triangles. When rectangles meet, wrapTrianglesDisjoint now decides exactly: a shared edge
+# with identical endpoints and the third vertices on opposite sides (GL rasterizes a common edge's fragment for only
+# one of the two polygons), or a separating edge line with the other triangle >= 1/16 GL pixel beyond it (survives
+# sub-pixel snapping). Zero-area or non-finite triangles never group. Results stay those of one draw per triangle.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 0910ca8..0db8726 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -2767,6 +2767,53 @@ struct GSHwBackend::Impl
+         pending.clear();
+     }
+ 
++    // zzz-304: true only when two triangles of a wrapping-blend batch can never produce a fragment at the same pixel,
++    // so they may share one feedback draw (zzz-302). Coordinates are PS2 pixels; sx/sy map them to GL pixels.
++    //  1) A shared edge with bit-identical endpoints and the third vertices strictly on opposite sides: GL's polygon
++    //     rasterization rule produces a fragment centre on a common edge for exactly one of the two (a quad's halves).
++    //  2) A separating line through an edge of either triangle, with every vertex of the other at least 1/16 GL pixel
++    //     beyond it, which stays true after the rasterizer's sub-pixel vertex snapping.
++    // Degenerate (zero-area) triangles never qualify: snapping can give them an area.
++    static bool wrapTrianglesDisjoint(const HwVertex *a, const HwVertex *b, float sx, float sy)
++    {
++        const auto cross = [sx, sy](const HwVertex &p, const HwVertex &q, const HwVertex &r)
++        { return ((q.x - p.x) * sx) * ((r.y - p.y) * sy) - ((q.y - p.y) * sy) * ((r.x - p.x) * sx); };
++        const auto same = [](const HwVertex &p, const HwVertex &q) { return p.x == q.x && p.y == q.y; };
++        const float areaA = cross(a[0], a[1], a[2]), areaB = cross(b[0], b[1], b[2]);
++        if (!(areaA != 0.0f) || !(areaB != 0.0f) || !std::isfinite(areaA) || !std::isfinite(areaB))
++            return false;
++        for (int i = 0; i < 3; ++i)
++            for (int j = 0; j < 3; ++j)
++            {
++                const HwVertex &a0 = a[i], &a1 = a[(i + 1) % 3], &b0 = b[j], &b1 = b[(j + 1) % 3];
++                if (!((same(a0, b0) && same(a1, b1)) || (same(a0, b1) && same(a1, b0))))
++                    continue;
++                const float ca = cross(a0, a1, a[(i + 2) % 3]), cb = cross(a0, a1, b[(j + 2) % 3]);
++                if ((ca > 0.0f && cb < 0.0f) || (ca < 0.0f && cb > 0.0f))
++                    return true;
++            }
++        constexpr float kMargin = 1.0f / 16.0f; // GL pixels
++        const auto separates = [&](const HwVertex *t, const HwVertex *o)
++        {
++            for (int i = 0; i < 3; ++i)
++            {
++                const HwVertex &p = t[i], &q = t[(i + 1) % 3];
++                const float ex = (q.x - p.x) * sx, ey = (q.y - p.y) * sy;
++                const float len = std::sqrt(ex * ex + ey * ey);
++                if (!(len > 0.0f))
++                    continue;
++                const float side = cross(p, q, t[(i + 2) % 3]) > 0.0f ? 1.0f : -1.0f;
++                bool beyond = true;
++                for (int k = 0; k < 3 && beyond; ++k)
++                    beyond = cross(p, q, o[k]) * side <= -kMargin * len;
++                if (beyond)
++                    return true;
++            }
++            return false;
++        };
++        return separates(a, b) || separates(b, a);
++    }
++
+     void blendState(const GSDrawState &s, bool &enabled, GLenum &sf, GLenum &df, float &fixScale, float &constant, GLenum &equation, bool &soft)
+     {
+         enabled = false;
+@@ -3401,7 +3448,8 @@ struct GSHwBackend::Impl
+                     const int r3 = finite ? static_cast<int>(std::ceil(std::min(1.0e6f, y1 * sy))) + 2 : 0;
+                     bool touches = !finite || groupSize == kMaxGroup;
+                     for (size_t j = 0; j < groupSize && !touches; ++j)
+-                        touches = r0 <= rects[j][1] && rects[j][0] <= r1 && r2 <= rects[j][3] && rects[j][2] <= r3;
++                        touches = r0 <= rects[j][1] && rects[j][0] <= r1 && r2 <= rects[j][3] && rects[j][2] <= r3 &&
++                                  !wrapTrianglesDisjoint(v, &dverts[(groupStart + j) * 3u], sx, sy);
+                     if (touches && groupSize != 0)
+                     {
+                         g.DrawArrays(kTriangles, static_cast<GLint>(groupStart * 3u), static_cast<GLsizei>(groupSize * 3u));

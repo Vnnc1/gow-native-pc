@@ -543,5 +543,11 @@ state and alpha interval tests. `gow_renderer_variants_test` plus
 `tools/test/renderer-variants.py` is an explicit real-OpenGL color comparison,
 not headless GPU validation. Patch 75 `GOW_GS_VARIANT_DIAG` adds test-only counters.
 See GS-07/08/09 in the performance ledger before proposing default promotion.
+zzz-302/304 group wrapping-blend (COLCLAMP=0 shader blend) triangles whose pixel coverage is provably disjoint
+(identical shared edge, or a separating line with a 1/16 GL pixel margin) into one feedback draw; anything else keeps
+one draw per triangle with a barrier. Keep the shader's destination read at `gl_FragCoord` only, or the grouping is
+no longer exact. `GOW_GS_WRAP_GROUP=0` is the reference path; `GOW_GS_HW_STATS` prints `[gs-hw-wrap]`.
+zzz-303 prints `[gs-run-config] enabled=N` and `[gs-wrap-config] group=N`: `gs-run-ab.py` rejects a session without
+the marker of its compared setting, so keep them when touching `GS::GS()` or the renderer init.
 Future Vulkan/Direct3D and automatic launcher selection are proposals only in
 `docs/research/graphics-api-roadmap.md`; no such backend or selector is implemented.

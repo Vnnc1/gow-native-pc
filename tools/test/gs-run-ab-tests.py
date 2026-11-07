@@ -134,3 +134,12 @@ assert set(off.values()) == {"0"} and set(on.values()) == {"1"}
 assert m.grouping_for("pr26", 0, 1) == 0 and m.grouping_for("pr26", 1, 0) == 1
 assert m.pr26_environment("grouping", 1) == {} and m.grouping_for("alpha", 1, 0) == 0
 print("PASS: PR 26 switch comparisons isolate one variable; pr26 toggles the whole set")
+
+# zzz-302: wrap-group toggles only GOW_GS_WRAP_GROUP; the PR 26 set and grouping stay shipped (on).
+off, on = m.pr26_environment("wrap-group", 0), m.pr26_environment("wrap-group", 1)
+assert [k for k in off if off[k] != on[k]] == ["GOW_GS_WRAP_GROUP"]
+assert all(on[f] == "1" for f in m.PR26_FLAGS.values()) and m.grouping_for("wrap-group", 0, 0) == 1
+for mode, flag in m.SHIPPED_FLAGS.items():
+    off, on = m.pr26_environment(mode, 0), m.pr26_environment(mode, 1)
+    assert [k for k in off if off[k] != on[k]] == [flag] and m.grouping_for(mode, 0, 0) == 1
+print("PASS: wrap-group / chain-warm comparisons change only their own switch")
