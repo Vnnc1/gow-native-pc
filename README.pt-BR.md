@@ -188,6 +188,10 @@ launcher também ocupam espaço. A ISO não é necessária para jogar depois da 
 As compilações usam por padrão uma pasta curta no `C:`: `C:\gow-build-clang` para clang Release (a compilação de treino
 do PGO usa `C:\gow-build-clang-pgogen`). Se outra cópia já usar essa pasta, o pipeline escolhe `C:\gow-build-<hash>-clang`.
 O caminho fica registrado em `data/build-root.txt`; o launcher o lê automaticamente.
+No setup, use **Pasta da build → Alterar** para escolher um caminho local curto, como `D:\gow-build`
+(até 40 caracteres). A mesma opção aparece ao atualizar uma instalação existente.
+Alterar exige compilar novamente; os saves e a build anterior são preservados.
+O instalador não move caches compilados do CMake. Atualizar sem escolher outra pasta mantém o caminho atual.
 
 ## Como usar
 

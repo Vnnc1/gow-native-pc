@@ -64,6 +64,16 @@ cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` wh
 copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
 The launcher also checks CMakeCache's source root before accepting a runner, so a fresh copy cannot use another copy's build.
 
+Normal setup exposes a separate build base (`/BUILDROOT=` in silent mode) and
+persists UTF-8 `data/build-root.txt`. Updates retain it unless explicitly changed.
+A location change requires rebuilding; never copy CMake/Ninja caches as relocatable
+or delete the old build/player data automatically. Collision fallback stays beside
+the selected base, with exact source ownership checks. Installer tests use the
+compile-only `GOW_SETUP_TEST_IDENTITY` to isolate registration and shortcuts:
+`tools/test/setup-build-location.py`; pipeline selection is covered by
+`tools/test/build-root-tests.ps1` (also in pipeline-tests.ps1). See
+`docs/research/player-integration-2026-11-09.md` for the agreed next features.
+
 ## Isolated regional builds
 
 Europe SCES_531.33 and Japan SLPM_670.10 have separate Windows builds validated

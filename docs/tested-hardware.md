@@ -1,5 +1,17 @@
 # Tested hardware and results
 
+## Setup build-location choice (2026-11-09, Windows)
+
+Pinned LLVM 20261020 normal/test-identity installers built. Packed synthetic
+install/update tests covered a Unicode build-location change, rebuild markers,
+preserved saves/old build, foreign-cache/path rejection, update retention and
+owned-only purge. Production pipeline selection tests, 17 Python pipeline tests,
+7 Linux pipeline tests (one skipped on Windows) and the PowerShell pipeline suite
+passed. Fresh packaging succeeded; the packed normal payload matched all 1,718 staging files. Setup preview
+was inspected with separate install/build folders and the rebuild notice.
+Relocation requires recompiling; caches were not moved across physical drives.
+See [scope and evidence](research/player-integration-2026-11-09.md).
+
 ## Collector final-state recovery (2026-11-09, Windows / Xeon / RX 580)
 
 Qt 6.8.3 / LLVM 20261020. Controlled atomic-replacement denial reproduced stale

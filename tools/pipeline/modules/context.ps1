@@ -17,23 +17,24 @@ $iopMods = Join-Path $data 'iop_modules'
 # source folder, so this copy then takes C:\gow-build-<hash of its folder>.
 $buildRootFile = Join-Path $root 'data\build-root.txt'
 $md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
-$ownRoot = 'C:\gow-build-' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+$rootSuffix = '-' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
 # a build folder configured from another copy's runtime (CMake refuses its cache)
 function Test-ForeignCache([string]$folder) {
     $cache = Join-Path $folder 'CMakeCache.txt'
     if (-not (Test-Path $cache)) { return $false }
-    $home_ = [regex]::Match((Get-Content $cache -Raw), '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Groups[1].Value.Trim()
+    $home_ = [regex]::Match([IO.File]::ReadAllText($cache), '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Groups[1].Value.Trim()
     return $home_ -ne (Barra $rec)
 }
-if (-not $BuildRoot -and (Test-Path $buildRootFile)) { $BuildRoot = (Get-Content $buildRootFile -Raw).Trim() }
-if (-not $BuildRoot) {
-    $BuildRoot = 'C:\gow-build'
+if (-not $BuildRoot -and (Test-Path $buildRootFile)) { $BuildRoot = [IO.File]::ReadAllText($buildRootFile).Trim() }
+$defaultRoot = -not $BuildRoot
+if ($defaultRoot) { $BuildRoot = 'C:\gow-build' }
+# A collision must stay beside the chosen location, never silently switch back to drive C.
+$ownRoot = if ($BuildRoot.EndsWith($rootSuffix)) { $BuildRoot } else { $BuildRoot + $rootSuffix }
+if ($defaultRoot) {
     # every folder of the root (MSVC, clang, dev configuration) must be this copy's or unused
     foreach ($folder in @($BuildRoot, "$BuildRoot-clang", "$BuildRoot-dev", "$BuildRoot-dev-clang", "$BuildRoot-clang-pgogen", "$BuildRoot-verify-clang")) {
         if (Test-ForeignCache $folder) { $BuildRoot = $ownRoot; break }
     }
-    New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
-    [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
 }
 # Keep the existing clang build directory, but stop producing new MSVC game builds.
 $toolchainFile = Join-Path $root 'data/toolchain.txt'
@@ -46,10 +47,14 @@ $bld = if ($Config -eq 'Release') { "$BuildRoot-clang" } else { "$BuildRoot-dev-
 # The recorded root can since have been taken by another copy (a test checkout configured C:\gow-build-clang): this copy
 # moves to its own root, where the next build starts from scratch (a full build)
 if ((Test-ForeignCache $bld) -or (Test-ForeignCache "$bld-pgogen")) {
-    if ($BuildRoot -eq $ownRoot) { throw "$bld was configured from another copy of the project: delete that folder and run again" }
+    if ($BuildRoot -eq $ownRoot) { throw "$bld belongs to another copy: choose a different -BuildRoot" }
     Write-Host "build folder $bld belongs to another copy of the project: this copy now uses $ownRoot (the next build is a full one)"
     $bld = $bld.Replace($BuildRoot, $ownRoot)
     $BuildRoot = $ownRoot
+}
+if ((Test-ForeignCache $bld) -or (Test-ForeignCache "$bld-pgogen")) { throw "$bld belongs to another copy: choose a different -BuildRoot" }
+New-Item -ItemType Directory -Force (Split-Path $buildRootFile) | Out-Null
+if (-not (Test-Path $buildRootFile) -or [IO.File]::ReadAllText($buildRootFile).Trim() -ne $BuildRoot) {
     [IO.File]::WriteAllText($buildRootFile, $BuildRoot)
 }
 $pgoDir = Join-Path $root "data\$Game\pgo"

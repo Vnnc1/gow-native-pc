@@ -191,6 +191,10 @@ launcher development also take space. The ISO is not needed to play after prepar
 Builds use a short folder on `C:` by default: `C:\gow-build-clang` for clang Release (the PGO training build uses
 `C:\gow-build-clang-pgogen`). If another copy already uses that root, the pipeline chooses `C:\gow-build-<hash>-clang`.
 The base path is recorded in `data/build-root.txt`; the launcher reads it automatically.
+In setup, use **Build folder → Change** to choose a short local path such as `D:\gow-build`
+(up to 40 characters). The same choice is available when updating an existing installation.
+Changing it requires compiling again; existing saves and the previous build are preserved.
+The installer does not move compiled CMake caches. Updates without a new choice retain the current path.
 
 ## Getting started
 
