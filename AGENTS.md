@@ -171,6 +171,14 @@ Patch 80 extends movie-clock catch-up only to USA `0x189A88` entered from
 the existing one-field cap and original/resume delegation; do not generalize
 this to all sound RPC calls or regional overrides. `movie-tail-tests.py` is in verify.
 
+Patch `zzz-305` fixes the USA movie reader's drained-EOF retry loop (issue 30,
+`P04MP05`) and keeps movie completion false while decoded pictures remain.
+Preserve the entry/caller, cancellation, pending-block, MPEG-format and resume
+gates. Signaling EOF alone discards the last picture. `movie-tail-tests.py` covers
+both wrappers; `movie-smoke.ps1 -NewGame -RequireCompletion -ExpectedLastPicture 740`
+checks this clip through the intro route with a private card. See
+`docs/research/issue-30-movie-eof-2026-11-09.md` for evidence and scope.
+
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
 identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
 per session, and invokes the same detached collector. `tools/pipeline/package_diagnostics.py` packages it with

@@ -1,5 +1,20 @@
 # Tested hardware and results
 
+## Issue 30 movie EOF (2026-11-09, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Windows, current `fix-chore` patch chain, isolated Release/LLVM 20261020 build,
+portable x86-64-v2, VU1 JIT, no PGO/VU1 AOT, private card copies and USA-compatible
+PT-BR disc. Baseline `P04MP05` playback reproduced the drained-reader EOF stall.
+Patch `zzz-305` completed all 741 pictures and returned to visibly rendered ship
+combat when the clip replaced the intro. The final uninstrumented runner passed
+last-picture and gameplay-completion gates and closed gracefully with exit 0.
+The first reader-only candidate was rejected for discarding its last picture.
+A second movie, `A01MP02`, also passed with all 998 pictures and gameplay return.
+Production wrapper fixtures and the 17 pipeline tests passed. This is correctness
+evidence, not an FPS/audio-quality benchmark or a complete campaign test. No
+save at the actual Cliffs lever or NVIDIA validation was available. See the
+[investigation, hashes and failed trials](research/issue-30-movie-eof-2026-11-09.md).
+
 ## fix-chore on i3-10110U / Intel UHD (2026-11-07)
 
 2C/4T 15 W notebook, 12 GB, UHD driver 26.20.100.7870, AC, owner's power plan kept for all runs; the CPU throttles
