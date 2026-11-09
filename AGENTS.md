@@ -189,6 +189,13 @@ shared guest depth. `gow_control_prompts` covers projected corners and stable
 samples; `tools/test/control-prompts-render.py` is an explicit hidden GPU artwork
 preview, not a combat test or part of data-free verify.
 
+Patch `zzz-314` adds a keyboard-only mapped movement guide beneath Greek stick
+QTE diagrams. Preserve original directional animations and the one-guide/frame
+and four-slot capacity gates; do not turn a visual hint into automatic input.
+Default/custom labels and composite leaves are covered by `gow_control_prompts`.
+Aphrodite's reported silence remains unproven despite successful asset/mixer
+checks; see `docs/research/aphrodite-and-keyboard-qte-2026-11-09.md`.
+
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
 written. Keep entry/resume, caller, primary-slot and size/result gates; do not use

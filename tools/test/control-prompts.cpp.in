@@ -66,7 +66,7 @@ int main(int argc,char **argv) {
     bool classic=argc>1 && std::strcmp(argv[1],"classic")==0;
     if(classic) env("TOBIICHI_DMC5_CONTROLS","0");
     if(custom) {
-        env("TOBIICHI_TECLAS","cross=75,1000;circle=1001;square=1003;triangle=71;l1=341;li_arriba=87;li_der=68;hades=52;furia=86");
+        env("TOBIICHI_TECLAS","cross=75,1000;circle=1001;square=1003;triangle=71;l1=341;li_arriba=73;li_izq=74;li_abajo=75;li_der=68;hades=52;furia=86");
         env("TOBIICHI_MANDO","cross=5;circle=7;square=6;triangle=8;l1=12;start=15;select=13;furia=16");
     }
     assert(gowPromptFamily("Xbox Wireless Controller")==2);
@@ -97,6 +97,14 @@ int main(int argc,char **argv) {
     gow_prompt::preferMouse.store(false);
     assert(rotulo(ETeclado,BCruz)==(custom?"K":classic?"X":"#ESP"));
     assert(rotulo(ETeclado,BCirculo)==(custom?"#RAT1":classic?"C":"F"));
+    if(custom) {
+        assert(rotulo(ETeclado,BMoveUp)=="I" && rotulo(ETeclado,BMoveLeft)=="J");
+        assert(rotulo(ETeclado,BMoveDown)=="K" && rotulo(ETeclado,BMoveRight)=="D");
+    }
+    if(!custom) {
+        assert(rotulo(ETeclado,BMoveUp)=="W" && rotulo(ETeclado,BMoveLeft)=="A");
+        assert(rotulo(ETeclado,BMoveDown)=="S" && rotulo(ETeclado,BMoveRight)=="D");
+    }
     assert(rotulo(EXbox,BCruz)==(custom?"Y":"A"));
     assert(rotulo(EXbox,BCirculo)==(custom?"A":classic?"B":"X"));
     assert(rotulo(EXbox,BTriangulo)==(custom?"X":classic?"Y":"B"));

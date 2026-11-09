@@ -1166,9 +1166,9 @@ diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xR
 @@ -504,6 +511,7 @@
      gowVideoInstalar(runtime, elfPath);    // escaneo progresivo siempre activado
      gowFijarInstalar(runtime, elfPath);    // fijar objetivo (envuelve la lectura del mando)
-     gowCancelarInstalar(runtime, elfPath); // cancelar ataques (despuÃ©s de fijar: encadena su envoltorio)
+     gowCancelarInstalar(runtime, elfPath); // cancelar ataques (después de fijar: encadena su envoltorio)
 +    gowIconosInstalar(runtime, elfPath);
-     gowSondeoInstalar(runtime);            // GOW_SONDEO (diagnÃ³stico)
+     gowSondeoInstalar(runtime);            // GOW_SONDEO (diagnóstico)
      if (envFlag("GOW_ESPERA_EE", false))
          gowEsperaInstalar(runtime, elfPath);
 @@ -512,6 +520,7 @@

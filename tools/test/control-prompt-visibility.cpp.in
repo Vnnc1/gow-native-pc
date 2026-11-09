@@ -13,7 +13,7 @@
 struct R5900Context { uint32_t pc=0; uint32_t regs[32]{}; };
 struct PS2Runtime {};
 #define GPR_U32(c,n) ((c)->regs[n])
-enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq };
+enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight };
 enum Variante { VNormal,VGriego };
 struct Caja {};
 struct Anterior {
@@ -81,7 +81,13 @@ int main() {
     draw();assert(originals==1); // Capacity cannot erase a prompt.
     g_construyendo.clear();form={};namedButton=BStickIzq;namedVariant=VGriego;
     g_buttonBackgrounds.insert(ctx.regs[4]);
-    draw();assert(originals==1); // Direction diagrams are not generic button backgrounds.
+    draw();assert(originals==1 && g_construyendo.size()==4);
+    assert(g_construyendo[0].boton==BMoveUp && g_construyendo[3].boton==BMoveRight);
+    assert(g_construyendo[0].y<g_construyendo[2].y);
+    assert(g_construyendo[1].x<g_construyendo[2].x && g_construyendo[3].x>g_construyendo[2].x);
+    draw();assert(originals==1 && g_construyendo.size()==4); // Composite diagram leaves share one guide.
+    g_construyendo.resize(125);draw();assert(originals==1 && g_construyendo.size()==125);
+    g_construyendo.clear(); // Capacity must not create a partial direction guide.
     named=false;tab=true;draw();assert(originals==0); // Both pause navigation button drawings.
     g_activo=false;draw();assert(originals==1);
     std::puts("PASS: original button faces, plates, labels and tabs hidden only with a ready replacement");
