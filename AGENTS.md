@@ -162,6 +162,18 @@ laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integrat
 
 ## Player diagnostic reports
 
+Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
+index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
+written. Keep entry/resume, caller, primary-slot and size/result gates; do not use
+card timestamps, low-level page writes or generic MCSERV RPC as completion signals
+(this game uses EE libmc2 over DBCMAN). The earlier payload write is not completion.
+`runtime/gow_save_backup.h` is shared with F1 and publishes the final card name only
+after closing data and metadata successfully. Host notifications consume an atomic
+result; never draw on the EE thread. History uses existing paths and `source: auto`.
+Run `altar-save-tests.py` (also in verify), `save-history-ui.py` and the private-card
+`altar-save-smoke.py`; regional runners still need separate validated hooks.
+See `docs/research/altar-save-backups-2026-11-09.md`.
+
 Collector final metadata uses bounded atomic-write retries after child exit.
 `SessionDiagnostics::sessionMetadata` reconciles incomplete active metadata only
 with a valid latest-process exit event; never infer completion from silence or a
@@ -318,7 +330,7 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   GOW_MC0 (the memory card image: Mcd001.ps2 next to the ELF unless already set) and GOW_SAVES_DIR (data/<id>/saves):
   F1 > Save in game (Ctrl+F1 > Saves in the debugger) copies the card to GOW_SAVES_DIR/<yyyyMMdd-HHmmss>/{Mcd001.ps2, save.json} (patch 26); the Saves
   tab (PaginaPartidas.qml, Lanzador::partidas/guardarPartida/importarPartida/restaurarPartida/borrarPartida) lists,
-  makes, imports, deletes and restores copies. save.json: {label, time, source: F1|launcher|import|backup, card, bytes}.
+  makes, imports, deletes and restores copies. save.json: {label, time, source: auto|F1|launcher|import|backup, card, bytes}.
   A restore needs the game closed and first keeps the current card as a "backup" copy. There are no savestates: a copy
   holds the game's own last save (save altars), see docs/saves.md.
   GOW_VU1X_INLINE=0 selects the helper tier; GOW_VU1X_ONLY=1 is test-only (clears AOT registrations, requires JIT on).

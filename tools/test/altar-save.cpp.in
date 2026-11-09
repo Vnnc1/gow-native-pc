@@ -1,0 +1,82 @@
+#include "runtime/gow_save_backup.h"
+#include <array>
+#include <cstring>
+#include <cassert>
+struct R5900Context { uint32_t pc=0; std::array<uint64_t,32> lo{}, hi{}; };
+#define GPR_U32(ctx, i) static_cast<uint32_t>((ctx)->lo[i])
+uint32_t readGuest32(const uint8_t *ram, uint32_t address) {
+    uint32_t value; std::memcpy(&value,ram+address,4); return value;
+}
+void put(std::vector<uint8_t> &ram,uint32_t address,uint32_t value) { std::memcpy(ram.data()+address,&value,4); }
+struct PS2Runtime { uint32_t result=1, next=0x2306c0; unsigned calls=0; };
+void sub_0022E800_0x22e800(uint8_t *, R5900Context *ctx, PS2Runtime *rt) {
+    ++rt->calls; ctx->lo[2]=rt->result; ctx->pc=rt->next;
+}
+@WRAPPER@
+namespace fs=std::filesystem;
+void env(const char *name,const std::string &value) {
+#ifdef _WIN32
+    _putenv_s(name,value.c_str());
+#else
+    setenv(name,value.c_str(),1);
+#endif
+}
+size_t copies(const fs::path &root) {
+    size_t count=0;
+    if(fs::is_directory(root)) for(const auto &e:fs::directory_iterator(root))
+        if(fs::exists(e.path()/"Mcd001.ps2")) ++count;
+    return count;
+}
+int main(int argc,char **argv) {
+    assert(argc==2); const auto work=fs::absolute(argv[1]); fs::create_directories(work);
+    const auto card=work/"card.ps2", history=work/fs::u8path("hist\xc3\xb3rico");
+    std::vector<char> bytes(0x840000,'K');
+    { std::ofstream f(card,std::ios::binary); f.write(bytes.data(),bytes.size()); }
+    env("GOW_MC0",card.u8string()); env("GOW_SAVES_DIR",history.u8string());
+    std::vector<uint8_t> ram(0x300000);
+    put(ram,0x2a128c,0x44);
+    R5900Context initial; initial.pc=0x22e800; initial.lo[31]=0x2306c0; initial.lo[7]=0x44; initial.hi.fill(123);
+    PS2Runtime rt;
+    // Pending, guest error, short write, payload/other callers, slot 2 and resume entries never back up.
+    for(int i=0;i<8;++i) {
+        auto ctx=initial; rt.result=1; rt.next=0x2306c0; put(ram,0x2a1284,0); put(ram,0x2a128c,0x44);
+        if(i==0) rt.result=0;
+        if(i==1) put(ram,0x2a1284,19);
+        if(i==2) put(ram,0x2a128c,67);
+        if(i==3) ctx.lo[31]=0x2305c8;
+        if(i==4) ctx.lo[4]=1;
+        if(i==5) ctx.pc=0x22e8a0;
+        if(i==6) ctx.lo[7]=81920;
+        if(i==7) rt.next=0x22e89c;
+        const auto old=ctx;
+        gowAltarSaveWrite(ram.data(),&ctx,&rt);
+        auto expected=old.lo; expected[2]=rt.result;
+        assert(ctx.lo==expected && ctx.hi==old.hi && ctx.pc==rt.next);
+        assert(!copies(history) && gow_saves::notification.load()==0);
+    }
+    rt.next=0x2306c0; put(ram,0x2a1284,0); put(ram,0x2a128c,0x44);
+    for(int i=0;i<2;++i) {
+        auto ctx=initial; gowAltarSaveWrite(ram.data(),&ctx,&rt);
+        assert(gow_saves::notification.exchange(0)==1);
+        assert(copies(history)==static_cast<size_t>(i+1));
+    }
+    for(const auto &e:fs::directory_iterator(history)) {
+        std::ifstream cardCopy(e.path()/"Mcd001.ps2",std::ios::binary);
+        std::vector<char> actual{std::istreambuf_iterator<char>(cardCopy),{}}; assert(actual==bytes);
+        std::ifstream metadata(e.path()/"save.json");
+        std::string json{std::istreambuf_iterator<char>(metadata),{}};
+        assert(json.find("\"source\": \"auto\"")!=std::string::npos);
+        assert(!fs::exists(e.path()/"Mcd001.ps2.tmp"));
+    }
+    assert(gow_saves::snapshot("Manual \"label\"", "F1").ok && copies(history)==3);
+    // A failed destination must not change the card or report success.
+    env("GOW_SAVES_DIR",card.u8string());
+    auto ctx=initial; gowAltarSaveWrite(ram.data(),&ctx,&rt);
+    assert(gow_saves::notification.exchange(0)==-1 && fs::file_size(card)==bytes.size());
+    env("GOW_SAVES_DIR",history.u8string());
+    { std::ofstream f(card,std::ios::binary|std::ios::trunc); f << "partial"; }
+    assert(!gow_saves::snapshot("", "auto").ok && copies(history)==3);
+    env("GOW_MC0",""); assert(!gow_saves::snapshot("", "auto").ok);
+    assert(rt.calls==11);
+    std::puts("PASS: completion/error/resume/slot gates, register parity, Unicode history, unique copies, metadata, manual copy and failure notification");
+}

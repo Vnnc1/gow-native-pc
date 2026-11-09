@@ -1,4 +1,4 @@
-# Saves: memory card copies for testing (F1 > Saves, launcher Saves tab)
+# Saves: automatic altar backups and launcher history
 
 Goal: play forward to an area once, keep that progress, and later start tests from there again (for example, the
 frame rate after the ship) without replaying the game.
@@ -12,20 +12,36 @@ frame rate after the ship) without replaying the game.
   (`Mcd001.ps2`, PCSX2 `.ps2` format, 8 MB raw, 528-byte pages). A copy of that file holds every save slot the game
   had written when the copy was made. Loading it means loading the game's own save from the game's menu.
 
-So the workflow is: **save at an altar in the game → make a copy → later put the copy back → load in the game.**
+For the USA edition and compatible translations, the workflow is: **save at an altar → automatic backup →
+later restore a copy with the game closed → load from the game's menu.** Existing builds need an updated runner.
+
+## Automatic history (runtime patch zzz-309)
+
+- The backup starts only after the altar's final index write succeeds, after the save payload has been written.
+  Opening an altar, cancelling, loading, pending writes and failed writes do not create a backup.
+- A successful copy shows an in-game notification for seven seconds and appears as an automatic backup in the
+  launcher's Saves page. The visible page refreshes every two seconds while playing and on return to the page.
+- Each backup has its own dated folder and `save.json` with `source: "auto"`. Old copies are kept until the player
+  deletes them; each raw card occupies about 8.25 MiB. There is no automatic upload or pruning.
+- If the destination cannot be written, the game save remains on the active card and the notification reports the
+  backup failure. No incomplete card copy is added to the history. Fix the folder/disk problem and make a manual copy
+  with F1 or save again at an altar.
+- Regional Europe/Japan runners do not yet have the corresponding completion hook; their manual copies remain
+  available. The hook is specific to the validated USA executable, including compatible translations.
 
 ## In game: F1 > Saves (runtime patch 26)
 
-- F1 opens the runtime panel; its first tab is **Saves**.
+- F1 opens the in-game menu; choose **Save**. Ctrl+F1 opens the debugger's **Saves** tab.
 - "Save a copy of the card" (optional label) copies the card to `GOW_SAVES_DIR/<yyyyMMdd-HHmmss>/`:
-  - `Mcd001.ps2`: the card image, read again if the game wrote to it during the copy (size/time check, 5 tries);
+  - `Mcd001.ps2`: the card image; size/time changes during reading cause an error instead of publishing a partial copy;
   - `save.json`: `{label, time, source: "F1", card, bytes}`.
 - It shows when the game last wrote the card ("N min ago"): if that is older than your last altar save, the game has
   not finished writing yet.
 - The tab never changes the card the game is using: the running game keeps the card in memory
   (`ps2xIOP/src/emulator/core/memory_card.*`) and would overwrite a file replaced under it.
 - `GOW_MC0` (the card path) and `GOW_SAVES_DIR` are set by the launcher. A runner started by hand needs both, else
-  the tab says so. Code: `drawSavesTab` / `snapshotCard` in `PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp`.
+  the tab says so. Manual and automatic runtime copies share `runtime/gow_save_backup.h`; data and metadata are
+  closed successfully before the final card name makes the copy visible to readers.
 
 ## In the launcher: Saves tab
 
@@ -45,7 +61,12 @@ So the workflow is: **save at an altar in the game → make a copy → later put
 
 ## Testing it without the game
 
-- **Runtime snapshot:** the functions above `drawSavesTab` build on their own with a fake 8 MB card. They were tested
+`tools/test/altar-save-tests.py` compiles the production completion wrapper, backup publisher and notification
+code with observing guest/render fixtures. `tools/test/save-history-ui.py` exercises the real Saves QML page.
+`tools/test/altar-save-smoke.py` exercises save/load/cancel/destination-failure with a private card and normal
+collector shutdown. See [the implementation and measured results](research/altar-save-backups-2026-11-09.md).
+
+- **Earlier manual snapshot tests:** the functions above `drawSavesTab` built on their own with a fake 8 MB card. They were tested
   for:
   - no env: message;
   - no card: message;

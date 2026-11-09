@@ -64,14 +64,19 @@ enumeration passed the rerun; unrelated and previous builds remained intact.
 Moving a compiled cache without rebuilding is intentionally unsupported; old
 build disk space remains until the player removes it after verifying the new build.
 
+## Automatic altar backups
+
+Implemented separately in patch `zzz-309`, with launcher history refresh and
+localized automatic-source labels. The USA game uses EE libmc2 over DBCMAN,
+not the generic MCSERV file-close path considered below. Its final successful
+index write is the completion gate. See [implementation, tests and limitations](altar-save-backups-2026-11-09.md).
+
 ## Remaining work
 
-Automatic save history, device-dependent game prompts and the in-game settings/
-cheat changes are the next authorized steps; they are not implemented by the
-installer change above. Save backups must follow completed card writes, not
-simply opening an altar or copying a card mid-write. A backup is not a savestate.
+Device-dependent game prompts and the in-game settings/cheat changes remain
+authorized next steps. They are not implemented by the installer or save changes.
 
-Initial save-path investigation: the interpreter persists and flushes individual
+Initial save-path investigation (superseded by the traced libmc2 path above): the interpreter persists and flushes individual
 card ranges in `ps2xIOP/src/emulator/core/memory_card.cpp`; these writes are not a
 completed game-save signal. `IopRpcBridge::handleRpc` executes the memory-card
 server and copies its reply back to EE RAM. The EE RPC completion path is therefore
@@ -79,4 +84,4 @@ a candidate for observing successful write/close results, but a file close alone
 still needs correlation with the game's multi-file save sequence. The existing
 manual `snapshotCard` helper in `ps2_debug_panel.cpp` also needs its rename and
 metadata-write errors checked before it can issue an automatic success notice.
-No save hook or automatic-backup claim is shipped by this setup-only change.
+The setup change alone did not ship a save hook; `zzz-309` implements it separately.

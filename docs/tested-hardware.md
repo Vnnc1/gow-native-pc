@@ -1,5 +1,19 @@
 # Tested hardware and results
 
+## Automatic altar-save history (2026-11-09, Windows / Xeon / RX 580)
+
+Patch `zzz-309` and launcher history refresh built with LLVM 20261020 / Qt 6.8.3.
+Production completion/publisher/notification tests, real Saves QML refresh,
+regional routing, full-chain environment contract and pipeline suites passed.
+A private copy of the player's card saved at an altar and produced one byte-exact
+automatic backup; that copy loaded back into the game. Selecting No at the altar
+left its card hash unchanged and produced no backup. An unwritable backup
+destination left the game's successful save intact and published no history.
+Runs closed normally through the deployed collector. Host-overlay screenshot
+capture was unavailable; drawing/expiry/text were verified with observing tests.
+USA/compatible translations only; no regional/Linux gameplay or FPS claim.
+See [gates, evidence and limitations](research/altar-save-backups-2026-11-09.md).
+
 ## Setup build-location choice (2026-11-09, Windows)
 
 Pinned LLVM 20261020 normal/test-identity installers built. Packed synthetic

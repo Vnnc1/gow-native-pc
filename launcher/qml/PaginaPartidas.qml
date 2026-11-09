@@ -4,7 +4,7 @@ import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // gow-native-pc: "Saves" tab. A save is a copy of the memory card (Mcd001.ps2) as the game last wrote it at a save
-// altar: F1 > Saves in game makes one, and so does "Save a copy" here. "Use" puts a copy back as the card with the game
+// altar: supported runners back it up automatically; F1 and "Save a copy" also make manual copies. "Use" restores with the game
 // closed (the current card is kept first as a "backup" copy), so a test can start again from an area reached earlier.
 ScrollView {
     id: raiz
@@ -15,12 +15,22 @@ ScrollView {
     contentWidth: availableWidth
     clip: true
 
-    function refrescar() { lista = carpeta ? lanzador.partidas(carpeta) : [] }
+    function refrescar() {
+        var current = carpeta ? lanzador.partidas(carpeta) : []
+        if (JSON.stringify(current) !== JSON.stringify(lista)) lista = current
+    }
     onCarpetaChanged: refrescar()
     Component.onCompleted: refrescar()
+    onVisibleChanged: if (visible) refrescar()
+    Timer {
+        interval: 2000
+        repeat: true
+        running: raiz.visible && lanzador.jugando
+        onTriggered: raiz.refrescar()
+    }
     Connections {
         target: lanzador
-        function onJugandoCambiado() { raiz.refrescar() } // copies made with F1 while playing show up afterwards
+        function onJugandoCambiado() { raiz.refrescar() }
     }
 
     ColumnLayout {
