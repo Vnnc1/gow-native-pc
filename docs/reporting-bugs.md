@@ -49,6 +49,11 @@ and holds spanning report windows. These are not changed-pixel counts, scanout, 
 The RAM presentation path and older runners omit this tag; absence is not zero. A blocked host cannot emit
 a window until it resumes: inspect the last output time alongside guest/audio/process activity.
 
+Before patch `zzz-308`, minimizing the game could stop host reporting while guest/audio
+continued, and closing it while minimized could end in the collector's forced termination.
+Include whether the window was minimized/restored when reporting this signature. A missing
+host window alone cannot distinguish that condition from another host/driver stall.
+
 Detailed mode also enables exclusive elapsed-time buckets (EE/VU/GS/IOP and waits), VU1/JIT counters, audio requested,
 missing/dropped frames, playback-rate ceiling/buffer range and IOP cycle drift. These measure elapsed time or runtime
 counters, not hardware CPU/GPU utilization. Some counters may be absent depending on code paths, disabled sound,

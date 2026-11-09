@@ -160,6 +160,13 @@ The RAM path and older runners have no such metric. `tools/test/frame_metrics.cp
 and the deployed collector's `tools/test/session_diagnostics.py` cover accounting
 and export. See `docs/research/issue-31-stutter-2026-11-09.md` for unresolved stutter.
 
+Patch `zzz-308` sets raylib `FLAG_WINDOW_ALWAYS_RUN` at host window creation.
+The guest/audio already run independently: without this flag minimization blocks
+host polling and a close request cannot reach normal shutdown until restoration.
+Preserve this flag across window modes. `tools/test/window-lifecycle.py` is the
+Windows desktop/GPU integration gate (visible, minimized-close, restored-close),
+using a private disc/card and the deployed collector. This is not an AF/rain FPS fix.
+
 The 2026-11-05 [system audit](docs/research/system-audit-2026-11-05.md) records
 confirmed defects, test failures and vendor-tool limitations. Patch 76 validates
 GS raster shader links and releases temporary shader objects; `gow_shader_program_tests`

@@ -330,3 +330,12 @@ check. One control stopped host reporting and required forced termination; the
 controls do not establish a matched gameplay workload or a performance gain.
 Decision: retain diagnostic coverage only; issue 31 remains unresolved. See
 [evidence and limitations](issue-31-stutter-2026-11-09.md).
+
+Follow-up on the invalid 2x/AF-off control: an unchanged visible 180-second rerun
+exited normally. Deliberate minimization reproduced stopped host reports plus
+forced termination. A thread snapshot identified raylib's minimized-window
+`glfwWaitEvents` loop, which does not surface close requests until restoration.
+Patch `zzz-308` keeps host polling active using `FLAG_WINDOW_ALWAYS_RUN`.
+This is lifecycle correctness, not a new FPS experiment or proof of the original
+control's unrecorded window state. Background rendering remains active; no power
+or GPU performance improvement is claimed. See the investigation's follow-up.

@@ -1,5 +1,23 @@
 # Tested hardware and results
 
+## Minimized-window close / issue 31 follow-up (2026-11-09, Xeon / RX 580)
+
+Same isolated Release/JIT-only/interpreter-IOP configuration as the acquisition
+controls below. Baseline visible repeat ran 180 seconds and closed normally.
+Minimizing the baseline reproduced the stopped host reports and forced exit
+62097 twice; a host stack showed raylib `PollInputEvents` waiting for restoration.
+Patch `zzz-308` adds `FLAG_WINDOW_ALWAYS_RUN` in production window creation.
+The corrected minimized-close and minimize/restore/close controls exited 0,
+respectively 189 and 195 ms after the collector's stop event, with acquisition
+reports during the continuously checked minimized interval. All used private
+cards and left the original unchanged. Runs restored before the programmed
+action were excluded and retained. The visible-close repeat also passed (206 ms).
+Its first attempt exited 0 but retained stale running metadata in `session.json`;
+that separate collector inconsistency remains documented, with the files preserved.
+Build, patch applicability and frame-metric
+tests passed. No FPS/AF improvement, power saving or GTX 1060 fix is claimed.
+See [full evidence and regression command](research/issue-31-stutter-2026-11-09.md).
+
 ## Issue 31 acquisition diagnostics (2026-11-09, Xeon E5-2666 v3 / RX 580)
 
 Windows Release, LLVM 20261020, current-chain isolated runner plus `zzz-307`,

@@ -1,8 +1,9 @@
 # Issue 31: stutter investigation and acquisition diagnostics
 
-Status: **not resolved**. On `fix-chore` after `5e843be`, the safe change is
-diagnostic coverage, not a proven renderer performance fix. No quality default,
-AF shader, synchronization fence, or graphics setting was changed.
+Status: **reported rain/AF stutter not resolved**. On `fix-chore` after `5e843be`,
+patch 307 adds diagnostic coverage; follow-up patch 308 fixes a reproducible
+minimized-window close hang. This is not a proven renderer performance fix.
+No quality default, AF shader, synchronization fence, or graphics setting was changed.
 
 ## Supplied evidence
 
@@ -111,3 +112,113 @@ reporter's GPU with a current identified runner and completed report containing
 guest intervals plus acquisition metrics. Correlate holds or missing host output
 with the player marker before choosing a renderer/driver investigation. Do not
 close issue 31 or advertise a stutter improvement from this diagnostic change.
+
+## Follow-up: minimized-window host hang
+
+The original `guard-2x-af1` recording has no window-state trace or thread dump.
+Its exact trigger cannot be established retrospectively. An unchanged-runner
+180-second visible repeat (`repro-2x-af1`) exited normally, with 23 complete
+post-warmup performance windows. This does not support a deterministic AF-off
+hang. Host thread samples during that repeat showed normal frame-cap sleeps.
+
+A controlled minimization reproduced the signature on the same unchanged
+runner: guest/player and audio activity continued, but host/acquisition windows
+stopped. A process-scoped thread snapshot located the host in:
+
+```text
+NtUserWaitMessage
+_glfwWaitEventsWin32
+PollInputEvents
+EndDrawing
+GSHostPresentation::renderFrame
+PS2Runtime::run
+```
+
+The pinned raylib `rcore_desktop_glfw.c` loops in `glfwWaitEvents()` while
+`FLAG_WINDOW_MINIMIZED` is set and `FLAG_WINDOW_ALWAYS_RUN` is absent.
+`CORE.Window.shouldClose` is updated only after this loop. A close message wakes
+the event wait but does not restore the window; it re-enters the loop, so the
+runtime never reaches `WindowShouldClose()` or its normal shutdown path.
+The collector's five-second fallback then kills its own child. This is a host
+event-loop defect, not evidence of GPU/AF saturation or a stalled guest.
+
+Baseline `minimized-baseline-2x-af1`: minimization confirmed with `IsIconic`,
+last acquisition window at 36.988 s, close requested at 51.342 s, forced
+termination at 56.345 s, exit 62097. Thread inspection briefly suspended only
+the owned test process's threads and resumed each after collecting its stack.
+The original run is consistent with this defect, but lacks evidence proving
+that it was minimized. Keep that distinction when describing issue 31.
+
+### Correction and regression procedure
+
+Patch `zzz-308-minimized-window-close.patch` adds `FLAG_WINDOW_ALWAYS_RUN` in
+the existing production `gowVentanaAbrir` configuration. The guest and audio
+already continue independently; now the host continues polling and can close
+while minimized. No external tool or player setting is needed. Background host
+rendering remains active with the configured frame cap; this is not a power-saving
+change. It does not fix arbitrary driver/GPU blocking calls.
+
+`tools/test/window-lifecycle.py` runs the production runner through the deployed
+collector, copies the original card into a private disc, selects only the
+collector-owned child's window, confirms minimization/restoration, and checks
+host progress and exit without forced termination. It requires Windows desktop,
+GPU and a compatible prepared disc, so it is a manual integration gate rather
+than a data-free CI test. Example (use a fresh output directory per action):
+
+```powershell
+python -I tools/test/window-lifecycle.py --runner <runner.exe> --collector <gow-session.exe> --disc <prepared-disc> --output <new-test-directory> --action minimize
+```
+
+Other actions: `restore` (minimize, restore, then close) and `visible` (normal
+close). Defaults use a 40-second warmup, 2x/AF off, 1280x720 window, FXAA on,
+VSync off, 60 host cap and the opening-ship script. The same scene/health
+limitations above apply; these checks do not measure gameplay improvement.
+
+Candidate runner SHA-256:
+`19fa28bca81f3ae47912bceb6f42e3a8402d00349792fca9452fa36eb3f21c45`.
+Only the production window flag/comment differs from the 307 baseline source.
+Release rebuild and forward/reverse patch applicability passed. Evidence stays
+under ignored `data/issue-triage/31`, alongside the prior failed controls.
+
+The first automated baseline attempt (`window-test-baseline`) resumed host
+reporting after an approximately nine-second pause and exited normally. That
+version checked minimization only once and could accept a report spanning the
+pause. It is excluded from the minimized-close regression result. The harness
+now checks `IsIconic` every 500 ms throughout the hold, rejects restoration,
+and requires a complete reporting window inside the minimized interval.
+The repeated baseline (`window-test-baseline-2`) remained minimized and failed
+as expected: forced termination, exit 62097. The corrected repeat
+(`window-fix-minimize-2`) passed and closed normally in 189 ms after the
+collector's stop event. The first corrected minimize control also exited
+normally; both retain their logs. Guest-frame accounting tests passed again.
+
+The first restore control (`window-fix-restore`) detected an unplanned restore
+at 48.922 s and was rejected; its cleanup closed normally. After the maintainer
+agreed to leave the window untouched, `window-fix-restore-2` passed the full
+minimized interval, programmed restoration and normal close (195 ms from the
+collector's stop event). These interrupted runs remain in the evidence folder.
+The reproducible minimized-close failure and fix are established on the local
+Windows/RX 580 system. Fullscreen/borderless transitions, Linux, other drivers,
+visual/audio parity and the original GTX 1060 rain scenario remain unvalidated.
+
+The first corrected visible control (`window-fix-visible`) closed its game window
+and emitted `process_exit` code 0, but `session.json` retained `state=running`
+without `exit_code`. The strict regression rejected this inconsistent report.
+This is separate from the host hang: the exit event and collector completion
+establish that the game exited. Final metadata persistence remains a diagnostic
+collector limitation; its cause was not established in this window-lifecycle
+change. The original inconsistent files are retained, not repaired or hidden.
+
+The repeated visible control (`window-fix-visible-2`) passed with consistent
+final metadata, code 0 and 206 ms from stop event to exit. Final accepted matrix:
+
+| Runner / action | Result | Collector stop to exit |
+| --- | --- | ---: |
+| Baseline / continuously minimized | Expected regression failure, forced 62097 | 5062 ms |
+| Patch 308 / continuously minimized | Pass, exit 0, host progress | 189 ms |
+| Patch 308 / minimize then restore | Pass, exit 0, host progress while minimized | 195 ms |
+| Patch 308 / visible | Pass, exit 0, consistent final metadata | 206 ms |
+
+These durations are local shutdown observations, not frame latency benchmarks.
+The full pipeline verify and packaged installer/UI suites were not rerun for
+this one-flag runtime change. No files were committed or published by the agent.
