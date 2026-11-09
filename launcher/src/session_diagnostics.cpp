@@ -159,7 +159,7 @@ public:
             ++warningLines;
             if (warningLines <= 1000) event({{"type", "runtime_warning_candidate"}, {"text", text.left(2048)}});
         }
-        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-queue|gow-sync|gow-sync-config|gs-cache|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
+        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-present|gow-queue|gow-sync|gow-sync-config|gs-cache|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
         const auto match = tag.match(text);
         if (match.hasMatch()) {
             QJsonObject sample{{"type", "runtime"}, {"tag", match.captured(1)}, {"elapsed_ms", lastOutput}};

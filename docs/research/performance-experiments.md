@@ -315,3 +315,18 @@ parity and lower retained memory; reporter crash closure remains pending without
 their captures. Extra decoding work is not a claimed build-time speedup; unique
 emitted code can still consume substantial memory. No gameplay/FPS claim.
 See [triage and reproducible checks](community-issues-2026-11-09.md).
+
+## GPU-05 / 2026-11-09 — issue 31 shared acquisition diagnosis
+
+New report: GTX 1060 3 GB rain/combat stutter, including 2x with AF disabled.
+Unlike GPU-01's utilization-only report, the attachment includes guest intervals,
+runner identity and a player marker. It still has no fresh-shared-frame metric.
+The current change measures host acquisitions/reuse with bounded counters and no
+new GPU calls under existing performance diagnostics. Local RX 580 controls at
+2x/AF off, 2x/AF16 and 3x/AF off exercise those measurements under different load;
+they do not retest GPU-03's rejected FSR implementation or establish NVIDIA gains.
+No renderer optimization is promoted without a separate reproduction and parity
+check. One control stopped host reporting and required forced termination; the
+controls do not establish a matched gameplay workload or a performance gain.
+Decision: retain diagnostic coverage only; issue 31 remains unresolved. See
+[evidence and limitations](issue-31-stutter-2026-11-09.md).

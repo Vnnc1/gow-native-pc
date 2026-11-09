@@ -1,0 +1,108 @@
+Measure fresh shared-frame acquisitions separately from host loop frequency.
+Issue 31 reports severe stutter with ~54 guest FPS and 60 host Hz, but those
+counters cannot detect repeated shared textures. Under existing GOW_PERF_DIAG
+modes, emit bounded host-owned counters and hold age every five seconds.
+No added GPU call, readback, fence wait or renderer behavior change.
+Acquisitions are not changed-pixel counts, GPU time, scanout or input latency.
+Validation and limitations: docs/research/issue-31-stutter-2026-11-09.md.
+
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
+@@ -66,4 +66,30 @@
+         return a;
+     }
+ };
++// Host-owned acquisition accounting; sequence changes do not prove changed pixels or scanout.
++struct SharedFrameWindow {
++    struct Counts {
++        uint64_t polls=0, fresh=0, repeated=0, unavailable=0, blank=0, skipped=0, maxHoldNs=0;
++    } counts;
++    uint64_t sequence=0, sinceNew=0;
++    bool active=false;
++    void sample(uint64_t next, bool isBlank, uint64_t now) {
++        ++counts.polls;
++        if (!next || isBlank) {
++            if (!next) ++counts.unavailable; else ++counts.blank;
++            active=false;
++            return;
++        }
++        if (active && now >= sinceNew)
++            counts.maxHoldNs=std::max(counts.maxHoldNs, now-sinceNew);
++        if (!active || next != sequence) {
++            if (active && next > sequence) counts.skipped += next-sequence-1;
++            ++counts.fresh;
++            sequence=next; sinceNew=now; active=true;
++        } else ++counts.repeated;
++    }
++    // Keep the last acquisition across windows: a long freeze must not look like fresh output.
++    void clearCounts() { counts={}; }
++};
++
+ }
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_host_present.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_host_present.h
+@@ -3,6 +3,7 @@
+ 
+ #include "raylib.h"
+ #include "runtime/gs/gs_shared_present.h"
++#include "runtime/gow_frame_metrics.h"
+ 
+ #include <cstdint>
+ #include <functional>
+@@ -42,6 +43,8 @@
+     View current;
+     uint64_t lastTick = 0u;
+     uint64_t lastSharedSequence = 0u;
++    gow_diagnostics::SharedFrameWindow sharedMetrics;
++    uint64_t sharedMetricsStart = 0u;
+     uint32_t lastDisplayFbp = UINT32_MAX;
+     uint32_t lastSourceFbp = UINT32_MAX;
+     uint32_t lastWidth = 0u;
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+@@ -221,6 +221,8 @@
+         sharedMode = shared;
+         hasLatched = uploaded = uploadedBlank = false;
+         lastSharedSequence = 0u;
++        sharedMetrics = {};
++        sharedMetricsStart = 0u;
+         current = {};
+     }
+     const bool needsLatch = !hasLatched || vsyncTick != lastTick;
+@@ -236,7 +238,26 @@
+         // GOW-Port: la llamada anterior ya terminó EndDrawing, incluido el batch.
+         // Acquire puede conservar el slot previo; nunca descargar píxeles aquí.
+         GSSharedPresent::Frame frame;
+-        if (GSSharedPresent::Acquire(frame))
++        const bool acquired = GSSharedPresent::Acquire(frame);
++        if (ps2_perf::countFrames())
++        {
++            const uint64_t now = ps2_perf::nowNanos();
++            if (!sharedMetricsStart) sharedMetricsStart = now;
++            sharedMetrics.sample(acquired ? frame.sequence : 0u, frame.blank, now);
++            if (now - sharedMetricsStart >= 5000000000ull)
++            {
++                const double seconds = (now - sharedMetricsStart) / 1e9;
++                const auto &c = sharedMetrics.counts;
++                std::fprintf(stderr, "[gow-present] window=%.3f polls=%llu fresh=%llu repeated=%llu unavailable=%llu blank=%llu skipped=%llu acquire_hz=%.3f max_hold_ms=%.3f\n",
++                    seconds, static_cast<unsigned long long>(c.polls), static_cast<unsigned long long>(c.fresh),
++                    static_cast<unsigned long long>(c.repeated), static_cast<unsigned long long>(c.unavailable),
++                    static_cast<unsigned long long>(c.blank), static_cast<unsigned long long>(c.skipped),
++                    c.fresh / seconds, c.maxHoldNs / 1e6);
++                sharedMetrics.clearCounts();
++                sharedMetricsStart = now;
++            }
++        }
++        if (acquired)
+         {
+             current.frame = frame;
+             if (frame.sequence != lastSharedSequence)
+@@ -486,6 +507,8 @@
+         GSSharedPresent::ShutdownHost();
+     started = captureRequested = hasLatched = uploaded = uploadedBlank = modeKnown = sharedMode = false;
+     lastTick = lastSharedSequence = 0u;
++    sharedMetrics = {};
++    sharedMetricsStart = 0u;
+     current = {};
+     scratch.clear();
+     upload.clear();

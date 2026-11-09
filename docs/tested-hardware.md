@@ -1,5 +1,19 @@
 # Tested hardware and results
 
+## Issue 31 acquisition diagnostics (2026-11-09, Xeon E5-2666 v3 / RX 580)
+
+Windows Release, LLVM 20261020, current-chain isolated runner plus `zzz-307`,
+no PGO, exact VU1 JIT, interpreter IOP. Three private-card opening-ship controls
+at 1280x720 exercised 2x/AF off, 2x/AF16 and 3x/AF off. All 50 exported acquisition
+windows satisfied the accounting invariant. The latter two runs exited normally;
+2x/AF off stopped host reporting around 42 seconds and required forced termination
+after the requested stop (62097). Scene/health parity was not established, so
+these are diagnostic smoke results, not an FPS A/B or a fix for GTX 1060 stutter.
+Production metric tests and the deployed collector's 11 tests passed; the first
+collector suite run had a temporary-file cleanup failure, retained in the log.
+No visual/audio parity or NVIDIA validation. See [issue 31 evidence, hashes and
+remaining gates](research/issue-31-stutter-2026-11-09.md), experiment GPU-05.
+
 ## VU1 generator memory / issue 6 (2026-11-09, Xeon E5-2666 v3)
 
 Windows, LLVM 20261020, Release/no PGO, isolated current-chain generator. Patch

@@ -29,6 +29,28 @@ int main()
     const auto before = window.intervals;
     window.analyze();
     check(window.intervals == before, "analysis preserves chronological samples");
-    if (!failures) std::puts("PASS: frame metrics (empty, invalid, percentile, budgets, overflow, sparse stall, reset)");
+    gow_diagnostics::SharedFrameWindow shared;
+    shared.sample(0, false, 0);
+    shared.sample(1, true, 10);
+    shared.sample(2, false, 20);
+    shared.sample(2, false, 40);
+    shared.sample(5, false, 70);
+    check(shared.counts.polls == 5 && shared.counts.fresh == 2 && shared.counts.repeated == 1 &&
+          shared.counts.blank == 1 && shared.counts.unavailable == 1 && shared.counts.skipped == 2,
+          "shared polls distinguish acquisition, reuse, blank, unavailable and skipped publications");
+    check(shared.counts.maxHoldNs == 50, "hold includes the interval before a new acquisition");
+    shared.clearCounts();
+    shared.sample(5, false, 1000);
+    check(shared.counts.fresh == 0 && shared.counts.repeated == 1 && shared.counts.maxHoldNs == 930,
+          "reuse age survives report windows");
+    shared.sample(1, false, 1010);
+    check(shared.counts.fresh == 1 && shared.counts.skipped == 0, "sequence restart does not underflow skips");
+    shared = {};
+    shared.sample(1, false, 2000);
+    check(shared.counts.fresh == 1 && shared.counts.maxHoldNs == 0, "host lifecycle resets acquisition state");
+    shared.sample(0, false, 2010);
+    shared.sample(1, false, 2020);
+    check(shared.counts.fresh == 2, "unavailable output ends the previous visible hold");
+    if (!failures) std::puts("PASS: guest frame and shared acquisition metrics");
     return failures ? 1 : 0;
 }

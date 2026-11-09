@@ -54,7 +54,7 @@ class DiagnosticsTests(unittest.TestCase):
                 time.sleep(0.02)
 
     def test_exit_metrics_redaction_and_export(self):
-        self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('[vu1n] nativePairs=123 nativeBlocks=24 missBlocks=7 laneFails=0',flush=True)\nprint('[vu1x] compiled=12 unsupported=1 codeKB=20 avgCompileUs=4.0',flush=True)\nprint('[gow-queue] queue=2 window=5 waits=3 wait_ms=12.5 max_ms=7 queued_peak=8 final=0',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)
+        self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[gow-present] window=5 polls=300 fresh=12 repeated=288 unavailable=0 blank=0 skipped=40 acquire_hz=2.4 max_hold_ms=900',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('[vu1n] nativePairs=123 nativeBlocks=24 missBlocks=7 laneFails=0',flush=True)\nprint('[vu1x] compiled=12 unsupported=1 codeKB=20 avgCompileUs=4.0',flush=True)\nprint('[gow-queue] queue=2 window=5 waits=3 wait_ms=12.5 max_ms=7 queued_peak=8 final=0',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)
         meta = self.metadata()
         self.assertEqual(meta["state"], "nonzero_exit")
         self.assertEqual(meta["exit_code"], 7)
@@ -69,6 +69,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("ee_ms", perf["values"])
         queue = next(r["values"] for r in rows if r.get("tag") == "gow-queue")
         self.assertEqual((queue["queue"], queue["waits"], queue["wait_ms"], queue["max_ms"], queue["queued_peak"]), (2, 3, 12.5, 7, 8))
+        present = next(r["values"] for r in rows if r.get("tag") == "gow-present")
+        self.assertEqual((present["fresh"], present["repeated"], present["acquire_hz"], present["max_hold_ms"]), (12, 288, 2.4, 900))
+        self.assertEqual(meta["observations"]["guest_fps_min_window"], 59.5)
         audio = next(r["values"] for r in rows if r.get("tag") == "audio-stats")
         self.assertEqual((audio["missing"], audio["rate_max"], audio["level_min"], audio["level_max"]), (12, 1.025, 12, 450))
         native = next(r["values"] for r in rows if r.get("tag") == "vu1n")

@@ -40,6 +40,15 @@ or measured GPU time**. Host loop frequency is not proof of distinct displayed g
 rank over at most 4,096 intervals per window; `intervals` and `samples` expose any overflow, while totals/maxima count
 all intervals. No window is emitted while the guest frame function stops; use the host heartbeat and last output time.
 
+Runners with patch `zzz-307` also emit `[gow-present]` in the shared-texture path under the same diagnostics.
+`fresh` counts acquisitions of a new publication sequence; `repeated` counts reuse, `unavailable` failed acquisition,
+and `blank` blank output. Their sum is `polls`. `skipped` counts publication sequences skipped between valid
+acquisitions, not lost guest frames. `acquire_hz` is fresh acquisitions divided by the reporting window.
+`max_hold_ms` measures the oldest retained acquisition observed, including the interval before its replacement
+and holds spanning report windows. These are not changed-pixel counts, scanout, GPU time or input latency.
+The RAM presentation path and older runners omit this tag; absence is not zero. A blocked host cannot emit
+a window until it resumes: inspect the last output time alongside guest/audio/process activity.
+
 Detailed mode also enables exclusive elapsed-time buckets (EE/VU/GS/IOP and waits), VU1/JIT counters, audio requested,
 missing/dropped frames, playback-rate ceiling/buffer range and IOP cycle drift. These measure elapsed time or runtime
 counters, not hardware CPU/GPU utilization. Some counters may be absent depending on code paths, disabled sound,

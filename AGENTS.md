@@ -152,6 +152,14 @@ laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integrat
 
 ## Player diagnostic reports
 
+Patch `zzz-307` emits host-owned shared-acquisition counters as `[gow-present]`
+under existing performance diagnostics. Publication sequences are not unique
+game frames or scanout; hold age is not GPU time or input latency. Preserve
+lifecycle resets and hold age across report windows without adding GPU waits.
+The RAM path and older runners have no such metric. `tools/test/frame_metrics.cpp`
+and the deployed collector's `tools/test/session_diagnostics.py` cover accounting
+and export. See `docs/research/issue-31-stutter-2026-11-09.md` for unresolved stutter.
+
 The 2026-11-05 [system audit](docs/research/system-audit-2026-11-05.md) records
 confirmed defects, test failures and vendor-tool limitations. Patch 76 validates
 GS raster shader links and releases temporary shader objects; `gow_shader_program_tests`
