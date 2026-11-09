@@ -1,5 +1,15 @@
 # Tested hardware and results
 
+## VU1 generator memory / issue 6 (2026-11-09, Xeon E5-2666 v3)
+
+Windows, LLVM 20261020, Release/no PGO, isolated current-chain generator. Patch
+`zzz-306` reduced measured peak working set for 1000 synthetic captures from
+158097408 to 26755072 bytes (both exit 0). All 13 generated files matched the
+baseline byte-for-byte, also with eight real captures. Synthetic input validation,
+output preservation and restat tests passed. This is build-tool memory evidence,
+not gameplay performance; the community reporter's `bad_alloc` was not reproduced
+without their capture set. See [full triage](research/community-issues-2026-11-09.md).
+
 ## Issue 30 movie EOF (2026-11-09, Xeon E5-2666 v3 / RX 580 2048SP)
 
 Windows, current `fix-chore` patch chain, isolated Release/LLVM 20261020 build,

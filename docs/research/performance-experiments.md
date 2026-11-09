@@ -301,3 +301,17 @@ Startup undersupply remains (7437/7085 missing frames in the candidate runs).
 The initial intended candidate was still patch 79 by hash and is explicitly
 preserved as an integration failure. Full data, hashes and ordering are in the
 linked AUDIO-01 report; other movies/hardware remain open acceptance gates.
+
+## BUILD-MEM-01 / 2026-11-09 — VU1 generator retained images
+
+New correctness/memory investigation motivated by community issue 6's
+`std::bad_alloc` in `ps2x_vu1_generator`, not a retest of an earlier FPS candidate.
+Patch `zzz-306` keeps raw captures and decodes one image per existing pass rather
+than retaining every decoded image. On 1000 zeroed images, Windows peak working
+set fell from 158097408 to 26755072 bytes; both executions succeeded. All 13 output
+files remained byte-identical for that workload and for eight real captures.
+Malformed-size inputs now fail before an unbounded read. Accepted for output
+parity and lower retained memory; reporter crash closure remains pending without
+their captures. Extra decoding work is not a claimed build-time speedup; unique
+emitted code can still consume substantial memory. No gameplay/FPS claim.
+See [triage and reproducible checks](community-issues-2026-11-09.md).

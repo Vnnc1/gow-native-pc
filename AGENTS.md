@@ -179,6 +179,14 @@ both wrappers; `movie-smoke.ps1 -NewGame -RequireCompletion -ExpectedLastPicture
 checks this clip through the intro route with a private card. See
 `docs/research/issue-30-movie-eof-2026-11-09.md` for evidence and scope.
 
+Patch `zzz-306` keeps VU1 generator images raw and decodes one at a time per pass;
+retain pass/input ordering so generated C++ stays byte-identical. Validate input
+length before allocation. After generator changes, run
+`python -I tools/test/vu1-generator-tests.py --generator <built-generator>`;
+use `--reference <baseline-generator>` for output-parity acceptance. Issue 6's
+original capture set is unavailable; lower local memory usage is not proof of
+closing every allocation failure. See `docs/research/community-issues-2026-11-09.md`.
+
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
 identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
 per session, and invokes the same detached collector. `tools/pipeline/package_diagnostics.py` packages it with
