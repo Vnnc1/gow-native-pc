@@ -35,7 +35,7 @@ if ($Stages -contains 'verify') {
     Native $python @('-I', (Join-Path $root 'tools/test/launcher-env-contract.py')) 'launcher settings contract'
     Native $python @('-I', (Join-Path $root 'tools/test/guest-calls.py'), (Join-Path $testBuild 'gow_guest_calls.exe'),
         (Join-Path $logs 'guest-calls')) 'guest-call regression tests'
-    Native (Join-Path (Split-Path $cmakeExe) 'ctest.exe') @('--test-dir', $testBuild, '-R', '^gow_(codegen_tests|memory_tests|frame_metrics|dma_worker_tests|sound_regression|qte_hold_test|qte_input_off|qte_input_shake|qte_input_rotate|qte_input_smoke|texture_budget|shader_program|software_reference|test_time|gs_run_tests|shared_present_tests)$', '--output-on-failure') 'codegen, memory, frame-metric, sound and hold-to-mash regression tests'
+    Native (Join-Path (Split-Path $cmakeExe) 'ctest.exe') @('--test-dir', $testBuild, '-R', '^gow_(codegen_tests|memory_tests|frame_metrics|dma_worker_tests|sound_regression|qte_hold_test|qte_input_off|qte_input_shake|qte_input_rotate|qte_input_smoke|control_prompts|texture_budget|shader_program|software_reference|test_time|gs_run_tests|shared_present_tests)$', '--output-on-failure') 'codegen, memory, frame-metric, sound and hold-to-mash regression tests'
     Native $python @('-I', (Join-Path $root 'tools/test/vu1-equivalence.py'),
         (Join-Path $testBuild 'gow_vu1_x64_fuzz_test.exe'), $rt, $python,
         (Join-Path $script:llvmBin 'clang++.exe'), (Join-Path $logs 'vu1-equivalence')) 'VU1 backend equivalence'

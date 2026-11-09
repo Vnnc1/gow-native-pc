@@ -73,8 +73,12 @@ index write is the completion gate. See [implementation, tests and limitations](
 
 ## Remaining work
 
-Device-dependent game prompts and the in-game settings/cheat changes remain
-authorized next steps. They are not implemented by the installer or save changes.
+Device-dependent USA Flash button prompts are implemented in `zzz-310`; see
+[validation and remaining acceptance](control-prompts-2026-11-09.md). Physical
+controller checks, combat QTE acceptance and non-Flash world prompts remain open.
+Follow-up `zzz-311` removes the original PS2 button art behind recognized mapped
+prompts; private-card altar and remapped Moves captures validate that correction.
+The in-game settings/cheat changes remain an authorized next step.
 
 Initial save-path investigation (superseded by the traced libmc2 path above): the interpreter persists and flushes individual
 card ranges in `ps2xIOP/src/emulator/core/memory_card.cpp`; these writes are not a

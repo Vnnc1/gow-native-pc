@@ -162,6 +162,20 @@ laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integrat
 
 ## Player diagnostic reports
 
+Patch `zzz-310` restores USA Flash button prompts with last-active input and the
+production keyboard/controller mappings. Input selection is shared by buttons,
+sticks and labels; never switch merely because an idle pad is connected.
+Publish complete prompt batches at the guest flip, including empty frames.
+Patch `zzz-311` suppresses recognized original Flash symbols, learned button
+plates and shoulder-label glyphs after host replacements render successfully.
+Keep original drawing before readiness, for unknown art and at batch capacity;
+clear learned plates when movie discovery resets. Preserve rotation/shake diagrams.
+`gow_control_prompts` in verify covers input, labels and bounded publication;
+`control-prompts-smoke.py` captures the final host overlay with a private card.
+Forced styles require `GOW_PAD_TEST=1` and are not hardware detection evidence.
+Physical Sony pads, real combat QTEs and the textured world-space circle remain
+acceptance gaps. See `docs/research/control-prompts-2026-11-09.md`.
+
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
 written. Keep entry/resume, caller, primary-slot and size/result gates; do not use

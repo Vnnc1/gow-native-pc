@@ -1,5 +1,22 @@
 # Tested hardware and results
 
+## Device-aware Flash prompts (2026-11-09, Windows / Xeon / RX 580)
+
+Follow-up `zzz-311` removes original Flash button drawings behind replacements.
+Release build and production interception tests passed for faces, shoulders,
+labels, plates and fallback cases. Host captures at the altar and remapped Moves
+screen confirm the duplicate art is gone; source cards remained unchanged and
+collectors completed with exit 0. Real combat/world-circle acceptance remains open.
+
+Patch `zzz-310` built in Release. Production input/label/frame tests and all four
+QTE input modes passed, along with 17 pipeline tests and the Linux pipeline suite
+(7 run, one host skip). Final host captures show keyboard and remapped Xbox,
+DS4 and DualSense symbols in the title; the loaded-save pause/tutorial window
+shows the remapped K and Ctrl/E labels. Controller families were simulated for
+those captures; physical detection and combat QTE acceptance remain unverified.
+The world-space enemy circle remains original. No FPS or other-hardware claim.
+See [implementation and evidence](research/control-prompts-2026-11-09.md).
+
 ## Automatic altar-save history (2026-11-09, Windows / Xeon / RX 580)
 
 Patch `zzz-309` and launcher history refresh built with LLVM 20261020 / Qt 6.8.3.

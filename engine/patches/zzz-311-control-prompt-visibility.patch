@@ -1,0 +1,140 @@
+Hide recognized original Flash button art after the host replacement is ready.
+Removes duplicate symbols, shoulder labels and plates; retains unknown art and direction diagrams.
+Validated by production draw interception tests and private-card host captures.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -33,6 +33,9 @@
+ 
+     PS2Runtime::RecompiledFunction g_dibujarForma = nullptr;
+     bool g_diag = false, g_activo = false;
++    std::atomic<bool> g_replacementsReady{false};
++    // Only suppress plates associated with a recognized prompt in the current movie set.
++    std::set<uint32_t> g_buttonBackgrounds;
+ 
+     const auto g_arranque = std::chrono::steady_clock::now();
+ 
+@@ -134,6 +137,7 @@
+     void escanearPeliculas(const uint8_t *rdram)
+     {
+         resetMeshBounds();
++        g_buttonBackgrounds.clear();
+         const auto inicio = std::chrono::steady_clock::now();
+         g_peliculas.clear();
+         for (uint32_t h = 0x100000u; h + 0x60u < PS2_RAM_SIZE; h += 4u)
+@@ -375,6 +379,8 @@
+     struct Rotulo
+     {
+         bool abierto = false;
++        bool hidden = false;
++        uint32_t background = 0;
+         Anterior fondo;
+         float cx = 0.0f, cy = 0.0f, radio = 0.0f;
+         std::vector<std::pair<float, char>> letras;
+@@ -487,9 +493,11 @@
+             if (vistos.insert(t).second)
+                 std::fprintf(stderr, "[gow-iconos] rótulo '%s'\n", t.c_str());
+         }
+-        if (rotuloDeBoton(t, b))
++        if (rotuloDeBoton(t, b)) {
++            g_buttonBackgrounds.insert(g_rotulo.background);
+             anotar(Icono{b, VNormal, 320.0f + g_rotulo.cx * 0.5f, 240.0f - g_rotulo.cy * 0.5f, g_rotulo.radio, g_rotulo.r, g_rotulo.g,
+                          g_rotulo.b, g_rotulo.a});
++        }
+     }
+ 
+     void dibujarForma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+@@ -538,7 +546,8 @@
+             if (letra && std::hypot(cx - g_rotulo.cx, cy - g_rotulo.cy) < g_rotulo.radio * 1.2f && g_rotulo.letras.size() < 8u)
+             {
+                 g_rotulo.letras.push_back({cx, letra});
+-                g_dibujarForma(rdram, ctx, runtime);
++                if (g_rotulo.hidden) ctx->pc = GPR_U32(ctx,31);
++                else g_dibujarForma(rdram, ctx, runtime);
+                 return;
+             }
+             cerrarRotulo();
+@@ -550,6 +559,7 @@
+                     1.0f, 1.0f, 1.0f, 1.0f};
+             leerCxform(rdram, GPR_U32(ctx, 8), i.r, i.g, i.b, i.a);
+             anotar(i);
++            g_buttonBackgrounds.insert(entrada);
+         }
+ 
+         Boton b = BCruz;
+@@ -563,6 +573,7 @@
+         {
+             v = fondo.fondoGriego ? VGriego : VNormal;
+             esBoton = true;
++            g_buttonBackgrounds.insert(fondo.entrada);
+         }
+         else if (botonDeForma(rdram, entrada, b, v) && b != BCruz && b != BCirculo && b != BCuadrado && b != BTriangulo)
+         {
+@@ -578,6 +589,9 @@
+         {
+             g_rotulo = Rotulo{};
+             g_rotulo.abierto = true;
++            g_rotulo.background = entrada;
++            g_rotulo.hidden = g_replacementsReady.load(std::memory_order_relaxed) &&
++                g_buttonBackgrounds.count(entrada) && g_construyendo.size() < 128;
+             g_rotulo.cx = cx;
+             g_rotulo.cy = cy;
+             g_rotulo.radio = radio;
+@@ -587,7 +601,11 @@
+         // Rotation/shake diagrams encode direction as well as a stick. Keep that information visible.
+         if (!esBoton || (b == BStickIzq && v == VGriego))
+         {
+-            g_dibujarForma(rdram, ctx, runtime);
++            if (!(esBoton && b == BStickIzq && v == VGriego) &&
++                g_replacementsReady.load(std::memory_order_relaxed) &&
++                g_buttonBackgrounds.count(entrada) && g_construyendo.size() < 128)
++                ctx->pc = GPR_U32(ctx,31);
++            else g_dibujarForma(rdram, ctx, runtime);
+             return;
+         }
+ 
+@@ -602,7 +620,9 @@
+                              i.x, i.y, i.escala * 0.5f, entrada, i.a);
+         }
+         anotar(i);
+-        g_dibujarForma(rdram, ctx, runtime);
++        if (g_replacementsReady.load(std::memory_order_relaxed) && g_construyendo.size() < 128)
++            ctx->pc = GPR_U32(ctx,31);
++        else g_dibujarForma(rdram, ctx, runtime);
+     }
+ 
+     enum Estilo
+@@ -989,15 +1009,23 @@
+         iconos = g_publicados;
+     }
+     const Estilo e = estiloActual();
+-    if (e == EOriginal || iconos.empty())
++    if (e == EOriginal) {
++        g_replacementsReady.store(false, std::memory_order_relaxed);
+         return;
++    }
++    if (iconos.empty()) return;
+     static const float ajuste = [] {
+         const char *v = std::getenv("GOW_ICONOS_TAMANO");
+         return v ? std::strtof(v, nullptr) : 1.0f;
+     }();
++    bool allReady = true;
+     for (const Icono &i : iconos)
+     {
+         const Textura &t = textura(e, i.boton, i.variante);
++        if (!t.rt.id || !t.rt.texture.id) {
++            allReady = false;
++            continue;
++        }
+ 
+         const float r = i.escala * 0.5f * ajuste;
+         const float alto = 2.0f * r / 480.0f * dh, ancho = alto * t.aspecto;
+@@ -1008,6 +1036,7 @@
+                           static_cast<unsigned char>(255.0f * i.b), static_cast<unsigned char>(255.0f * i.a)};
+         DrawTexturePro(t.rt.texture, origen, Rectangle{cx - ancho * 0.5f, cy - alto * 0.5f, ancho, alto}, Vector2{0.0f, 0.0f}, 0.0f, tinte);
+     }
++    g_replacementsReady.store(allReady, std::memory_order_relaxed);
+ }
+ 
+ void gowIconosInstalar(PS2Runtime &runtime, const std::string &elfPath)

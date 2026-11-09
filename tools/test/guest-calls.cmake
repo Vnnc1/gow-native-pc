@@ -92,6 +92,12 @@ target_include_directories(gow_qte_input_test PRIVATE "${CMAKE_SOURCE_DIR}/ps2xR
 foreach(mode IN ITEMS off shake rotate smoke)
     add_test(NAME gow_qte_input_${mode} COMMAND gow_qte_input_test ${mode})
 endforeach()
+FetchContent_GetProperties(raylib SOURCE_DIR GOW_PROMPT_RAYLIB_SOURCE)
+add_test(NAME gow_control_prompts COMMAND "${Python3_EXECUTABLE}" -I
+    "${CMAKE_CURRENT_LIST_DIR}/control-prompts.py"
+    --runtime "${CMAKE_SOURCE_DIR}/ps2xRuntime" --compiler "${CMAKE_CXX_COMPILER}"
+    --raylib "${GOW_PROMPT_RAYLIB_SOURCE}/src" --output "${CMAKE_CURRENT_BINARY_DIR}/control-prompts")
+set_tests_properties(gow_control_prompts PROPERTIES TIMEOUT 180)
 
 # PR 26 integration: production cache policy, shader ownership and software fallback.
 foreach(pair IN ITEMS "texture_budget|gs-texture-budget" "shader_program|gs-shader-program" "software_reference|gs-software-reference")
