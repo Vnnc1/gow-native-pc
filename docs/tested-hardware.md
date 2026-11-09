@@ -1,5 +1,20 @@
 # Tested hardware and results
 
+## Collector final-state recovery (2026-11-09, Windows / Xeon / RX 580)
+
+Qt 6.8.3 / LLVM 20261020. Controlled atomic-replacement denial reproduced stale
+`running` metadata against the old collector. Bounded final-write retries and
+validated exit-event recovery passed all 14 collector tests (including 12 recovery
+cases). A copy of the historical stale report exported as `completed`/0 with an
+explicit incomplete-metadata warning; its original metadata was unchanged.
+Normal launcher/diagnostic frontend builds, packaged UI recovery, a real-game
+collector smoke and final setup payload verification (1,413 files) passed.
+Game metadata, summary and ZIP agreed on `completed`/0, with no forced exit;
+the original card and previous diagnostic game selection were preserved.
+This is reporting correctness, not a performance gain. Permanent write failure
+still leaves the original file stale; readers recover only when a valid exit
+event exists. See [reproduction, hashes and limits](research/collector-final-state-2026-11-09.md).
+
 ## Minimized-window close / issue 31 follow-up (2026-11-09, Xeon / RX 580)
 
 Same isolated Release/JIT-only/interpreter-IOP configuration as the acquisition

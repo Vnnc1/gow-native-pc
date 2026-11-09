@@ -126,13 +126,15 @@ public:
         append(events, QJsonDocument(entry).toJson(QJsonDocument::Compact) + '\n', 1024 * 1024);
         events.flush();
     }
-    void persist()
+    bool persist()
     {
         meta["last_heartbeat_utc"] = utc(); meta["elapsed_ms"] = clock.elapsed();
         meta["warning_candidate_lines"] = static_cast<qint64>(warningLines);
         meta["log_rotations"] = static_cast<qint64>(rotations);
         meta["write_failure"] = writeFailure;
-        if (!saveJson(dir + "/session.json", meta)) writeFailure = true;
+        if (saveJson(dir + "/session.json", meta)) return true;
+        writeFailure = true;
+        return false;
     }
     void line(const QByteArray &bytes)
     {
@@ -283,7 +285,14 @@ public:
         meta["state"] = state.isEmpty() ? (status == QProcess::CrashExit ? "crashed" : code == 0 ? "completed" : "nonzero_exit") : state;
         meta["exit_code"] = code; meta["exit_code_hex"] = QString::number(quint32(code), 16);
         meta["stop_requested"] = stopping; meta["ended_utc"] = utc();
-        event({{"type", "process_exit"}, {"code", code}, {"state", meta["state"]}}); persist();
+        event({{"type", "process_exit"}, {"code", code}, {"state", meta["state"]}});
+        // Windows readers can briefly deny QSaveFile's atomic replacement. Never truncate the old evidence.
+        bool saved = persist();
+        for (int attempt = 0; !saved && attempt < 20; ++attempt) {
+            QThread::msleep(50);
+            saved = persist();
+        }
+        if (!saved) event({{"type", "metadata_persist_failed"}});
         SessionDiagnostics::writeSummary(dir);
         result = status == QProcess::NormalExit && code == 0 && state.isEmpty() ? 0 : 1;
         QCoreApplication::exit(result);
@@ -346,7 +355,8 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
 {
     const auto fail = [&](const QString &message) { if (error) *error = message; return QString(); };
     if (!validSession(session)) return fail("No recorded session is available.");
-    if (!writeSummary(session)) return fail("Cannot create diagnostic summary.");
+    const auto snapshot = sessionMetadata(session);
+    if (!writeSummary(session, snapshot)) return fail("Cannot create diagnostic summary.");
     const QString out = QFileInfo(session).absolutePath() + "/report-" + QFileInfo(session).fileName() + '-' + QUuid::createUuid().toString(QUuid::Id128).left(8) + ".zip";
     QSaveFile zip(out);
     if (!zip.open(QIODevice::WriteOnly)) return fail(zip.errorString());
@@ -367,7 +377,8 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
         QFile file(session + '/' + name);
         if (!file.exists()) continue;
         if (QFileInfo(file).isSymLink() || !file.open(QIODevice::ReadOnly) || file.size() > logLimit) return fail("Invalid or oversized report file: " + name);
-        if (!entry(name.toUtf8(), file.read(logLimit))) return fail(zip.errorString());
+        const auto data = name == "session.json" ? QJsonDocument(snapshot).toJson() : file.read(logLimit);
+        if (!entry(name.toUtf8(), data)) return fail(zip.errorString());
     }
     const QByteArray readme = "Local diagnostic snapshot. No automatic upload. Review before sharing: redaction is best effort.\n"
         "Attach this ZIP to a project bug report with the area/save point, steps, expected/observed behavior and approximate marker time.\n"
@@ -375,6 +386,7 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
         "Runtime metrics are five-second windows; guest frame intervals are not display presentation latency.\n"
         "CPU percent uses one core = 100%; silence alone is not a hang. Warning candidates are not confirmed errors.\n"
         "A running state is a live snapshot or an interrupted monitor; check last_heartbeat_utc. Missing counters mean unavailable, not zero.\n"
+        "final_metadata_incomplete means the exported final state was recovered from a recorded exit event; original local metadata is preserved.\n"
         "Rotated logs retain the newest 12 MiB plus startup; capped metrics/events can be truncated (see session.json).\n";
     if (!entry("README.txt", readme)) return fail(zip.errorString());
     const quint32 start = quint32(zip.pos());

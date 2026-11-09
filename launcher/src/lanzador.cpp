@@ -1,6 +1,7 @@
 #include "lanzador.h"
 #include "regional_installations.h"
 #include "session_diagnostics.h"
+#include "session_summary.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -695,12 +696,9 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
 
 void Lanzador::terminado(int codigo, QProcess::ExitStatus estado)
 {
-    QFile report(m_session + "/session.json");
-    if (report.open(QIODevice::ReadOnly)) {
-        const auto metadata = QJsonDocument::fromJson(report.readAll()).object();
-        if (metadata.contains("exit_code")) codigo = metadata.value("exit_code").toInt();
-        if (metadata.value("state").toString() == "crashed") estado = QProcess::CrashExit;
-    }
+    const auto metadata = SessionDiagnostics::sessionMetadata(m_session);
+    if (metadata.contains("exit_code")) codigo = metadata.value("exit_code").toInt();
+    if (metadata.value("state").toString() == "crashed") estado = QProcess::CrashExit;
     const int segundos = static_cast<int>(m_reloj.elapsed() / 1000);
     const bool fallo = estado == QProcess::CrashExit || codigo != 0;
     QString resumen;

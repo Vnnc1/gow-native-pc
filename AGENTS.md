@@ -152,6 +152,14 @@ laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integrat
 
 ## Player diagnostic reports
 
+Collector final metadata uses bounded atomic-write retries after child exit.
+`SessionDiagnostics::sessionMetadata` reconciles incomplete active metadata only
+with a valid latest-process exit event; never infer completion from silence or a
+stale heartbeat. Summary, exit handling, diagnostic UI and export share this
+reader. Recovery is flagged `final_metadata_incomplete` and preserves original
+files; raw incomplete metadata remains excluded from retention pruning. See
+`docs/research/collector-final-state-2026-11-09.md` and `session_diagnostics.py`.
+
 Patch `zzz-307` emits host-owned shared-acquisition counters as `[gow-present]`
 under existing performance diagnostics. Publication sequences are not unique
 game frames or scanout; hold age is not GPU time or input latency. Preserve

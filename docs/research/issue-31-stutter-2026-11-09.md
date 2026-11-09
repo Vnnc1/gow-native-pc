@@ -208,6 +208,9 @@ This is separate from the host hang: the exit event and collector completion
 establish that the game exited. Final metadata persistence remains a diagnostic
 collector limitation; its cause was not established in this window-lifecycle
 change. The original inconsistent files are retained, not repaired or hidden.
+The subsequent [collector persistence investigation](collector-final-state-2026-11-09.md)
+reproduced atomic-replacement denial and added bounded retries plus explicitly
+flagged exit-event recovery; it also validated export of this historical report.
 
 The repeated visible control (`window-fix-visible-2`) passed with consistent
 final metadata, code 0 and 206 ms from stop event to exit. Final accepted matrix:

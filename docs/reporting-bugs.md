@@ -24,6 +24,13 @@ in `metrics.jsonl` and records `GOW_GS_HW_STATS` when explicitly set.
 
 ## Contents and interpretation
 
+Final metadata writes are retried briefly if atomic replacement fails. If the
+local `session.json` still contains an active state but a valid exit event was
+recorded, the launcher, summary and ZIP export recover that outcome and mark
+`final_metadata_incomplete`. The export includes reconciled metadata; original
+local files remain untouched. This warning does not imply a game crash. Without
+valid exit evidence the state is not inferred from silence or an old heartbeat.
+
 | Evidence | Meaning |
 |---|---|
 | `session.json` | Session ID, UTC times/status, actual executable and ELF hashes, OS/CPU/RAM, display adapters/drivers, settings, source patch hashes and selected build options |
