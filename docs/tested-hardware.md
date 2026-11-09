@@ -2,6 +2,19 @@
 
 ## Device-aware Flash prompts (2026-11-09, Windows / Xeon / RX 580)
 
+Patch `zzz-313` adds worn Xbox artwork, 48-pixel texture baking and projected
+world-badge rotation. Release build, mapping/projection tests (16.67 s) and a
+hidden OpenGL artwork preview passed. This preview uses synthetic transforms;
+real combat rotation and physical device acceptance remain manual. See the
+[visual follow-up](research/world-control-prompts-2026-11-09.md#xbox-visual-follow-up--zzz-313).
+
+Patch `zzz-312` adds projected mapped labels for the enemy circle. The Release
+build, production render-hook tests and classic/modern/custom mapping suite pass.
+A synthetic in-game capture shows K replacing orange circles; the Xbox visual
+trial was interrupted by Esc and is not accepted. The final binary was rebuilt
+without test injection; real QTEs, physical devices and depth occlusion remain
+manual gates. See [world-circle evidence](research/world-control-prompts-2026-11-09.md).
+
 Follow-up `zzz-311` removes original Flash button drawings behind replacements.
 Release build and production interception tests passed for faces, shoulders,
 labels, plates and fallback cases. Host captures at the altar and remapped Moves
@@ -14,7 +27,8 @@ QTE input modes passed, along with 17 pipeline tests and the Linux pipeline suit
 DS4 and DualSense symbols in the title; the loaded-save pause/tutorial window
 shows the remapped K and Ctrl/E labels. Controller families were simulated for
 those captures; physical detection and combat QTE acceptance remain unverified.
-The world-space enemy circle remains original. No FPS or other-hardware claim.
+The original `zzz-310` did not replace the world circle (now handled by `zzz-312`).
+No FPS or other-hardware claim.
 See [implementation and evidence](research/control-prompts-2026-11-09.md).
 
 ## Automatic altar-save history (2026-11-09, Windows / Xeon / RX 580)

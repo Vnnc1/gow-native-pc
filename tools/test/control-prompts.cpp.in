@@ -56,9 +56,15 @@ int main(int argc,char **argv) {
     anotar(icon); anotar(icon); assert(g_construyendo.size()==1);
     gowIconosFrame(); assert(g_publicados.size()==1 && g_construyendo.empty());
     gowIconosFrame(); assert(g_publicados.empty());
+    icon.worldSpace=true;anotar(icon);icon.worldSpace=false;anotar(icon);
+    assert(g_construyendo.size()==2); // World and Flash prompts at the same position are distinct.
+    gowIconosFrame();assert(g_publicados.size()==2);
+    gowIconosFrame();assert(g_publicados.empty());
     for(int i=0;i<300;++i) { icon.x=10.0f*i; anotar(icon); }
     assert(g_construyendo.size()==128); gowIconosFrame(); gowIconosFrame();
     bool custom=argc>1 && std::strcmp(argv[1],"custom")==0;
+    bool classic=argc>1 && std::strcmp(argv[1],"classic")==0;
+    if(classic) env("TOBIICHI_DMC5_CONTROLS","0");
     if(custom) {
         env("TOBIICHI_TECLAS","cross=75,1000;circle=1001;square=1003;triangle=71;l1=341;li_arriba=87;li_der=68;hades=52;furia=86");
         env("TOBIICHI_MANDO","cross=5;circle=7;square=6;triangle=8;l1=12;start=15;select=13;furia=16");
@@ -89,11 +95,15 @@ int main(int argc,char **argv) {
     }
     connected[3]=false; gowPromptPoll(); assert(gowPromptGamepad()==-1);
     gow_prompt::preferMouse.store(false);
-    assert(rotulo(ETeclado,BCruz)==(custom?"K":"#ESP"));
-    assert(rotulo(ETeclado,BCirculo)==(custom?"#RAT1":"F"));
+    assert(rotulo(ETeclado,BCruz)==(custom?"K":classic?"X":"#ESP"));
+    assert(rotulo(ETeclado,BCirculo)==(custom?"#RAT1":classic?"C":"F"));
     assert(rotulo(EXbox,BCruz)==(custom?"Y":"A"));
+    assert(rotulo(EXbox,BCirculo)==(custom?"A":classic?"B":"X"));
+    assert(rotulo(EXbox,BTriangulo)==(custom?"X":classic?"Y":"B"));
+    assert(rotulo(EPS4,BCirculo)==(custom?"#CROSS":classic?"#CIRCLE":"#SQUARE"));
+    assert(rotulo(EDualSense,BCirculo)==(custom?"#CROSS":classic?"#CIRCLE":"#SQUARE"));
     assert(rotulo(EPS4,BCruz)==(custom?"#TRIANGLE":"#CROSS"));
-    assert(rotulo(EDualSense,BCuadrado)==(custom?"#CIRCLE":"#TRIANGLE"));
+    assert(rotulo(EDualSense,BCuadrado)==(custom?"#CIRCLE":classic?"#SQUARE":"#TRIANGLE"));
     assert(rotulo(EPS4,BSelect)=="SHARE");
     assert(rotulo(EDualSense,BSelect)=="CREATE");
     if(custom) {

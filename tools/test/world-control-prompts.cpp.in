@@ -1,0 +1,83 @@
+// Production world-circle recognition, projection and submission interception.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <vector>
+constexpr uint32_t PS2_RAM_SIZE=0x2000000;
+struct R5900Context { uint32_t pc=0,regs[32]{}; };
+struct PS2Runtime { using RecompiledFunction=void(*)(uint8_t*,R5900Context*,PS2Runtime*); };
+#define GPR_U32(c,n) ((c)->regs[n])
+enum Boton { BCirculo };
+enum Variante { VNormal };
+@ICON@
+std::vector<Icono> g_construyendo;
+bool g_activo=true;
+std::atomic<bool> g_replacementsReady{false};
+@FUNCTIONS@
+int originals=0;
+void original(uint8_t*,R5900Context*c,PS2Runtime*) { ++originals;c->pc=c->regs[31]; }
+int main() {
+    std::vector<uint8_t> ram(PS2_RAM_SIZE);
+    constexpr uint32_t node=0x110000,model=0x120000,resource=0x130000,
+        mesh=0x140000,world=0x150000,camera=0x160000;
+    auto u=[&](uint32_t p,uint32_t v){std::memcpy(ram.data()+p,&v,4);};
+    auto f=[&](uint32_t p,float v){std::memcpy(ram.data()+p,&v,4);};
+    u(node,15);u(node+0x18,model);u(model,1);u(model+0x1c,resource);
+    std::memcpy(ram.data()+resource+12,"gominigamecircle",16);
+    u(node+0xe0,1);u(mesh+0x20,0x10);u(mesh+8,2);
+    constexpr uint32_t bounds=mesh+0x58;
+    f(bounds+4,2);u(0x35fa98,camera);
+    for(int i=0;i<4;++i)f(world+20*i,1);
+    f(world+56,10);f(camera+0x40,1);f(camera+0x54,-1);
+    f(camera+0x68,1);f(camera+0x6c,1);
+    Icono icon{};
+    auto project=[&]{return worldCircleIcon(ram.data(),node,mesh,world,0,icon);};
+    assert(project() && icon.worldSpace && icon.boton==BCirculo);
+    assert(icon.x==320 && icon.y==240 && icon.escala==48);
+    const auto front=icon.worldCorners;
+    assert(front[0]<front[4] && front[1]<front[3]);
+    f(world,0.5f);f(world+32,0.8660254f);f(world+8,-0.8660254f);f(world+40,0.5f);
+    assert(project());
+    assert(icon.worldCorners[4]-icon.worldCorners[0] < front[4]-front[0]);
+    assert(icon.worldCorners[1]!=icon.worldCorners[7]); // Perspective changes opposite corner depths.
+    const auto turn=icon.worldCorners;assert(project() && turn==icon.worldCorners); // No host-clock spin.
+    f(world,1);f(world+32,0);f(world+8,0);f(world+40,1);
+    f(world+48,5);f(world+52,2);assert(project() && icon.x==480 && icon.y==192);
+    f(world+48,20);assert(!project());f(world+48,0);f(world+52,0);
+    f(world+56,-10);assert(!project());f(world+56,10);
+    f(world,std::numeric_limits<float>::quiet_NaN());assert(!project());f(world,1);
+    f(bounds+4,0);assert(!project());f(bounds+4,2);
+    ram[resource+12]='x';assert(!project());ram[resource+12]='g';
+    u(model+0x1c,0xfffffff0);assert(!project());u(model+0x1c,resource);
+    u(node,3);assert(!project());u(node,15);
+    u(mesh+8,0xffffffff);assert(!project());u(mesh+8,2);
+    u(node+0xe0,65);assert(!project());u(node+0xe0,1);
+    assert(!worldCircleIcon(ram.data(),node,mesh,world,1,icon));
+    u(mesh+0x20,0);f(node+0x128,2);assert(project());u(mesh+0x20,0x10);
+    R5900Context ctx;ctx.regs[5]=node;ctx.regs[6]=mesh;ctx.regs[7]=world+64;
+    ctx.regs[29]=world;
+    ctx.regs[31]=0x157ef0;
+    auto draw=[&](uint32_t pc=0x158020,uint32_t entry=0x158020) {
+        originals=0;ctx.pc=pc;drawWorldCircle(ram.data(),&ctx,nullptr,entry,original);
+        assert(ctx.pc==ctx.regs[31]);
+    };
+    const auto before=ram;
+    draw();assert(originals==1 && g_construyendo.size()==1); // First-frame fallback still queues replacement.
+    g_replacementsReady=true;draw();assert(originals==0 && g_construyendo.size()==1);
+    ctx.regs[31]=0x157f0c;draw(0x158b40,0x158b40);assert(originals==0);
+    ctx.regs[31]=0x157fd0;draw(0x158b40,0x158b40);assert(originals==0);
+    ctx.regs[31]=0x123456;draw();assert(originals==1); // Same renderer, unrelated caller.
+    ctx.regs[31]=0x157ef0;draw(0x158024);assert(originals==1); // Resume delegates unchanged.
+    ctx.regs[29]=world+16;draw();assert(originals==1);ctx.regs[29]=world;
+    g_construyendo.resize(128);draw();assert(originals==1);g_construyendo.clear();
+    g_activo=false;draw();assert(originals==1);g_activo=true;
+    ctx.regs[7]=32;draw();assert(originals==1);
+    assert(ram==before); // Rendering must not alter game state, health, models or cards.
+    std::puts("PASS: world circle identity, projection, callers, bounds, readiness, capacity and guest-state preservation");
+}

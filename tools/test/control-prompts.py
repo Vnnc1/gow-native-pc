@@ -22,7 +22,7 @@ a.output.mkdir(parents=True,exist_ok=True)
 cpp=a.output/'control-prompts.cpp'
 cpp.write_text(Path(__file__).with_name('control-prompts.cpp.in').read_text(encoding='utf-8').replace('@LABELS@',labels),encoding='utf-8')
 env=os.environ.copy(); env['PATH']=str(a.compiler.resolve().parent)+os.pathsep+env.get('PATH','')
-for source,modes in ((cpp,['default','custom']),(Path(__file__).with_name('qte_input_test.cpp'),['off','shake','rotate','smoke'])):
+for source,modes in ((cpp,['default','classic','custom']),(Path(__file__).with_name('qte_input_test.cpp'),['off','shake','rotate','smoke'])):
     exe=a.output/(source.stem+'.exe')
     subprocess.run([str(a.compiler.resolve()),'-std=c++20','-O2','-static',
                     '-I'+str(a.runtime.resolve()/'include'),'-I'+str(a.raylib.resolve()),
@@ -32,4 +32,14 @@ visibility=a.output/'control-prompt-visibility.cpp'
 visibility.write_text(Path(__file__).with_name('control-prompt-visibility.cpp.in').read_text(encoding='utf-8').replace('@DRAW@',m.extract(s,'void dibujarForma(')),encoding='utf-8')
 exe=a.output/'control-prompt-visibility.exe'
 subprocess.run([str(a.compiler.resolve()),'-std=c++20','-O2','-static',str(visibility),'-o',str(exe)],check=True,env=env,timeout=120)
+subprocess.run([str(exe.resolve())],check=True,env=env,timeout=30)
+world=a.output/'world-control-prompts.cpp'
+functions='\n'.join(m.extract(s,name) for name in (
+    'uint32_t leer32(', 'float leerF(', 'bool valida(', 'void anotar(',
+    'bool worldCircleIcon(', 'void drawWorldCircle('))
+icon=s[s.index('    struct Icono'):s.index('    std::mutex g_mutex')]
+world.write_text(Path(__file__).with_name('world-control-prompts.cpp.in').read_text(encoding='utf-8')
+                 .replace('@ICON@',icon).replace('@FUNCTIONS@',functions),encoding='utf-8')
+exe=a.output/'world-control-prompts.exe'
+subprocess.run([str(a.compiler.resolve()),'-std=c++20','-O2','-static',str(world),'-o',str(exe)],check=True,env=env,timeout=120)
 subprocess.run([str(exe.resolve())],check=True,env=env,timeout=30)

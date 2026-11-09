@@ -75,7 +75,8 @@ index write is the completion gate. See [implementation, tests and limitations](
 
 Device-dependent USA Flash button prompts are implemented in `zzz-310`; see
 [validation and remaining acceptance](control-prompts-2026-11-09.md). Physical
-controller checks, combat QTE acceptance and non-Flash world prompts remain open.
+controller checks and combat QTE acceptance remain open. Patch `zzz-312` adds
+the world-space enemy-circle replacement; see its [validation and limitations](world-control-prompts-2026-11-09.md).
 Follow-up `zzz-311` removes the original PS2 button art behind recognized mapped
 prompts; private-card altar and remapped Moves captures validate that correction.
 The in-game settings/cheat changes remain an authorized next step.

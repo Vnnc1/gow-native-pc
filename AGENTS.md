@@ -173,8 +173,21 @@ clear learned plates when movie discovery resets. Preserve rotation/shake diagra
 `gow_control_prompts` in verify covers input, labels and bounded publication;
 `control-prompts-smoke.py` captures the final host overlay with a private card.
 Forced styles require `GOW_PAD_TEST=1` and are not hardware detection evidence.
-Physical Sony pads, real combat QTEs and the textured world-space circle remain
-acceptance gaps. See `docs/research/control-prompts-2026-11-09.md`.
+Patch `zzz-312` replaces the USA `goMiniGameCircle` submissions at `0x158020` /
+`0x158B40` only for the verified `0x157A60` callers, stack matrix layout and exact
+resource identity. Preserve the original path on invalid data/readiness/capacity;
+never alter creature/QTE state to replace the visual. World coordinates must not
+receive Flash's additional aspect stretch. `gow_control_prompts` also tests these
+production hooks. Physical Sony pads, real combat QTEs and guest-depth occlusion
+remain acceptance gaps. See `docs/research/world-control-prompts-2026-11-09.md`
+and `docs/research/control-prompts-2026-11-09.md`.
+
+Patch `zzz-313` bakes prompt textures to 48 pixels high and themes Xbox badges.
+Xbox world badges project the animated model plane, with readable back faces;
+never add a host-clock spin that continues through guest pause. They still lack
+shared guest depth. `gow_control_prompts` covers projected corners and stable
+samples; `tools/test/control-prompts-render.py` is an explicit hidden GPU artwork
+preview, not a combat test or part of data-free verify.
 
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes

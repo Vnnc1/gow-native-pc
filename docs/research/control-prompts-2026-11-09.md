@@ -158,15 +158,16 @@ patches, without `GOW_PAD_TEST` or `GOW_PROMPT_TEST_STYLE`:
 4. Check rotation/shake arrows, pause/tutorial instructions and return to combat
    for stale icons. Record the disc, enemy/location and a screenshot for failures.
 
-The enemy's textured 3D circle remains an implementation gap, not an accepted
-part of this checklist. Manual tests cannot turn that missing change into a pass.
+The follow-up `zzz-312` implements the enemy-circle replacement; see its
+[implementation, synthetic visual evidence and manual gates](world-control-prompts-2026-11-09.md).
 
 ## Remaining acceptance and scope
 
 - A real combat QTE sequence has not been completed with this runner. Synthetic
   symbol/label checks are not end-to-end combat validation.
-- The textured 3D circle above enemies (`goMiniGameCircle`) is outside Flash and
-  remains original. Rotation/shake diagrams retain their original artwork to
+- The textured 3D circle above enemies (`goMiniGameCircle`) is outside Flash;
+  `zzz-312` now replaces its render submissions with a projected host icon, with
+  real combat acceptance and depth occlusion still open. Rotation/shake diagrams retain their original artwork to
   preserve the required direction; a generic LS/WASD label must not cover it.
 - Controller identity comes from the host driver's reported name. A Sony device
   exposed by Steam Input/DS4Windows as an Xbox virtual pad appears as Xbox.
