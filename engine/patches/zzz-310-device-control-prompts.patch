@@ -1,0 +1,1418 @@
+Restore device-aware USA Flash prompts, following actual input and configured mappings.
+
+Reuses Tobiichi-Port's GPL-3.0 Flash recognizer removed in a25331d. Adds
+last-active input routing, remapped Sony labels, bounded guest-frame batches,
+and fail-open guest drawing. No performance claim; see the research report.
+
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -413,6 +413,7 @@
+     src/lib/gow_video.cpp
+     src/lib/gow_fijar.cpp
+     src/lib/gow_cancelar.cpp
++    src/lib/gow_iconos.cpp
+     src/lib/gow_sondeo.cpp
+     src/lib/gow_espera.cpp
+     src/lib/ps2_audio_device.cpp # GOW-Port: sound output on a chosen device
+@@ -559,6 +560,19 @@
+     target_compile_options(ps2EntryRunner PRIVATE /FS)
+ endif()
+ 
++set(GOW_FUENTE_ICONOS "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/fuentes/Cinzel.ttf")
++set(GOW_FUENTE_ICONOS_CPP "${CMAKE_CURRENT_BINARY_DIR}/gow_fuente_iconos.cpp")
++if(EXISTS "${GOW_FUENTE_ICONOS}")
++    file(READ "${GOW_FUENTE_ICONOS}" GOW_FUENTE_HEX HEX)
++    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," GOW_FUENTE_BYTES "${GOW_FUENTE_HEX}")
++    set(GOW_FUENTE_CONTENIDO "#include <cstddef>\nextern const unsigned char gowFuenteIconos[] = {${GOW_FUENTE_BYTES}};\nextern const std::size_t gowFuenteIconosTam = sizeof(gowFuenteIconos);\n")
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${GOW_FUENTE_ICONOS}")
++else()
++    set(GOW_FUENTE_CONTENIDO "#include <cstddef>\nextern const unsigned char gowFuenteIconos[] = {0};\nextern const std::size_t gowFuenteIconosTam = 0;\n")
++endif()
++file(CONFIGURE OUTPUT "${GOW_FUENTE_ICONOS_CPP}" CONTENT "${GOW_FUENTE_CONTENIDO}" @ONLY)
++target_sources(ps2_runtime PRIVATE "${GOW_FUENTE_ICONOS_CPP}")
++
+ target_include_directories(ps2_runtime PUBLIC
+     ${CMAKE_CURRENT_SOURCE_DIR}/include
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_prompt_input.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_prompt_input.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_prompt_input.h
+@@ -0,0 +1,60 @@
++#pragma once
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cctype>
++#include <cmath>
++#include <string>
++
++// Values match the renderer's styles: keyboard, Xbox, DualShock 4, DualSense.
++inline int gowPromptFamily(const char *name) {
++    std::string s = name ? name : "";
++    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
++    if (s.find("xbox") != std::string::npos || s.find("xinput") != std::string::npos) return 2;
++    if (s.find("dualsense") != std::string::npos || s.find("ps5") != std::string::npos) return 4;
++    for (const char *part : {"dualshock", "ps4", "sony", "playstation", "wireless controller"})
++        if (s.find(part) != std::string::npos) return 3;
++    return 2;
++}
++
++namespace gow_prompt {
++struct Input {
++    bool focused = true;
++    std::array<bool, 520> keys{};
++    std::array<bool, 4> connected{};
++    std::array<std::array<bool, 18>, 4> buttons{};
++    std::array<std::array<float, 4>, 4> sticks{};
++};
++class Tracker {
++    Input previous{};
++    bool used = false;
++public:
++    int slot = -1;
++    bool mouse = false;
++    void update(const Input &now) {
++        if (slot >= 0 && !now.connected[slot]) slot = -1;
++        if (!used && slot < 0)
++            for (int p=0; p<4; ++p) if (now.connected[p]) { slot=p; break; }
++        if (now.focused && previous.focused) {
++            for (int p=0; p<4; ++p) {
++                if (!now.connected[p]) continue;
++                bool edge = false;
++                for (int b=1; b<18; ++b) edge |= now.buttons[p][b] && !previous.buttons[p][b];
++                for (int a=0; a<4; ++a) {
++                    edge |= now.sticks[p][a] > .35f && previous.sticks[p][a] <= .35f;
++                    edge |= now.sticks[p][a] < -.35f && previous.sticks[p][a] >= -.35f;
++                }
++                if (edge) { slot=p; used=true; }
++            }
++            // Keyboard wins a simultaneous poll; held buttons and drift cannot steal focus back.
++            for (size_t k=0; k<now.keys.size(); ++k)
++                if (now.keys[k] && !previous.keys[k]) { slot=-1; mouse=k>=512; used=true; break; }
++        }
++        previous=now;
++    }
++};
++inline std::atomic<int> activeSlot{-2};
++inline std::atomic<bool> preferMouse{false};
++}
++int gowPromptGamepad();
++void gowPromptPoll();
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -0,0 +1,1025 @@
++// Flash prompt recognition adapted from Tobiichi-Port before a25331d (GPL-3.0).
++#include "ps2_runtime.h"
++#include "ps2_runtime_macros.h"
++#include "raylib.h"
++#include "runtime/gow_prompt_input.h"
++
++#include <algorithm>
++#include <atomic>
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <filesystem>
++#include <iostream>
++#include <map>
++#include <mutex>
++#include <set>
++#include <string>
++#include <vector>
++
++extern const unsigned char gowFuenteIconos[];
++extern const size_t gowFuenteIconosTam;
++int tobiichiCodigosAccion(const char *accion, int *codigos, int max);
++int tobiichiBotonMandoAccion(const char *accion);
++extern "C" const char *glfwGetKeyName(int key, int scancode);
++
++namespace
++{
++    constexpr uint32_t kDibujarForma = 0x00149FA0u;
++
++    PS2Runtime::RecompiledFunction g_dibujarForma = nullptr;
++    bool g_diag = false, g_activo = false;
++
++    const auto g_arranque = std::chrono::steady_clock::now();
++
++    double segundos() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_arranque).count(); }
++
++    uint32_t leer32(const uint8_t *rdram, uint32_t a)
++    {
++        uint32_t v = 0u;
++        std::memcpy(&v, rdram + (a & 0x1FFFFFFu), 4);
++        return v;
++    }
++
++    float leerF(const uint8_t *rdram, uint32_t a)
++    {
++        float v = 0.0f;
++        std::memcpy(&v, rdram + (a & 0x1FFFFFFu), 4);
++        return v;
++    }
++
++    bool valida(uint32_t a, uint32_t n) { return a >= 0x100000u && a <= PS2_RAM_SIZE && n <= PS2_RAM_SIZE - a; }
++
++    enum Boton : uint8_t
++    {
++        BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BL3, BR3, BStart, BSelect,
++        BArriba, BAbajo, BIzquierda, BDerecha, BCruceta, BStickIzq, NumBotones
++    };
++    constexpr const char *kAccion[NumBotones] = {"cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3",
++                                                 "start", "select", "up", "down", "left", "right", "up", "li_arriba"};
++    enum Variante : uint8_t
++    {
++        VNormal,
++        VGriego,
++    };
++    struct Simbolo
++    {
++        const char *nombre;
++        Boton boton;
++        Variante variante;
++    };
++
++    const Simbolo kSimbolos[] = {
++        {"XButton", BCruz, VNormal}, {"CircleButton", BCirculo, VNormal}, {"SquareButton", BCuadrado, VNormal},
++        {"TriangleButton", BTriangulo, VNormal}, {"L1Button", BL1, VNormal}, {"R1Button", BR1, VNormal},
++        {"L2Button", BL2, VNormal}, {"R2Button", BR2, VNormal}, {"L3", BL3, VNormal},
++        {"R3", BR3, VNormal}, {"StartButton", BStart, VNormal}, {"SelectButton", BSelect, VNormal},
++        {"Joystick", BStickIzq, VNormal}, {"UpButton", BArriba, VNormal}, {"DownButton", BAbajo, VNormal},
++        {"LeftButton", BIzquierda, VNormal}, {"RightButton", BDerecha, VNormal}, {"DpadButton", BCruceta, VNormal},
++        {"XButtonGreek", BCruz, VGriego}, {"CircleButtonGreek", BCirculo, VGriego},
++        {"SquareButtonGreek", BCuadrado, VGriego}, {"TriangleButtonGreek", BTriangulo, VGriego},
++        {"360CW", BStickIzq, VGriego}, {"360CCW", BStickIzq, VGriego}, {"Up180CW", BStickIzq, VGriego},
++        {"Up180CCW", BStickIzq, VGriego}, {"Down180CW", BStickIzq, VGriego}, {"Down180CCW", BStickIzq, VGriego},
++        {"WiggleBackForth", BStickIzq, VGriego}, {"WiggleStick", BStickIzq, VGriego}, {"R2ButtonPress", BR2, VGriego}};
++    constexpr int kNumSimbolos = int(sizeof(kSimbolos) / sizeof(kSimbolos[0]));
++
++    struct Pelicula
++    {
++        uint32_t cabecera = 0u, caracteres = 0u, numCaracteres = 0u, formas = 0u, numFormas = 0u, sprites = 0u,
++                 numSprites = 0u, cadenas = 0u, numCadenas = 0u;
++        std::map<uint32_t, std::pair<Boton, Variante>> formasBoton;
++
++        struct Fuente
++        {
++            uint32_t glifos = 0u, numGlifos = 0u;
++            std::vector<char> letra;
++        };
++        std::vector<Fuente> fuentes;
++    };
++    std::vector<Pelicula> g_peliculas;
++    std::set<uint32_t> g_formasDesconocidas;
++    std::chrono::steady_clock::time_point g_ultimoEscaneo{};
++
++    void formasDe(const uint8_t *rdram, const Pelicula &p, uint32_t c, std::set<uint32_t> &salida, std::set<uint32_t> &vistos, int prof)
++    {
++        if (c >= p.numCaracteres || prof > 8 || !vistos.insert(c).second)
++            return;
++        const uint32_t t = leer32(rdram, p.caracteres + 4u * c), tipo = t & 0xFFFFu, ix = t >> 16;
++        if (tipo == 1u && ix < p.numFormas)
++        {
++            salida.insert(p.formas + 8u * ix);
++            return;
++        }
++        if (tipo != 7u || ix >= p.numSprites)
++            return;
++        const uint32_t e = p.sprites + 24u * ix;
++        const uint32_t listas = leer32(rdram, e) >> 16, ptr = leer32(rdram, e + 16u);
++        for (uint32_t k = 0; k < std::min(listas, 512u) && valida(ptr + 8u * k, 8u); ++k)
++        {
++            const uint32_t n = leer32(rdram, ptr + 8u * k) >> 16, regs = leer32(rdram, ptr + 8u * k + 4u);
++            for (uint32_t r = 0; r < std::min(n, 256u) && valida(regs + 10u * r, 10u); ++r)
++            {
++                uint16_t hijo = 0;
++                std::memcpy(&hijo, rdram + regs + 10u * r + 2u, 2);
++                formasDe(rdram, p, hijo, salida, vistos, prof + 1);
++            }
++        }
++    }
++
++    void resetMeshBounds();
++    void escanearPeliculas(const uint8_t *rdram)
++    {
++        resetMeshBounds();
++        const auto inicio = std::chrono::steady_clock::now();
++        g_peliculas.clear();
++        for (uint32_t h = 0x100000u; h + 0x60u < PS2_RAM_SIZE; h += 4u)
++        {
++            if (leer32(rdram, h + 8u) != 0x25803200u || leer32(rdram, h + 4u) != 0x1E000004u || leer32(rdram, h) != 0x21u)
++                continue;
++            Pelicula p;
++            p.cabecera = h;
++            p.numCaracteres = leer32(rdram, h + 0x0Cu);
++            p.caracteres = leer32(rdram, h + 0x10u);
++            p.numFormas = leer32(rdram, h + 0x14u);
++            p.formas = leer32(rdram, h + 0x18u);
++            p.numSprites = leer32(rdram, h + 0x3Cu);
++            p.sprites = leer32(rdram, h + 0x40u);
++            p.numCadenas = leer32(rdram, h + 0x58u);
++            p.cadenas = leer32(rdram, h + 0x5Cu);
++            if (p.numCaracteres == 0u || p.numCaracteres > 8192u || p.numFormas > 8192u || p.numSprites > 8192u || !valida(p.caracteres, p.numCaracteres * 4u) ||
++                !valida(p.formas, p.numFormas * 8u) || !valida(p.sprites, p.numSprites * 24u) || !valida(p.cadenas, p.numCadenas))
++                continue;
++
++            std::map<uint32_t, std::vector<std::pair<size_t, int>>> candidatos;
++
++            struct Acierto
++            {
++                uint32_t direccion, caracter;
++                int simbolo;
++            };
++            std::vector<Acierto> aciertos;
++            const uint32_t numMatrices = leer32(rdram, h + 0x48u);
++            const uint32_t desde = std::min({p.caracteres, p.formas, p.sprites});
++            for (uint32_t a = desde; a + 10u <= p.cadenas; a += 2u)
++            {
++                uint16_t reg[5];
++                std::memcpy(reg, rdram + a, 10);
++                const uint32_t c = reg[0], nombre = reg[3];
++                if (c >= p.numCaracteres || reg[1] >= numMatrices || reg[4] >= 0x1000u || nombre >= p.numCadenas ||
++                    (nombre && rdram[p.cadenas + nombre - 1u] != 0))
++                    continue;
++                if ((leer32(rdram, p.caracteres + 4u * c) & 0xFFFFu) != 7u)
++                    continue;
++                const char *n = reinterpret_cast<const char *>(rdram + p.cadenas + nombre);
++                for (int s = 0; s < kNumSimbolos; ++s)
++                    if (std::strlen(kSimbolos[s].nombre) < p.numCadenas - nombre &&
++                        std::memcmp(n, kSimbolos[s].nombre, std::strlen(kSimbolos[s].nombre) + 1) == 0)
++                        aciertos.push_back({a, c, s});
++            }
++            std::set<std::pair<int, uint32_t>> hechos;
++            for (const Acierto &x : aciertos)
++            {
++                bool vecino = false;
++                for (const Acierto &y : aciertos)
++                    vecino |= y.simbolo != x.simbolo && (y.direccion > x.direccion ? y.direccion - x.direccion : x.direccion - y.direccion) < 64u;
++                if (!vecino || !hechos.insert({x.simbolo, x.caracter}).second)
++                    continue;
++                std::set<uint32_t> formas, vistos;
++                formasDe(rdram, p, x.caracter, formas, vistos, 0);
++                for (uint32_t f : formas)
++                    candidatos[f].push_back({formas.size(), x.simbolo});
++            }
++
++            for (auto &[f, lista] : candidatos)
++            {
++                std::sort(lista.begin(), lista.end());
++                bool unico = true;
++                for (const auto &[tam, s] : lista)
++                    if (tam == lista[0].first && (kSimbolos[s].boton != kSimbolos[lista[0].second].boton ||
++                                                  kSimbolos[s].variante != kSimbolos[lista[0].second].variante))
++                        unico = false;
++                if (unico)
++                    p.formasBoton[f] = {kSimbolos[lista[0].second].boton, kSimbolos[lista[0].second].variante};
++            }
++            const uint32_t numFuentes = leer32(rdram, h + 0x1Cu), fuentes = leer32(rdram, h + 0x20u);
++            for (uint32_t k = 0; k < std::min(numFuentes, 16u) && valida(fuentes + 40u * k, 40u); ++k)
++            {
++                const uint32_t e = fuentes + 40u * k;
++                Pelicula::Fuente fu;
++                fu.numGlifos = leer32(rdram, e) & 0xFFFFu;
++                fu.glifos = leer32(rdram, e + 0x14u);
++                const uint32_t mapa = leer32(rdram, e + 0x1Cu);
++                if (fu.numGlifos == 0u || fu.numGlifos > 512u || !valida(fu.glifos, 8u * fu.numGlifos) || !valida(mapa, 512u))
++                    continue;
++                fu.letra.assign(fu.numGlifos, 0);
++                for (uint32_t c = 32; c < 128; ++c)
++                {
++                    uint16_t g = 0;
++                    std::memcpy(&g, rdram + mapa + 2u * c, 2);
++                    if (g < fu.numGlifos)
++                        fu.letra[g] = char(std::toupper(int(c)));
++                }
++                p.fuentes.push_back(std::move(fu));
++            }
++            if (g_diag)
++                std::fprintf(stderr, "[gow-iconos] película %08X: %u caracteres, %u formas, %zu formas de botón\n", h,
++                             p.numCaracteres, p.numFormas, p.formasBoton.size());
++            g_peliculas.push_back(std::move(p));
++        }
++        if (g_diag)
++            std::fprintf(stderr, "[gow-iconos] búsqueda de películas: %zu en %.1f ms\n", g_peliculas.size(),
++                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - inicio).count());
++    }
++
++    bool botonDeForma(const uint8_t *rdram, uint32_t entrada, Boton &b, Variante &v)
++    {
++        static bool scanPending = false;
++        for (int intento = 0; intento < 2; ++intento)
++        {
++            for (const Pelicula &p : g_peliculas)
++                if (entrada >= p.formas && entrada < p.formas + 8u * p.numFormas)
++                {
++                    if (leer32(rdram, p.cabecera + 8u) != 0x25803200u ||
++                        leer32(rdram, p.cabecera + 0x18u) != p.formas ||
++                        leer32(rdram, p.cabecera + 0x14u) != p.numFormas)
++                        break;
++                    const auto it = p.formasBoton.find(entrada);
++                    if (it == p.formasBoton.end())
++                        return false;
++                    b = it->second.first;
++                    v = it->second.second;
++                    return true;
++                }
++            const auto ahora = std::chrono::steady_clock::now();
++            if (g_formasDesconocidas.size() >= 8192) g_formasDesconocidas.clear();
++            if (intento == 0 && g_formasDesconocidas.insert(entrada).second) scanPending = true;
++            if (intento == 0 && scanPending && ahora - g_ultimoEscaneo > std::chrono::seconds(2))
++            {
++                scanPending = false;
++                g_ultimoEscaneo = ahora;
++                escanearPeliculas(rdram);
++            }
++            else
++                break;
++        }
++        return false;
++    }
++
++    struct Forma
++    {
++        uint32_t malla = 0u, rellenos = 0u, color0 = 0u, color1 = 0u;
++    };
++
++    Forma leerForma(const uint8_t *rdram, uint32_t entrada)
++    {
++        Forma f;
++        if (!valida(entrada, 8u))
++            return f;
++        const uint32_t w = leer32(rdram, entrada), p = leer32(rdram, entrada + 4u);
++        f.malla = w & 0xFFFFu;
++        f.rellenos = w >> 16;
++        if (f.rellenos >= 1u && valida(p, 16u))
++        {
++            f.color0 = leer32(rdram, p);
++            f.color1 = f.rellenos >= 2u ? leer32(rdram, p + 8u) : 0u;
++        }
++        return f;
++    }
++
++    bool colorDeBoton(uint32_t color, Boton &b)
++    {
++        switch (color)
++        {
++        case 0xFF9999FFu: b = BCruz; return true;
++        case 0xFFCC6400u: case 0xFFCC4B00u: b = BCirculo; return true;
++        case 0xFFCC3C28u: case 0xFFFF6699u: b = BCuadrado; return true;
++        case 0xFF009955u: b = BTriangulo; return true;
++        default: return false;
++        }
++    }
++
++    struct Caja
++    {
++        bool valida = false;
++        float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
++    };
++    std::map<std::pair<uint32_t, uint32_t>, Caja> g_cajas;
++    void resetMeshBounds() { g_cajas.clear(); }
++
++    Caja cajaMalla(const uint8_t *rdram, uint32_t ctx, uint32_t malla)
++    {
++        const auto clave = std::make_pair(ctx, malla);
++        if (const auto it = g_cajas.find(clave); it != g_cajas.end())
++            return it->second;
++        Caja c;
++        const uint32_t p1 = valida(ctx + 0xCE4u, 4u) ? leer32(rdram, ctx + 0xCE4u) : 0u;
++        const uint32_t p2 = valida(p1 + 0xE4u, 4u) ? leer32(rdram, p1 + 0xE4u) : 0u;
++        const uint32_t base = valida(p2, 4u) ? leer32(rdram, p2) : 0u;
++        if (valida(base + 0x50u + 4u * malla, 4u))
++        {
++            const uint32_t m = base + leer32(rdram, base + 0x50u + 4u * malla);
++            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
++            for (uint32_t q = (m + 15u) & ~15u; q < m + 0x400u && valida(q, 16u); q += 16u)
++            {
++                const uint32_t etiqueta = leer32(rdram, q), id = (etiqueta >> 28) & 7u;
++                if (id == 6u || id == 7u)
++                    break;
++                if (id != 3u)
++                    continue;
++                const uint32_t qwc = etiqueta & 0xFFFFu, datos = leer32(rdram, q + 4u);
++                if (!valida(datos, qwc * 16u) || qwc > 4096u)
++                    continue;
++                for (uint32_t w = 0; w < qwc * 4u;)
++                {
++                    const uint32_t vif = leer32(rdram, datos + 4u * w);
++                    const uint32_t cmd = (vif >> 24) & 0x7Fu, num = (vif >> 16) & 0xFFu;
++                    ++w;
++                    if ((cmd & 0x60u) == 0x60u)
++                    {
++                        const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u;
++                        const uint32_t bytes = ((32u >> vl) * (vn + 1u) * (num ? num : 256u) + 31u) / 32u;
++                        if (cmd == 0x6Du)
++                            for (uint32_t k = 0; k < (num ? num : 256u) && w + 2u * k < qwc * 4u; ++k)
++                            {
++                                const uint32_t xy = leer32(rdram, datos + 4u * (w + 2u * k));
++                                const float x = float(int16_t(xy & 0xFFFFu)), y = float(int16_t(xy >> 16));
++                                x0 = std::min(x0, x);
++                                x1 = std::max(x1, x);
++                                y0 = std::min(y0, y);
++                                y1 = std::max(y1, y);
++                            }
++                        w += bytes;
++                    }
++                }
++            }
++            if (x1 >= x0 && y1 >= y0)
++                c = {true, x0, y0, x1, y1};
++        }
++        if (g_cajas.size() >= 4096) g_cajas.clear();
++        g_cajas[clave] = c;
++        return c;
++    }
++
++    struct Anterior
++    {
++        uint32_t entrada = 0u;
++        float tx = 0.0f, ty = 0.0f, m0 = 0.0f, m1 = 0.0f, m4 = 0.0f, m5 = 0.0f;
++        Caja caja;
++        bool fondoMenu = false, fondoGriego = false;
++    } g_anterior;
++
++    struct Rotulo
++    {
++        bool abierto = false;
++        Anterior fondo;
++        float cx = 0.0f, cy = 0.0f, radio = 0.0f;
++        std::vector<std::pair<float, char>> letras;
++        float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
++    } g_rotulo;
++
++    struct Especial
++    {
++        uint32_t numCaracteres, numFormas, indice;
++        Boton boton;
++        float dx, dy, radio;
++    };
++    constexpr Especial kEspeciales[] = {
++        {936u, 220u, 110u, BL1, 0.40f, 0.12f, 0.42f},
++        {936u, 220u, 109u, BR1, -0.33f, 0.12f, 0.42f},
++    };
++
++    const Especial *especial(uint32_t entrada)
++    {
++        for (const Pelicula &p : g_peliculas)
++            if (entrada >= p.formas && entrada < p.formas + 8u * p.numFormas)
++                for (const Especial &e : kEspeciales)
++                    if (p.numCaracteres == e.numCaracteres && p.numFormas == e.numFormas && entrada == p.formas + 8u * e.indice)
++                        return &e;
++        return nullptr;
++    }
++
++    char letraDeGlifo(uint32_t entrada)
++    {
++        for (const Pelicula &p : g_peliculas)
++            for (const Pelicula::Fuente &f : p.fuentes)
++                if (entrada >= f.glifos && entrada < f.glifos + 8u * f.numGlifos && (entrada - f.glifos) % 8u == 0u)
++                    return f.letra[(entrada - f.glifos) / 8u];
++        return 0;
++    }
++
++    bool rotuloDeBoton(const std::string &t, Boton &b)
++    {
++        static const std::pair<const char *, Boton> kRotulos[] = {
++            {"L1", BL1}, {"R1", BR1}, {"L2", BL2}, {"R2", BR2}, {"L3", BL3}, {"R3", BR3}, {"START", BStart}, {"SELECT", BSelect}};
++        for (const auto &[r, x] : kRotulos)
++            if (t == r)
++            {
++                b = x;
++                return true;
++            }
++        return false;
++    }
++
++    struct Icono
++    {
++        Boton boton;
++        Variante variante;
++        float x, y;
++        float escala;
++        float r, g, b, a;
++    };
++    std::mutex g_mutex;
++
++    std::atomic<float> g_estiramientoVertical{1.0f};
++    std::vector<Icono> g_construyendo, g_publicados;
++    void anotar(const Icono &icono)
++    {
++
++        for (const Icono &o : g_construyendo)
++            if (o.boton == icono.boton && std::fabs(o.x - icono.x) < 4.0f && std::fabs(o.y - icono.y) < 4.0f)
++                return;
++        if (g_construyendo.size() < 128) g_construyendo.push_back(icono);
++    }
++
++    void leerCxform(const uint8_t *rdram, uint32_t cx, float &r, float &g, float &b, float &a)
++    {
++        r = g = b = a = 1.0f;
++        if (!valida(cx, 8u))
++            return;
++        const uint32_t w0 = leer32(rdram, cx), w1 = leer32(rdram, cx + 4u);
++        r = std::clamp(float(w0 & 0xFFFFu) / 256.0f, 0.0f, 1.0f);
++        g = std::clamp(float(w0 >> 16) / 256.0f, 0.0f, 1.0f);
++        b = std::clamp(float(w1 & 0xFFFFu) / 256.0f, 0.0f, 1.0f);
++        a = std::clamp(float(w1 >> 16) / 256.0f, 0.0f, 1.0f);
++    }
++
++    void centroYRadio(const Anterior &f, float &cx, float &cy, float &radio)
++    {
++        const float ox = f.caja.valida ? (f.caja.x0 + f.caja.x1) * 0.5f : 0.0f, oy = f.caja.valida ? (f.caja.y0 + f.caja.y1) * 0.5f : 0.0f;
++        cx = f.m0 * ox + f.m4 * oy + f.tx;
++        cy = f.m1 * ox + f.m5 * oy + f.ty;
++        radio = (f.caja.valida ? std::max(f.caja.x1 - f.caja.x0, f.caja.y1 - f.caja.y0) * 0.5f : 540.0f) * std::hypot(f.m0, f.m1);
++    }
++
++    void cerrarRotulo()
++    {
++        if (!g_rotulo.abierto)
++            return;
++        g_rotulo.abierto = false;
++        std::sort(g_rotulo.letras.begin(), g_rotulo.letras.end());
++
++        std::string t;
++        float ultimaX = -1e9f;
++        for (const auto &[x, c] : g_rotulo.letras)
++        {
++            if (c != ' ' && !(std::fabs(x - ultimaX) < 1.0f && !t.empty() && t.back() == c))
++                t += c;
++            ultimaX = x;
++        }
++        Boton b;
++        if (g_diag && !t.empty())
++        {
++            static std::set<std::string> vistos;
++            if (vistos.insert(t).second)
++                std::fprintf(stderr, "[gow-iconos] rótulo '%s'\n", t.c_str());
++        }
++        if (rotuloDeBoton(t, b))
++            anotar(Icono{b, VNormal, 320.0f + g_rotulo.cx * 0.5f, 240.0f - g_rotulo.cy * 0.5f, g_rotulo.radio, g_rotulo.r, g_rotulo.g,
++                         g_rotulo.b, g_rotulo.a});
++    }
++
++    void dibujarForma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        if (ctx->pc != kDibujarForma)
++        {
++            g_dibujarForma(rdram, ctx, runtime);
++            return;
++        }
++        {
++
++            float aspecto = 4.0f / 3.0f;
++            std::memcpy(&aspecto, rdram + 0x32F1B0u, sizeof(aspecto));
++            const bool ancho = rdram[0x29CC90u] == 1u && aspecto > 1.0f && aspecto < 4.0f;
++            g_estiramientoVertical.store(ancho ? aspecto * 0.75f : 1.0f, std::memory_order_relaxed);
++        }
++        const uint32_t entrada = GPR_U32(ctx, 4), m = GPR_U32(ctx, 7);
++        if (!g_activo || !valida(m, 64u) || !valida(entrada, 8u))
++        {
++            g_dibujarForma(rdram, ctx, runtime);
++            return;
++        }
++        Anterior actual;
++        actual.entrada = entrada;
++        actual.m0 = leerF(rdram, m);
++        actual.m1 = leerF(rdram, m + 4u);
++        actual.m4 = leerF(rdram, m + 16u);
++        actual.m5 = leerF(rdram, m + 20u);
++        actual.tx = leerF(rdram, m + 48u);
++        actual.ty = leerF(rdram, m + 52u);
++        const Forma f = leerForma(rdram, entrada);
++        actual.caja = cajaMalla(rdram, GPR_U32(ctx, 5), f.malla);
++        float cx = 0.0f, cy = 0.0f, radio = 0.0f;
++        centroYRadio(actual, cx, cy, radio);
++        if (g_diag)
++        {
++            static std::set<uint32_t> vistas;
++            if (vistas.insert(entrada).second && vistas.size() < 3000)
++                std::fprintf(stderr, "[gow-iconos] forma %08X malla=%u n=%u color=%08X,%08X centro %.1f,%.1f radio %.1f ra=%06X\n", entrada,
++                             f.malla, f.rellenos, f.color0, f.color1, 320.0f + cx * 0.5f, 240.0f - cy * 0.5f, radio * 0.5f, GPR_U32(ctx, 31));
++        }
++
++        if (g_rotulo.abierto)
++        {
++            const char letra = letraDeGlifo(entrada);
++            if (letra && std::hypot(cx - g_rotulo.cx, cy - g_rotulo.cy) < g_rotulo.radio * 1.2f && g_rotulo.letras.size() < 8u)
++            {
++                g_rotulo.letras.push_back({cx, letra});
++                g_dibujarForma(rdram, ctx, runtime);
++                return;
++            }
++            cerrarRotulo();
++        }
++
++        if (const Especial *e = especial(entrada))
++        {
++            Icono i{e->boton, VNormal, 320.0f + (cx + e->dx * radio) * 0.5f, 240.0f - (cy + e->dy * radio) * 0.5f, radio * e->radio * 1.0f,
++                    1.0f, 1.0f, 1.0f, 1.0f};
++            leerCxform(rdram, GPR_U32(ctx, 8), i.r, i.g, i.b, i.a);
++            anotar(i);
++        }
++
++        Boton b = BCruz;
++        Variante v = VNormal;
++        bool esBoton = false;
++        Anterior fondo = g_anterior;
++        float fx = 0.0f, fy = 0.0f, fr = 0.0f;
++        centroYRadio(fondo, fx, fy, fr);
++        const bool dentro = std::hypot(cx - fx, cy - fy) < std::max(6.0f, fr);
++        if (f.rellenos == 1u && dentro && (fondo.fondoMenu || fondo.fondoGriego) && colorDeBoton(f.color0, b))
++        {
++            v = fondo.fondoGriego ? VGriego : VNormal;
++            esBoton = true;
++        }
++        else if (botonDeForma(rdram, entrada, b, v) && b != BCruz && b != BCirculo && b != BCuadrado && b != BTriangulo)
++        {
++            esBoton = true;
++            if (!dentro)
++                fondo = actual;
++        }
++        actual.fondoMenu = f.rellenos == 2u && (f.color0 & 0x00FFFFFFu) == 0x191919u && f.color1 == 0xFFFFFFFFu;
++        actual.fondoGriego = f.rellenos == 1u && f.color0 == 0xFFFFFFFFu;
++        g_anterior = actual;
++
++        if (f.rellenos >= 2u && (f.color0 & 0x00FFFFFFu) == 0x232323u && f.color1 == 0xFFFFFFFFu)
++        {
++            g_rotulo = Rotulo{};
++            g_rotulo.abierto = true;
++            g_rotulo.cx = cx;
++            g_rotulo.cy = cy;
++            g_rotulo.radio = radio;
++            leerCxform(rdram, GPR_U32(ctx, 8), g_rotulo.r, g_rotulo.g, g_rotulo.b, g_rotulo.a);
++        }
++
++        // Rotation/shake diagrams encode direction as well as a stick. Keep that information visible.
++        if (!esBoton || (b == BStickIzq && v == VGriego))
++        {
++            g_dibujarForma(rdram, ctx, runtime);
++            return;
++        }
++
++        centroYRadio(fondo, fx, fy, fr);
++        Icono i{b, v, 320.0f + fx * 0.5f, 240.0f - fy * 0.5f, fr, 1.0f, 1.0f, 1.0f, 1.0f};
++        leerCxform(rdram, GPR_U32(ctx, 8), i.r, i.g, i.b, i.a);
++        if (g_diag)
++        {
++            static std::map<uint32_t, int> vistos;
++            if (vistos[entrada]++ % 60 == 0)
++                std::fprintf(stderr, "[gow-iconos] t=%.2f %s (%d) en %.1f,%.1f radio %.1f forma %08X alfa %.2f\n", segundos(), kAccion[b], int(v),
++                             i.x, i.y, i.escala * 0.5f, entrada, i.a);
++        }
++        anotar(i);
++        g_dibujarForma(rdram, ctx, runtime);
++    }
++
++    enum Estilo
++    {
++        EOriginal,
++        ETeclado,
++        EXbox, EPS4, EDualSense
++    };
++
++    Font g_fuente{};
++    bool g_fuenteCargada = false;
++
++    void cargarFuente()
++    {
++        if (g_fuenteCargada)
++            return;
++        g_fuenteCargada = true;
++
++        std::vector<int> puntos;
++        for (int c = 32; c < 127; ++c)
++            puntos.push_back(c);
++        for (int c : {0xC7, 0xD6, 0xDC, 0xD1, 0x11E, 0x130, 0x15E, 0xE7, 0xF6, 0xFC, 0xF1, 0x11F, 0x131, 0x15F})
++            puntos.push_back(c);
++        if (gowFuenteIconosTam > 0u)
++            g_fuente = LoadFontFromMemory(".ttf", gowFuenteIconos, int(gowFuenteIconosTam), 96, puntos.data(), int(puntos.size()));
++        if (g_fuente.texture.id == 0)
++            g_fuente = GetFontDefault();
++        else
++            SetTextureFilter(g_fuente.texture, TEXTURE_FILTER_BILINEAR);
++    }
++
++    Estilo estiloActual()
++    {
++        // Scripted visual tests only; real play always follows the input reader.
++        const char *test = std::getenv("GOW_PAD_TEST");
++        const char *style = std::getenv("GOW_PROMPT_TEST_STYLE");
++        if (test && std::strcmp(test, "1") == 0 && style) {
++            const int n = std::atoi(style);
++            if (n >= ETeclado && n <= EDualSense) return static_cast<Estilo>(n);
++        }
++        const int slot = gowPromptGamepad();
++        if (slot < 0) return ETeclado;
++        return static_cast<Estilo>(gowPromptFamily(GetGamepadName(slot)));
++
++    }
++
++    std::string nombreTecla(int codigo)
++    {
++        if (codigo >= 1000)
++            return codigo <= 1002 ? "#RAT" + std::to_string(codigo - 1000) : "M" + std::to_string(codigo - 999);
++        switch (codigo)
++        {
++        case KEY_SPACE: return "#ESP";
++        case KEY_LEFT_SHIFT: case KEY_RIGHT_SHIFT: return "#MAY";
++        case KEY_LEFT_CONTROL: case KEY_RIGHT_CONTROL: return "CTRL";
++        case KEY_LEFT_ALT: case KEY_RIGHT_ALT: return "ALT";
++        case KEY_ENTER: case KEY_KP_ENTER: return "#ENT";
++        case KEY_TAB: return "#TAB";
++        case KEY_ESCAPE: return "ESC";
++        case KEY_BACKSPACE: return "BKSP";
++        case KEY_CAPS_LOCK: return "CAPS";
++        case KEY_INSERT: return "INS";
++        case KEY_DELETE: return "DEL";
++        case KEY_HOME: return "HOME";
++        case KEY_END: return "END";
++        case KEY_PAGE_UP: return "PGUP";
++        case KEY_PAGE_DOWN: return "PGDN";
++        case KEY_NUM_LOCK: return "NUM";
++        case KEY_SCROLL_LOCK: return "SCRL";
++        case KEY_PRINT_SCREEN: return "PRT";
++        case KEY_PAUSE: return "PAUSE";
++        case KEY_LEFT_SUPER: case KEY_RIGHT_SUPER: return "SUPER";
++        case KEY_KB_MENU: return "MENU";
++        case KEY_KP_DECIMAL: return "NUM .";
++        case KEY_KP_DIVIDE: return "NUM /";
++        case KEY_KP_MULTIPLY: return "NUM *";
++        case KEY_KP_SUBTRACT: return "NUM -";
++        case KEY_KP_ADD: return "NUM +";
++        case KEY_KP_EQUAL: return "NUM =";
++        case KEY_UP: return "#ARR";
++        case KEY_DOWN: return "#ABA";
++        case KEY_LEFT: return "#IZQ";
++        case KEY_RIGHT: return "#DER";
++        default: break;
++        }
++        if (codigo >= KEY_F1 && codigo <= KEY_F12)
++            return "F" + std::to_string(codigo - KEY_F1 + 1);
++        if (codigo >= KEY_KP_0 && codigo <= KEY_KP_9)
++            return "NUM" + std::to_string(codigo - KEY_KP_0);
++
++        if (const char *n = glfwGetKeyName(codigo, 0); n && *n)
++        {
++            std::string s(n);
++            static const std::pair<const char *, const char *> kMayus[] = {
++                {"\xC4\xB1", "I"}, {"\xC5\x9F", "\xC5\x9E"}, {"\xC4\x9F", "\xC4\x9E"},
++                {"\xC3\xBC", "\xC3\x9C"}, {"\xC3\xB6", "\xC3\x96"}, {"\xC3\xA7", "\xC3\x87"}, {"\xC3\xB1", "\xC3\x91"}};
++            for (const auto &[min, may] : kMayus)
++                if (s == min)
++                    return may;
++            if (s.size() == 1)
++                s[0] = char(std::toupper(static_cast<unsigned char>(s[0])));
++            return s;
++        }
++        if (codigo >= 32 && codigo < 127)
++            return std::string(1, char(codigo));
++        return "?";
++    }
++
++    std::string rotulo(Estilo e, Boton b)
++    {
++        if (e == ETeclado)
++        {
++            if (b == BStickIzq)
++            {
++                int c[4] = {};
++                int k = 0;
++                for (const char *a : {"li_arriba", "li_izq", "li_abajo", "li_der"})
++                    tobiichiCodigosAccion(a, &c[k++], 1);
++                if (c[0] == KEY_W && c[1] == KEY_A && c[2] == KEY_S && c[3] == KEY_D)
++                    return "WASD";
++                std::string s;
++                for (int x : c) {
++                    if (!s.empty()) s += "/";
++                    s += x ? nombreTecla(x) : "-";
++                }
++                return s;
++            }
++            if (b == BCruceta)
++                return "#CRU";
++            int codigos[4];
++            if (tobiichiCodigosAccion(kAccion[b], codigos, 4) <= 0)
++                return "-";
++            return nombreTecla(codigos[0]);
++        }
++        const int button = tobiichiBotonMandoAccion(kAccion[b]);
++        if (e == EPS4 || e == EDualSense) {
++            switch (button) {
++            case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: return "#CROSS";
++            case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: return "#CIRCLE";
++            case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: return "#SQUARE";
++            case GAMEPAD_BUTTON_RIGHT_FACE_UP: return "#TRIANGLE";
++            case GAMEPAD_BUTTON_LEFT_TRIGGER_1: return "L1";
++            case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: return "R1";
++            case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return "L2";
++            case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return "R2";
++            case GAMEPAD_BUTTON_LEFT_THUMB: return "L3";
++            case GAMEPAD_BUTTON_RIGHT_THUMB: return "R3";
++            case GAMEPAD_BUTTON_MIDDLE_RIGHT: return "OPTIONS";
++            case GAMEPAD_BUTTON_MIDDLE_LEFT: return e == EPS4 ? "SHARE" : "CREATE";
++            default: break;
++            }
++        }
++        switch (button)
++        {
++        case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: return "A";
++        case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: return "B";
++        case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: return "X";
++        case GAMEPAD_BUTTON_RIGHT_FACE_UP: return "Y";
++        case GAMEPAD_BUTTON_LEFT_TRIGGER_1: return "LB";
++        case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: return "RB";
++        case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return "LT";
++        case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return "RT";
++        case GAMEPAD_BUTTON_LEFT_THUMB: return "LS";
++        case GAMEPAD_BUTTON_RIGHT_THUMB: return "RS";
++        case GAMEPAD_BUTTON_MIDDLE_RIGHT: return "#MENU";
++        case GAMEPAD_BUTTON_MIDDLE_LEFT: return "#VISTA";
++        case GAMEPAD_BUTTON_LEFT_FACE_UP: return "#ARR";
++        case GAMEPAD_BUTTON_LEFT_FACE_DOWN: return "#ABA";
++        case GAMEPAD_BUTTON_LEFT_FACE_LEFT: return "#IZQ";
++        case GAMEPAD_BUTTON_LEFT_FACE_RIGHT: return "#DER";
++        default: break;
++        }
++        return b == BStickIzq ? "LS" : b == BCruceta ? "#CRU" : "-";
++    }
++
++    Color colorXbox(const std::string &r)
++    {
++        if (r == "A") return Color{96, 190, 60, 255};
++        if (r == "B") return Color{224, 64, 52, 255};
++        if (r == "X") return Color{52, 132, 228, 255};
++        if (r == "Y") return Color{236, 190, 40, 255};
++        return Color{232, 222, 200, 255};
++    }
++
++    constexpr int kRadio = 64;
++
++    void textoCentrado(const std::string &s, Vector2 c, float alto, Color color, float anchoMax)
++    {
++        float tam = alto;
++        Vector2 m = MeasureTextEx(g_fuente, s.c_str(), tam, 0.0f);
++        if (m.x > anchoMax)
++        {
++            tam *= anchoMax / m.x;
++            m = MeasureTextEx(g_fuente, s.c_str(), tam, 0.0f);
++        }
++        const Vector2 p{c.x - m.x * 0.5f, c.y - m.y * 0.5f};
++
++        const Color sombra{10, 8, 6, 230};
++        for (int dx = -3; dx <= 3; ++dx)
++            for (int dy = -3; dy <= 3; ++dy)
++                if (dx * dx + dy * dy <= 10 && (dx || dy))
++                    DrawTextEx(g_fuente, s.c_str(), Vector2{p.x + dx, p.y + dy}, tam, 0.0f, sombra);
++
++        for (float d : {0.0f, 0.8f, 1.6f})
++        {
++            DrawTextEx(g_fuente, s.c_str(), Vector2{p.x + d, p.y}, tam, 0.0f, color);
++            DrawTextEx(g_fuente, s.c_str(), Vector2{p.x + d, p.y + 0.8f}, tam, 0.0f, color);
++        }
++    }
++
++    void flecha(Vector2 c, float r, int dir, Color color)
++    {
++
++        const float a = (dir == 0 ? -90.0f : dir == 1 ? 90.0f : dir == 2 ? 180.0f : 0.0f) * DEG2RAD;
++        const Vector2 punta{c.x + std::cos(a) * r, c.y + std::sin(a) * r};
++        const Vector2 b1{c.x + std::cos(a + 2.4f) * r * 0.85f, c.y + std::sin(a + 2.4f) * r * 0.85f};
++        const Vector2 b2{c.x + std::cos(a - 2.4f) * r * 0.85f, c.y + std::sin(a - 2.4f) * r * 0.85f};
++        DrawTriangle(punta, b2, b1, color);
++        DrawTriangle(punta, b1, b2, color);
++    }
++
++    void dibujarRaton(Vector2 c, float r, int boton, Color color)
++    {
++        const Rectangle cuerpo{c.x - r * 0.42f, c.y - r * 0.62f, r * 0.84f, r * 1.24f};
++        DrawRectangleRounded(cuerpo, 0.9f, 12, Color{20, 18, 16, 255});
++        DrawRectangleRoundedLinesEx(cuerpo, 0.9f, 12, 5.0f, color);
++        const float corte = c.y - r * 0.08f;
++        DrawLineEx(Vector2{c.x, cuerpo.y + 2.0f}, Vector2{c.x, corte}, 4.5f, color);
++        DrawLineEx(Vector2{cuerpo.x + 2.0f, corte}, Vector2{cuerpo.x + cuerpo.width - 2.0f, corte}, 4.5f, color);
++        const Color rojo{200, 48, 36, 255};
++        const float alto = corte - cuerpo.y - 7.0f;
++        if (boton == 0)
++            DrawRectangleRounded(Rectangle{cuerpo.x + 5.0f, cuerpo.y + 5.0f, r * 0.42f - 8.0f, alto}, 0.7f, 8, rojo);
++        else if (boton == 1)
++            DrawRectangleRounded(Rectangle{c.x + 3.0f, cuerpo.y + 5.0f, r * 0.42f - 8.0f, alto}, 0.7f, 8, rojo);
++        else
++            DrawRectangleRounded(Rectangle{c.x - r * 0.07f, cuerpo.y + r * 0.12f, r * 0.14f, r * 0.3f}, 0.9f, 8, rojo);
++    }
++
++    struct Textura
++    {
++        RenderTexture2D rt{};
++        float aspecto = 1.0f;
++    };
++    std::map<std::string, Textura> g_texturas;
++
++    const Textura &textura(Estilo e, Boton b, Variante v)
++    {
++        const std::string r = rotulo(e, b);
++        const std::string clave = std::to_string(int(e)) + ":" + std::to_string(int(v)) + ":" + r;
++        if (const auto it = g_texturas.find(clave); it != g_texturas.end())
++            return it->second;
++        cargarFuente();
++
++        const bool largo = r.size() > 2 && r[0] != '#';
++        const int alto = 2 * kRadio;
++        const int ancho = e == ETeclado && largo ? int(alto * 1.25f) : alto;
++        Textura t;
++        t.aspecto = float(ancho) / float(alto);
++        t.rt = LoadRenderTexture(ancho, alto);
++        SetTextureFilter(t.rt.texture, TEXTURE_FILTER_BILINEAR);
++        BeginTextureMode(t.rt);
++        ClearBackground(Color{0, 0, 0, 0});
++        const Vector2 c{ancho * 0.5f, alto * 0.5f};
++        const float R = kRadio - 3.0f;
++        const Color borde{150, 138, 112, 255}, piedra{34, 30, 26, 255}, piedraBaja{14, 12, 10, 255};
++        const Color letra{236, 226, 202, 255}, oro{214, 176, 92, 255};
++        const bool griego = v == VGriego;
++        const bool hombro = e == EXbox && (r == "LB" || r == "RB" || r == "LT" || r == "RT");
++        if (e == ETeclado || hombro)
++        {
++
++            const Rectangle k{4.0f, 6.0f, ancho - 8.0f, alto - 12.0f};
++            DrawRectangleRounded(Rectangle{k.x, k.y + 4.0f, k.width, k.height}, 0.35f, 12, piedraBaja);
++            DrawRectangleRounded(k, 0.35f, 12, piedra);
++            DrawRectangleGradientV(int(k.x + 8), int(k.y + 6), int(k.width - 16), int(k.height * 0.5f), Color{62, 56, 48, 255}, piedra);
++            DrawRectangleRoundedLinesEx(k, 0.35f, 12, griego ? 5.0f : 3.5f, griego ? oro : borde);
++            DrawRectangleRoundedLinesEx(Rectangle{k.x + 7.0f, k.y + 7.0f, k.width - 14.0f, k.height - 16.0f}, 0.3f, 12, 1.5f,
++                                        Color{90, 82, 68, 160});
++        }
++        else
++        {
++
++            DrawCircleGradient(int(c.x), int(c.y), R, Color{64, 58, 50, 255}, piedraBaja);
++            DrawRing(c, R - (griego ? 6.0f : 4.0f), R, 0.0f, 360.0f, 64, griego ? oro : borde);
++            DrawRing(c, R - 10.0f, R - 8.5f, 0.0f, 360.0f, 64, Color{90, 82, 68, 140});
++        }
++        Color tinta = e == EXbox ? colorXbox(r) : (griego ? oro : letra);
++        if (e == EPS4) {
++            if (r == "#CROSS") tinta = {120,170,255,255};
++            if (r == "#CIRCLE") tinta = {255,110,110,255};
++            if (r == "#SQUARE") tinta = {240,150,210,255};
++            if (r == "#TRIANGLE") tinta = {100,220,170,255};
++        }
++        const float g = 7.0f;
++        if (r == "#CROSS") {
++            DrawLineEx({c.x-R*.4f,c.y-R*.4f},{c.x+R*.4f,c.y+R*.4f},g,tinta);
++            DrawLineEx({c.x-R*.4f,c.y+R*.4f},{c.x+R*.4f,c.y-R*.4f},g,tinta);
++        } else if (r == "#CIRCLE") DrawRing(c,R*.43f,R*.43f+g,0,360,48,tinta);
++        else if (r == "#SQUARE") DrawRectangleLinesEx({c.x-R*.43f,c.y-R*.43f,R*.86f,R*.86f},g,tinta);
++        else if (r == "#TRIANGLE") {
++            const Vector2 a{c.x,c.y-R*.53f},b{c.x-R*.53f,c.y+R*.4f},d{c.x+R*.53f,c.y+R*.4f};
++            DrawLineEx(a,b,g,tinta); DrawLineEx(b,d,g,tinta); DrawLineEx(d,a,g,tinta);
++        }
++        else if (r.rfind("#RAT", 0) == 0)
++            dibujarRaton(c, R * 0.95f, r[4] - '0', letra);
++        else if (r == "#ESP")
++        {
++            const float x0 = c.x - R * 0.5f, x1 = c.x + R * 0.5f, y0 = c.y - R * 0.02f, y1 = c.y + R * 0.26f;
++            DrawLineEx(Vector2{x0, y0}, Vector2{x0, y1}, g, tinta);
++            DrawLineEx(Vector2{x0 - g * 0.5f, y1}, Vector2{x1 + g * 0.5f, y1}, g, tinta);
++            DrawLineEx(Vector2{x1, y1}, Vector2{x1, y0}, g, tinta);
++        }
++        else if (r == "#MAY")
++        {
++            const Vector2 punta{c.x, c.y - R * 0.5f}, i{c.x - R * 0.42f, c.y - R * 0.02f}, d{c.x + R * 0.42f, c.y - R * 0.02f};
++            const float t0 = c.x - R * 0.2f, t1 = c.x + R * 0.2f, base = c.y + R * 0.42f;
++            DrawLineEx(punta, i, g, tinta);
++            DrawLineEx(punta, d, g, tinta);
++            DrawLineEx(i, Vector2{t0, i.y}, g, tinta);
++            DrawLineEx(d, Vector2{t1, d.y}, g, tinta);
++            DrawLineEx(Vector2{t0, i.y - g * 0.5f}, Vector2{t0, base}, g, tinta);
++            DrawLineEx(Vector2{t1, d.y - g * 0.5f}, Vector2{t1, base}, g, tinta);
++            DrawLineEx(Vector2{t0 - g * 0.5f, base}, Vector2{t1 + g * 0.5f, base}, g, tinta);
++        }
++        else if (r == "#ENT")
++        {
++            const float x1 = c.x + R * 0.38f, y0 = c.y - R * 0.4f, y1 = c.y + R * 0.18f, x0 = c.x - R * 0.2f;
++            DrawLineEx(Vector2{x1, y0}, Vector2{x1, y1}, g, tinta);
++            DrawLineEx(Vector2{x1 + g * 0.5f, y1}, Vector2{x0, y1}, g, tinta);
++            flecha(Vector2{x0 - R * 0.06f, y1}, R * 0.24f, 2, tinta);
++        }
++        else if (r == "#TAB")
++        {
++            const float y = c.y, x0 = c.x - R * 0.42f, x1 = c.x + R * 0.26f;
++            DrawLineEx(Vector2{x0, y}, Vector2{x1 - R * 0.1f, y}, g, tinta);
++            flecha(Vector2{x1 - R * 0.04f, y}, R * 0.22f, 3, tinta);
++            DrawLineEx(Vector2{c.x + R * 0.42f, y - R * 0.3f}, Vector2{c.x + R * 0.42f, y + R * 0.3f}, g, tinta);
++        }
++        else if (r == "#ARR" || r == "#ABA" || r == "#IZQ" || r == "#DER")
++            flecha(c, R * 0.5f, r == "#ARR" ? 0 : r == "#ABA" ? 1 : r == "#IZQ" ? 2 : 3, tinta);
++        else if (r == "#CRU")
++        {
++            for (int d = 0; d < 4; ++d)
++                flecha(Vector2{c.x + (d == 2 ? -R * 0.42f : d == 3 ? R * 0.42f : 0.0f), c.y + (d == 0 ? -R * 0.42f : d == 1 ? R * 0.42f : 0.0f)},
++                       R * 0.26f, d, tinta);
++        }
++        else if (r == "#MENU")
++        {
++            for (int k = -1; k <= 1; ++k)
++                DrawRectangleRounded(Rectangle{c.x - R * 0.38f, c.y + k * R * 0.26f - 4.0f, R * 0.76f, 8.0f}, 1.0f, 6, tinta);
++        }
++        else if (r == "#VISTA")
++        {
++            DrawRectangleRoundedLinesEx(Rectangle{c.x - R * 0.42f, c.y - R * 0.36f, R * 0.5f, R * 0.44f}, 0.3f, 6, 4.0f, tinta);
++            DrawRectangleRounded(Rectangle{c.x - R * 0.1f, c.y - R * 0.1f, R * 0.5f, R * 0.44f}, 0.3f, 6, tinta);
++        }
++        else if (!r.empty())
++            textoCentrado(r, Vector2{c.x, c.y + 2.0f}, r.size() <= 1 ? alto * 0.74f : r.size() == 2 ? alto * 0.48f : alto * 0.44f, tinta,
++                          ancho - 26.0f);
++        EndTextureMode();
++        return g_texturas.emplace(clave, t).first->second;
++    }
++}
++
++// Publish complete guest-frame batches, including empty frames. Never infer a frame from wall time.
++void gowIconosFrame()
++{
++    if (!g_activo) return;
++    cerrarRotulo();
++    std::lock_guard<std::mutex> lock(g_mutex);
++    g_publicados.swap(g_construyendo);
++    g_construyendo.clear();
++    g_anterior = {};
++}
++
++void gowIconosDibujar(float dx, float dy, float dw, float dh)
++{
++    if (!g_activo)
++        return;
++    std::vector<Icono> iconos;
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        iconos = g_publicados;
++    }
++    const Estilo e = estiloActual();
++    if (e == EOriginal || iconos.empty())
++        return;
++    static const float ajuste = [] {
++        const char *v = std::getenv("GOW_ICONOS_TAMANO");
++        return v ? std::strtof(v, nullptr) : 1.0f;
++    }();
++    for (const Icono &i : iconos)
++    {
++        const Textura &t = textura(e, i.boton, i.variante);
++
++        const float r = i.escala * 0.5f * ajuste;
++        const float alto = 2.0f * r / 480.0f * dh, ancho = alto * t.aspecto;
++        const float y = 240.0f + (i.y - 240.0f) * g_estiramientoVertical.load(std::memory_order_relaxed);
++        const float cx = dx + i.x / 640.0f * dw, cy = dy + y / 480.0f * dh;
++        const Rectangle origen{0.0f, 0.0f, float(t.rt.texture.width), -float(t.rt.texture.height)};
++        const Color tinte{static_cast<unsigned char>(255.0f * i.r), static_cast<unsigned char>(255.0f * i.g),
++                          static_cast<unsigned char>(255.0f * i.b), static_cast<unsigned char>(255.0f * i.a)};
++        DrawTexturePro(t.rt.texture, origen, Rectangle{cx - ancho * 0.5f, cy - alto * 0.5f, ancho, alto}, Vector2{0.0f, 0.0f}, 0.0f, tinte);
++    }
++}
++
++void gowIconosInstalar(PS2Runtime &runtime, const std::string &elfPath)
++{
++    if (std::filesystem::path(elfPath).filename() != "SCUS_973.99" || !runtime.hasFunction(kDibujarForma))
++        return;
++    const char *activo = std::getenv("GOW_ICONOS");
++    g_activo = !(activo && activo[0] == '0');
++    const char *d = std::getenv("GOW_ICONOS_DIAG");
++    g_diag = d && d[0] == '1';
++    g_dibujarForma = runtime.lookupFunction(kDibujarForma);
++    runtime.replaceFunction(kDibujarForma, &dibujarForma);
++    if (g_activo)
++        std::cerr << "[gow-prompts] Flash prompts enabled" << std::endl;
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -37,6 +37,10 @@
+ void gowFijarInstalar(PS2Runtime &runtime, const std::string &elfPath);
+ void gowCancelarInstalar(PS2Runtime &runtime, const std::string &elfPath);
+ void gowSondeoInstalar(PS2Runtime &runtime);
++void gowIconosInstalar(PS2Runtime &, const std::string &);
++void gowIconosDibujar(float, float, float, float);
++void gowPromptPoll();
++void gowIconosFrame();
+ void gowEsperaInstalar(PS2Runtime &runtime, const std::string &elfPath);
+ void gowFijarEntrada();
+ void gowFijarDibujar(float x, float y, float w, float h);
+@@ -190,6 +194,7 @@
+     {
+         if (ctx->pc == g_framePc)
+         {
++            gowIconosFrame();
+             g_cuadrosJuego.fetch_add(1, std::memory_order_relaxed);
+             if (g_frameDiagnostics) recordGuestFrame();
+         }
+@@ -242,7 +247,9 @@
+             return;
+         }
+         uint8_t sticks[4];
+-        if (tobiichiSticksTeclado(sticks))
++        // The scripted pad already owns the packet, including its navigation sticks.
++        static const bool scripted = envFlag("GOW_PAD_TEST", false);
++        if (!scripted && tobiichiSticksTeclado(sticks))
+             std::memcpy(rdram + buffer + 2u, sticks, sizeof(sticks));
+     }
+ 
+@@ -504,6 +511,7 @@
+     gowVideoInstalar(runtime, elfPath);    // escaneo progresivo siempre activado
+     gowFijarInstalar(runtime, elfPath);    // fijar objetivo (envuelve la lectura del mando)
+     gowCancelarInstalar(runtime, elfPath); // cancelar ataques (después de fijar: encadena su envoltorio)
++    gowIconosInstalar(runtime, elfPath);
+     gowSondeoInstalar(runtime);            // GOW_SONDEO (diagnóstico)
+     if (envFlag("GOW_ESPERA_EE", false))
+         gowEsperaInstalar(runtime, elfPath);
+@@ -512,6 +520,7 @@
+ // GOW-Port: ps2_runtime.cpp (bucle de la ventana), antes de dibujar cada cuadro.
+ void gowCuadroEntrada()
+ {
++    gowPromptPoll();
+     if (IsKeyPressed(KEY_F11))
+     {
+         if (g_sinBordes)
+@@ -527,6 +536,7 @@
+ void gowCuadroDibujar(float x, float y, float w, float h)
+ {
+     gowFijarDibujar(x, y, w, h);
++    gowIconosDibujar(x, y, w, h);
+     gowTrucosMenuDibujar();
+     if (g_funcionCuadro && gow_vivo::mostrarFps.load(std::memory_order_relaxed))
+         dibujarFps(x, y, h);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -2,6 +2,7 @@
+ #include "runtime/gow_qte_hold.h"
+ #include "ps2_host_backend.h"
+ #include <array>
++#include "runtime/gow_prompt_input.h"
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -309,8 +310,7 @@
+     if (!m.activo)
+         return false;
+     // Match the backend's four-slot selection; never replace a connected pad's sticks.
+-    for (int i = 0; i < 4; ++i)
+-        if (IsGamepadAvailable(i)) return false;
++    if (gowPromptGamepad() >= 0) return false;
+     const uint8_t x = eje(accionPulsada(m, AccLiIzq), accionPulsada(m, AccLiDer));
+     const uint8_t y = eje(accionPulsada(m, AccLiArriba), accionPulsada(m, AccLiAbajo));
+     if (evadeModifierHeld(m))
+@@ -355,24 +355,7 @@
+     // GOW-Port: GLFW can list racing gear (handbrake, pedals) as gamepads before the real pad. The pad whose
+     // button was pressed last becomes the active one (press edges, so idle devices never take over);
+     // until then, the first available slot.
+-    static int s_activeGamepad = -1;
+-    for (int i = 0; i < 4; ++i)
+-    {
+-        if (i == s_activeGamepad || !IsGamepadAvailable(i))
+-            continue;
+-        for (int button = GAMEPAD_BUTTON_LEFT_FACE_UP; button <= GAMEPAD_BUTTON_RIGHT_THUMB; ++button)
+-            if (IsGamepadButtonPressed(i, button))
+-            {
+-                s_activeGamepad = i;
+-                break;
+-            }
+-    }
+-    if (s_activeGamepad >= 0 && !IsGamepadAvailable(s_activeGamepad))
+-        s_activeGamepad = -1;
+-    int kGamepad = s_activeGamepad;
+-    for (int i = 0; i < 4 && kGamepad < 0; ++i)
+-        if (IsGamepadAvailable(i))
+-            kGamepad = i;
++    const int kGamepad = gowPromptGamepad();
+     const bool useGamepad = kGamepad >= 0;
+     static int s_loggedGamepad = -2;
+     if (kGamepad != s_loggedGamepad)
+@@ -622,3 +605,159 @@
+     SetGamepadVibration(m_activeGamepad, m_large / 255.0f, m_small ? 1.0f : 0.0f, on ? 2.0f : 0.1f); // zero motors with any duration stop it
+ #endif
+ }
++
++int gowPromptGamepad()
++{
++    const int slot = gow_prompt::activeSlot.load(std::memory_order_relaxed);
++    if (slot != -2) return slot;
++    for (int p = 0; p < 4; ++p) if (IsGamepadAvailable(p)) return p;
++    return -1;
++}
++
++void gowPromptPoll()
++{
++    // Poll on the window thread, then share only the selected slot with the guest.
++    static gow_prompt::Tracker tracker;
++    gow_prompt::Input input;
++    input.focused = IsWindowFocused();
++    const auto &map = mapaTeclas();
++    if (map.activo) {
++        for (const auto &codes : map.codigos)
++            for (int code : codes) {
++                const int index = code >= 1000 ? 512 + code - 1000 : normalizedKey(code);
++                if (index >= 0 && index < int(input.keys.size())) input.keys[index] = codigoPulsado(code);
++            }
++    } else {
++        for (int key : {KEY_W,KEY_A,KEY_S,KEY_D,KEY_UP,KEY_DOWN,KEY_LEFT,KEY_RIGHT,KEY_SPACE,
++                        KEY_F,KEY_Q,KEY_E,KEY_V,KEY_X,KEY_C,KEY_Z,KEY_ENTER,KEY_TAB,KEY_ESCAPE,
++                        KEY_LEFT_SHIFT,KEY_RIGHT_SHIFT,KEY_LEFT_CONTROL,KEY_RIGHT_CONTROL,KEY_KP_0,KEY_KP_1})
++            input.keys[key] = IsKeyDown(key);
++        input.keys[512] = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
++        input.keys[513] = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
++    }
++    for (int p = 0; p < 4; ++p) {
++        input.connected[p] = IsGamepadAvailable(p);
++        if (!input.connected[p]) continue;
++        for (int b = 1; b < 18; ++b) input.buttons[p][b] = IsGamepadButtonDown(p,b);
++        for (int axis = 0; axis < 4; ++axis) input.sticks[p][axis] = GetGamepadAxisMovement(p,axis);
++    }
++    tracker.update(input);
++    gow_prompt::activeSlot.store(tracker.slot, std::memory_order_relaxed);
++    gow_prompt::preferMouse.store(tracker.mouse, std::memory_order_relaxed);
++}
++
++int tobiichiCodigosAccion(const char *accion, int *codigos, int max)
++{
++    size_t a = NumAcciones;
++    for (size_t i = 0; i < NumAcciones; ++i)
++        if (std::strcmp(kNombresAccion[i], accion) == 0)
++            a = i;
++    if (a == NumAcciones || max <= 0)
++        return 0;
++    const MapaTeclas &m = mapaTeclas();
++    int n = 0;
++    if (m.activo)
++    {
++        const bool mouse = gow_prompt::preferMouse.load(std::memory_order_relaxed);
++        const auto *codes = &m.codigos[a];
++        // D-pad spells and the Rage shortcut produce the same guest button bits.
++        if (codes->empty() && a <= AccFuria)
++            for (size_t alias = AccPoseidon; alias <= AccFuria; ++alias)
++                if (!m.codigos[alias].empty() && (kBitAccion[alias] & kBitAccion[a]) == kBitAccion[a]) {
++                    codes = &m.codigos[alias]; break;
++                }
++        for (bool preferred : {true, false})
++            for (const int c : *codes)
++                if (((c >= 1000) == mouse) == preferred && n < max) codigos[n++] = c;
++        return n;
++    }
++    static const bool dmc5 = [] {
++        const char *val = std::getenv("TOBIICHI_DMC5_CONTROLS");
++        return val == nullptr || std::strcmp(val, "0") != 0;
++    }();
++
++    int c = -1;
++    switch (a)
++    {
++    case AccArriba: c = KEY_UP; break;
++    case AccAbajo: c = KEY_DOWN; break;
++    case AccIzquierda: c = KEY_LEFT; break;
++    case AccDerecha: c = KEY_RIGHT; break;
++    case AccCruz: c = dmc5 ? KEY_SPACE : KEY_X; break;
++    case AccCirculo: c = dmc5 ? KEY_F : KEY_C; break;
++    case AccCuadrado: c = dmc5 ? 1000 + MOUSE_BUTTON_LEFT : KEY_Z; break;
++    case AccTriangulo: c = dmc5 ? 1000 + MOUSE_BUTTON_RIGHT : KEY_V; break;
++    case AccL1: c = dmc5 ? KEY_LEFT_SHIFT : KEY_Q; break;
++    case AccR1: c = KEY_E; break;
++    case AccL2: c = dmc5 ? -1 : KEY_LEFT_SHIFT; break;
++    case AccR2: c = dmc5 ? KEY_Q : KEY_RIGHT_SHIFT; break;
++    case AccL3:
++    case AccR3:
++    case AccFuria: c = dmc5 ? KEY_V : -1; break;
++    case AccStart: c = KEY_ENTER; break;
++    case AccSelect: c = KEY_TAB; break;
++    case AccLiArriba: c = KEY_W; break;
++    case AccLiAbajo: c = KEY_S; break;
++    case AccLiIzq: c = KEY_A; break;
++    case AccLiDer: c = KEY_D; break;
++    case AccLdMod: c = KEY_LEFT_CONTROL; break;
++    default: break;
++    }
++    if (c >= 0)
++        codigos[n++] = c;
++    return n;
++}
++
++
++
++int tobiichiBotonMandoAccion(const char *accion)
++{
++    const auto &map = mapaMando();
++    if (map.activo) {
++        for (size_t a = 0; a <= AccFuria; ++a)
++            if (std::strcmp(kNombresAccion[a], accion) == 0) {
++                if (!map.botones[a].empty()) return map.botones[a].front();
++                if (a <= AccDerecha) {
++                    constexpr int dpad[] = {GAMEPAD_BUTTON_LEFT_FACE_UP, GAMEPAD_BUTTON_LEFT_FACE_DOWN,
++                        GAMEPAD_BUTTON_LEFT_FACE_LEFT, GAMEPAD_BUTTON_LEFT_FACE_RIGHT};
++                    return dpad[a];
++                }
++                for (size_t alias = AccPoseidon; alias <= AccFuria; ++alias)
++                    if (!map.botones[alias].empty() && (kBitAccion[alias] & kBitAccion[a]) == kBitAccion[a])
++                        return map.botones[alias].front();
++                return -1;
++            }
++        return -1;
++    }
++    static const bool dmc5 = [] {
++        const char *val = std::getenv("TOBIICHI_DMC5_CONTROLS");
++        return val == nullptr || std::strcmp(val, "0") != 0;
++    }();
++    struct Par
++    {
++        const char *accion;
++        int dmc5, clasico;
++    };
++    static const Par kPares[] = {
++        {"cross", GAMEPAD_BUTTON_RIGHT_FACE_DOWN, GAMEPAD_BUTTON_RIGHT_FACE_DOWN},
++        {"circle", GAMEPAD_BUTTON_RIGHT_FACE_LEFT, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT},
++        {"square", GAMEPAD_BUTTON_RIGHT_FACE_UP, GAMEPAD_BUTTON_RIGHT_FACE_LEFT},
++        {"triangle", GAMEPAD_BUTTON_RIGHT_FACE_RIGHT, GAMEPAD_BUTTON_RIGHT_FACE_UP},
++        {"l1", GAMEPAD_BUTTON_LEFT_TRIGGER_1, GAMEPAD_BUTTON_LEFT_TRIGGER_1},
++        {"r1", GAMEPAD_BUTTON_RIGHT_TRIGGER_1, GAMEPAD_BUTTON_RIGHT_TRIGGER_1},
++        {"l2", GAMEPAD_BUTTON_RIGHT_TRIGGER_2, GAMEPAD_BUTTON_LEFT_TRIGGER_2},
++        {"r2", GAMEPAD_BUTTON_LEFT_TRIGGER_2, GAMEPAD_BUTTON_RIGHT_TRIGGER_2},
++        {"l3", GAMEPAD_BUTTON_LEFT_THUMB, GAMEPAD_BUTTON_LEFT_THUMB},
++        {"r3", GAMEPAD_BUTTON_RIGHT_THUMB, GAMEPAD_BUTTON_RIGHT_THUMB},
++        {"start", GAMEPAD_BUTTON_MIDDLE_RIGHT, GAMEPAD_BUTTON_MIDDLE_RIGHT},
++        {"select", GAMEPAD_BUTTON_MIDDLE_LEFT, GAMEPAD_BUTTON_MIDDLE_LEFT},
++        {"up", GAMEPAD_BUTTON_LEFT_FACE_UP, GAMEPAD_BUTTON_LEFT_FACE_UP},
++        {"down", GAMEPAD_BUTTON_LEFT_FACE_DOWN, GAMEPAD_BUTTON_LEFT_FACE_DOWN},
++        {"left", GAMEPAD_BUTTON_LEFT_FACE_LEFT, GAMEPAD_BUTTON_LEFT_FACE_LEFT},
++        {"right", GAMEPAD_BUTTON_LEFT_FACE_RIGHT, GAMEPAD_BUTTON_LEFT_FACE_RIGHT},
++    };
++    for (const Par &p : kPares)
++        if (std::strcmp(p.accion, accion) == 0)
++            return dmc5 ? p.dmc5 : p.clasico;
++    return -1;
++}
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -4,6 +4,7 @@
+ #include "runtime/gow_test_time.h"
+ #include "runtime/gow_logic_present.h"
+ #include "runtime/gow_save_backup.h"
++#include "runtime/gow_prompt_input.h"
+ extern std::atomic<uint64_t> g_gowAudioFramesPlayed, g_gowAudioFramesMissing;
+ #include "game_overrides.h"
+ #include "ps2_runtime.h"
+@@ -320,8 +321,8 @@
+         uint8_t state[32]{};
+         if (!buffer || !socket || socket->port != 0 || !runtime ||
+             !runtime->padBackend().readState(0, 0, state, sizeof(state))) { padReturn(ctx, 0xffffffffu); return; }
+-        // GOW-Port: keyboard sticks only without any gamepad (PSPadBackend uses the first available slot).
+-        if (!IsGamepadAvailable(0) && !IsGamepadAvailable(1) && !IsGamepadAvailable(2) && !IsGamepadAvailable(3))
++        // Use the same active device as the button reader and prompt renderer.
++        if (gowPromptGamepad() < 0)
+         {
+             state[6] = IsKeyDown(KEY_A) ? 0 : IsKeyDown(KEY_D) ? 255 : 128;
+             state[7] = IsKeyDown(KEY_W) ? 0 : IsKeyDown(KEY_S) ? 255 : 128;

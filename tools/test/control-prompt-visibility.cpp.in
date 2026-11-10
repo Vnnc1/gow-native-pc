@@ -1,0 +1,108 @@
+// Exercise the production leaf-draw interception with a fake guest drawing backend.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <set>
+#include <vector>
+#include "runtime/gow_qte_prompt.h"
+struct R5900Context { uint32_t pc=0; uint32_t regs[32]{}; };
+struct PS2Runtime {};
+#define GPR_U32(c,n) ((c)->regs[n])
+enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight };
+enum Variante { VNormal,VGriego };
+struct Caja {};
+struct Anterior {
+    uint32_t entrada=0; float tx=0,ty=0,m0=0,m1=0,m4=0,m5=0;
+    Caja caja; bool fondoMenu=false,fondoGriego=false;
+} g_anterior;
+struct Rotulo {
+    bool abierto=false,hidden=false; uint32_t background=0;
+    float cx=0,cy=0,radio=0,r=1,g=1,b=1,a=1;
+    std::vector<std::pair<float,char>> letras;
+} g_rotulo;
+struct Forma { uint32_t malla=0,rellenos=0,color0=0,color1=0; } form;
+struct Especial { Boton boton; float dx,dy,radio; } special{BL1,0,0,1};
+struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; unsigned guideStep=0,guideCount=0;uint16_t autoButton=0; };
+std::vector<Icono> g_construyendo;
+std::set<uint32_t> g_buttonBackgrounds;
+std::atomic<bool> g_replacementsReady{false};
+std::atomic<float> g_estiramientoVertical{1};
+bool g_activo=true,g_diag=false,named=false,tab=false;
+Boton namedButton=BR2; Variante namedVariant=VNormal;
+struct Symbol { const char *nombre; };
+Symbol kSimbolos[]={{"Up180CCW"},{"360CW"},{"Down180CCW"},{"R2ButtonPress"}};
+int symbolIdentity=0;
+int symbolFromInstance(const uint8_t *,const R5900Context *,uint32_t) {return symbolIdentity;}
+char glyph=0; int originals=0; Boton coloredButton=BCruz;
+constexpr uint32_t kDibujarForma=0x149fa0;
+const char *kAccion[] = {"cross","circle","square","triangle","l1","r1","l2","r2","stick"};
+bool valida(uint32_t a,uint32_t n) { return a>=0x100000 && uint64_t(a)+n<=0x2000000; }
+float leerF(const uint8_t *,uint32_t a) { return (a%64==4) ? 1 : (a%64==16) ? -1 : 0; }
+Forma leerForma(const uint8_t *,uint32_t) { return form; }
+Caja cajaMalla(const uint8_t *,uint32_t,uint32_t) { return {}; }
+void centroYRadio(const Anterior &,float &x,float &y,float &r) { x=0;y=0;r=10; }
+char letraDeGlifo(uint32_t) { return glyph; }
+void cerrarRotulo() { g_rotulo.abierto=false; }
+const Especial *especial(uint32_t) { return tab?&special:nullptr; }
+void leerCxform(const uint8_t *,uint32_t,float &,float &,float &,float &) {}
+void anotar(const Icono &i) { if(g_construyendo.size()<128) g_construyendo.push_back(i); }
+bool colorDeBoton(uint32_t c,Boton &b) { b=coloredButton; return c==0xff9999ff; }
+bool botonDeForma(const uint8_t *,uint32_t,Boton &b,Variante &v,int *identity=nullptr) { if(identity)*identity=-1; b=namedButton;v=namedVariant;return named; }
+double segundos() { return 0; }
+void g_dibujarForma(uint8_t *,R5900Context *c,PS2Runtime *) { ++originals;c->pc=c->regs[31]; }
+@DRAW@
+int main() {
+    std::vector<uint8_t> ram(0x2000000);
+    R5900Context ctx;ctx.regs[4]=0x120000;ctx.regs[7]=0x130000;ctx.regs[31]=0x160000;
+    auto draw=[&] {originals=0;ctx.pc=kDibujarForma;dibujarForma(ram.data(),&ctx,nullptr);assert(ctx.pc==ctx.regs[31]);};
+    form={0,2,0xff232323,0xffffffff};
+    g_replacementsReady=true;
+    draw();assert(originals==1 && !g_rotulo.hidden); // Unclassified art is retained.
+    g_buttonBackgrounds.insert(ctx.regs[4]);
+    g_rotulo={};draw();assert(originals==0 && g_rotulo.hidden);
+    glyph='R';draw();assert(originals==0); // Original label outline/fill are both suppressed.
+    glyph='2';draw();assert(originals==0);
+    glyph=0;g_rotulo={};g_replacementsReady=false;
+    draw();assert(originals==1 && !g_rotulo.hidden); // Renderer fallback.
+    g_buttonBackgrounds.clear();g_rotulo={};form={0,1,0xff9999ff,0};
+    g_anterior.fondoMenu=true;g_anterior.entrada=0x110000;
+    g_replacementsReady=true;draw();assert(originals==0 && !g_construyendo.empty());
+    assert(g_buttonBackgrounds.count(0x110000));
+    for (Boton button : {BCruz,BCirculo,BCuadrado,BTriangulo}) {
+        coloredButton=button;g_anterior.fondoMenu=true;g_anterior.entrada=0x110000;
+        draw();assert(originals==0 && g_construyendo.back().boton==button);
+    }
+    form={};named=true;
+    for (Boton button : {BL1,BR1,BL2,BR2}) {
+        namedButton=button;draw();assert(originals==0 && g_construyendo.back().boton==button);
+    }
+    g_construyendo.resize(128);named=true;namedButton=BR2;
+    draw();assert(originals==1); // Capacity cannot erase a prompt.
+    g_construyendo.clear();form={};namedButton=BStickIzq;namedVariant=VGriego;
+    g_buttonBackgrounds.insert(ctx.regs[4]);
+    draw();assert(originals==1 && g_construyendo.size()==3);
+    assert(g_construyendo[0].boton==BMoveUp && g_construyendo[1].boton==BMoveLeft && g_construyendo[2].boton==BMoveDown);
+    assert(g_construyendo[0].y==g_construyendo[2].y && g_construyendo[0].x<g_construyendo[1].x);
+    draw();assert(originals==1 && g_construyendo.size()==3);
+    g_construyendo.clear();symbolIdentity=1;draw();assert(g_construyendo.size()==5);
+    assert(g_construyendo[1].boton==BMoveRight && g_construyendo[4].boton==BMoveUp);
+    for(unsigned k=0;k<5;++k) assert(g_construyendo[k].guideStep==k+1 && g_construyendo[k].guideCount==5);
+    g_construyendo.clear();g_construyendo.resize(125);draw();assert(originals==1 && g_construyendo.size()==125);
+    g_construyendo.clear();symbolIdentity=-1;draw();assert(g_construyendo.empty()); // Never guess shared arrow direction.
+    symbolIdentity=2;draw();assert(g_construyendo.size()==3 && g_construyendo[0].boton==BMoveUp);
+    g_construyendo.clear();
+    // Spartan HUD reuses Greek R2 leaves outside a button instance: retain them, never publish an R2.
+    g_buttonBackgrounds.clear();g_anterior={};g_rotulo={};form={};named=true;namedButton=BR2;namedVariant=VGriego;
+    symbolIdentity=-1;draw();assert(originals==1 && g_construyendo.empty());
+    symbolIdentity=0;draw();assert(originals==1 && g_construyendo.empty());
+    symbolIdentity=3;draw();assert(originals==0 && g_construyendo.size()==1 && g_construyendo[0].boton==BR2);
+    g_construyendo.clear();named=false;tab=true;draw();assert(originals==0); // Both pause navigation button drawings.
+    g_activo=false;draw();assert(originals==1);
+    std::puts("PASS: original button faces, plates, labels and tabs hidden only with a ready replacement");
+}

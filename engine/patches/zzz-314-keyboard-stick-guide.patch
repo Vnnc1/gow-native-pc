@@ -1,0 +1,57 @@
+Show remapped movement keys beneath USA QTE stick diagrams for keyboard input.
+Retain the original directional animation, hide supplemental keys for gamepads,
+and bound one guide per guest frame to avoid duplicates from composite shapes.
+Production mapping/leaf-hook regressions and a hidden GPU artwork preview cover
+this change. Real combat placement still needs manual acceptance.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -61,10 +61,11 @@
+     enum Boton : uint8_t
+     {
+         BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BL3, BR3, BStart, BSelect,
+-        BArriba, BAbajo, BIzquierda, BDerecha, BCruceta, BStickIzq, NumBotones
++        BArriba, BAbajo, BIzquierda, BDerecha, BCruceta, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight, NumBotones
+     };
+     constexpr const char *kAccion[NumBotones] = {"cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3",
+-                                                 "start", "select", "up", "down", "left", "right", "up", "li_arriba"};
++                                                 "start", "select", "up", "down", "left", "right", "up", "li_arriba",
++                                                 "li_arriba", "li_izq", "li_abajo", "li_der"};
+     enum Variante : uint8_t
+     {
+         VNormal,
+@@ -705,6 +706,25 @@
+             leerCxform(rdram, GPR_U32(ctx, 8), g_rotulo.r, g_rotulo.g, g_rotulo.b, g_rotulo.a);
+         }
+ 
++        // Keep the directional animation; add the actual movement bindings below it for keyboard input.
++        // shortcut: one guide per guest frame; add symbol identities if simultaneous diagrams need separate guides.
++        if (esBoton && b == BStickIzq && v == VGriego && g_construyendo.size() <= 124 &&
++            std::none_of(g_construyendo.begin(), g_construyendo.end(),
++                         [](const Icono &i) { return i.boton == BMoveUp; })) {
++            centroYRadio(fondo, fx, fy, fr);
++            const float size = std::clamp(fr * 0.24f, 18.0f, 24.0f);
++            const float centerX = 320.0f + fx * 0.5f;
++            const float top = 240.0f - fy * 0.5f + fr * 0.5f + size * 0.5f + 4.0f;
++            const Boton keys[] = {BMoveUp, BMoveLeft, BMoveDown, BMoveRight};
++            for (unsigned key = 0; key < 4; ++key) {
++                const float offset = key == 1 ? -1.0f : key == 3 ? 1.0f : 0.0f;
++                Icono hint{keys[key], VNormal, centerX + offset * (size + 2),
++                           top + (key ? size + 2 : 0), size, 1, 1, 1, 1};
++                leerCxform(rdram, GPR_U32(ctx, 8), hint.r, hint.g, hint.b, hint.a);
++                anotar(hint);
++            }
++        }
++
+         // Rotation/shake diagrams encode direction as well as a stick. Keep that information visible.
+         if (!esBoton || (b == BStickIzq && v == VGriego))
+         {
+@@ -1183,6 +1203,7 @@
+     bool allReady = true;
+     for (const Icono &i : iconos)
+     {
++        if (i.boton >= BMoveUp && e != ETeclado) continue;
+         const Textura &t = textura(e, i.boton, i.worldSpace && e == EXbox ? VGriego : i.variante);
+         if (!t.rt.id || !t.rt.texture.id) {
+             allReady = false;

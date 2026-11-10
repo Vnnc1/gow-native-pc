@@ -1,0 +1,45 @@
+Keep all six menu categories within a minimum-size window and describe unbound inputs without a missing font glyph.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -591,7 +591,7 @@
+         "Poseidon","Medusa","Zeus","Hades","Artemis","Rage","Move: forward","Move: backward","Move: left","Move: right",
+         "Evade: forward","Evade: backward","Evade: left","Evade: right","Evade modifier","Stick assist"};
+     std::string bindingName(int code,bool pad) {
+-        if(code<=0) return "—";
++        if(code<=0) return tr("Sem comando","Unbound");
+         if(pad) {
+             static const char *names[]={"—","D-pad ↑","D-pad →","D-pad ↓","D-pad ←","Y / Triangle","B / Circle","A / Cross","X / Square","LB / L1","LT / L2","RB / R1","RT / R2","Back / Share","Guide","Start / Options","L3","R3"};
+             return code<18?names[code]:"?";
+@@ -656,7 +656,8 @@
+ 
+     int visibleRows() { auto g=geometria(); return std::max(1,int((g.h-g.cabecera-g.pie)/g.fila)); }
+     Rectangle dockRect(int index) {
+-        auto g=geometria(); float w=116*g.escala,gap=8*g.escala;
++        auto g=geometria(); float gap=8*g.escala;
++        float w=std::min(116*g.escala,(GetScreenWidth()-32.f-5*gap)/6);
+         return Rectangle{(GetScreenWidth()-(w*6+gap*5))*.5f+index*(w+gap),GetScreenHeight()-76*g.escala,w,52*g.escala};
+     }
+     bool anyHeld() {
+@@ -706,7 +707,7 @@
+             if(i==filas(pestana)-1) return {tr("Restaurar mapeamento","Restore bindings"),tr("Voltar às configurações recebidas do launcher.","Restore the bindings supplied by the launcher."),Accion,false,{},true};
+             int code[8],n=tobiichiCodigosAccion(actions[i-1],code,8); std::string label;
+             if(g_menu.padBindings) label=bindingName(tobiichiBotonMandoAccion(actions[i-1]),true);
+-            else { for(int j=0;j<n;++j) {if(j)label+=" / ";label+=bindingName(code[j],false);} if(label.empty())label="—"; }
++            else { for(int j=0;j<n;++j) {if(j)label+=" / ";label+=bindingName(code[j],false);} if(label.empty())label=tr("Sem comando","Unbound"); }
+             return {idiomaMenu()==3?actionPt[i-1]:actionEn[i-1],g_menu.bindingStatus.empty()?tr("Selecionar para atribuir; Delete remove.","Select to bind; Delete clears."):g_menu.bindingStatus,Accion,false,label,true};
+         }
+         if(pestana==PAudio) {
+@@ -1106,8 +1107,9 @@
+         Rectangle rect=dockRect(i);bool active=dockOrder[i]==pestana;
+         DrawRectangleRounded(rect,.14f,8,active?Color{49,29,31,255}:Color{20,22,27,245});
+         DrawRectangleRoundedLinesEx(rect,.14f,8,active?2.f:1.f,active?kOro:kBorde);
+-        const char *label=category(dockOrder[i]);float tw=ancho(f.negrita,label,17*s);
+-        texto(f.negrita,label,rect.x+(rect.width-tw)*.5f,rect.y+16*s,17*s,active?kTexto:kTextoSuave);
++        const std::string label=ajustar(f.negrita,category(dockOrder[i]),17*s,rect.width-8*s);
++        float tw=ancho(f.negrita,label.c_str(),17*s);
++        texto(f.negrita,label.c_str(),rect.x+(rect.width-tw)*.5f,rect.y+16*s,17*s,active?kTexto:kTextoSuave);
+     }
+     if(!g_menu.modal) {
+         const char* hint=tr("Escolha uma categoria para ajustar sua sessão.","Choose a category to adjust your session.");

@@ -135,7 +135,7 @@ bool DiagnosticKit::start(bool detailed, bool fastVu, int scale) {
 }
 void DiagnosticKit::refresh() {
     if(m_session.isEmpty()) return;
-    const auto meta=json(m_session+"/session.json"); const auto state=meta.value("state").toString();
+    const auto meta=SessionDiagnostics::sessionMetadata(m_session); const auto state=meta.value("state").toString();
     const bool active=state=="prepared"||state=="starting"||state=="running";
     if(active) {
         const auto stamp=QDateTime::fromString(meta.value("last_heartbeat_utc").toString(meta.value("created_utc").toString()),Qt::ISODateWithMs);
@@ -143,6 +143,8 @@ void DiagnosticKit::refresh() {
         if(!m_running) m_status="diagInterrupted";
     } else if(!state.isEmpty()) {
         m_running=false; m_status=state=="completed"?"diagFinished":"diagInterrupted";
+        if(meta.value("final_metadata_incomplete").toBool() && m_report.isEmpty())
+            SessionDiagnostics::writeSummary(m_session,meta);
         QFile f(m_session+"/RESUMO.txt"); if(f.open(QIODevice::ReadOnly)) m_report=QString::fromUtf8(f.read(32768));
     }
     emit changed();

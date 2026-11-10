@@ -1,0 +1,142 @@
+# 63-vu1-hot-entry: measurement only. GOW_VU1_HOT=1 attributes the VU1 wall time to the entry PC of every program run;
+# off by default and, while off, the cost is one static branch per run (no rdtsc).
+#
+# Patch 62 sampled one block call out of eight and scaled the sum back, which printed 112-124 % of run_ms and could not
+# say which microprogram the time belongs to. A run is only ~24k/s, so timing all of them is cheaper and exact: every
+# run takes two rdtsc (well under 0.1 % of a core) and adds its wall time, blocks and pairs to hot[entry pc >> 3]. The
+# 5 s line prints the total and the eight largest entries (pc, ms, share, runs/s, pairs, ns per pair). It also replaces
+# nothing in patch 62, so both can run together; [vu1-hot] total_ms is the part of run_ms that is inside the runs.
+#
+# Measured (i3-4170 + HD 4400, Asia disc, 0.5x, VU1 x64 fast, GOW_VU1_FAST=1, attract/replay demo, 5 s windows):
+#   three entry PCs, and nothing else, own the whole VU1 wall: pc=0 44.1-44.8 % (13.8-16.6 ns/pair), pc=18 29.8-31.0
+#   % (13.0-14.8), pc=30 24.7-26.4 % (11.7-13.0), 85M-135M pairs each, 27k-28k runs/s in total. So the wall is the
+#   microcode of three VU1 programs (~2350 pairs per run) and not the dispatch layer; patch 62's block share is
+#   consistent with that (dispatch 0.0-4.6 % on this build).
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index ac42a07..0db2843 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -66,6 +66,18 @@ namespace vu1cost
+         unsigned long long xgkickSamples = 0;
+     };
+     inline Counters counters;
++
++    // gow-native-pc (patch 63): GOW_VU1_HOT=1 attributes the VU1 wall time to the entry PC of every program run (all
++    // entries share the microcode image of a generation). One rdtsc pair per run (~24k runs/s, well under 0.1 % of a
++    // core) instead of patch 62's 1/8 block sampling, so the per-program split is exact. Zero while unset.
++    struct HotEntry
++    {
++        unsigned long long ticks = 0; // wall time of this entry's runs (rdtsc overhead already subtracted)
++        unsigned long long runs = 0;
++        unsigned long long blocks = 0;
++        unsigned long long pairs = 0;
++    };
++    inline HotEntry hot[2048]; // indexed by entry pc >> 3 (VU1 micro memory is 16 KB)
+ }
+ 
+ namespace vu1n
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 2b60e16..ae47fee 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -2020,6 +2020,57 @@ static void vu1CostReport()
+     prev = c;
+ }
+ 
++// gow-native-pc (patch 63): GOW_VU1_HOT=1, every 5 s: the VU1 wall time split by the entry PC of the program runs (one
++// exact sample per run, unlike patch 62's 1/8 block sampling). `ns_pair` is the block execution cost of that program,
++// excluding the per-run entry/exit that the same thread pays once per run.
++static void vu1HotReport()
++{
++    static const bool enabled = std::getenv("GOW_VU1_HOT") != nullptr;
++    if (!enabled)
++        return;
++    static auto last = std::chrono::steady_clock::now();
++    const auto now = std::chrono::steady_clock::now();
++    if (now - last < std::chrono::seconds(5))
++        return;
++    const double wall = std::chrono::duration<double>(now - last).count();
++    last = now;
++    static const double toMs = [] {
++        const auto t0 = std::chrono::steady_clock::now();
++        const uint64_t c0 = vu1cost::ticks();
++        while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
++        const uint64_t c1 = vu1cost::ticks();
++        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++        return ms > 0.0 ? 1.0 / (static_cast<double>(c1 - c0) / ms) : 0.0;
++    }();
++    static vu1cost::HotEntry prev[2048];
++    struct Row { double ms; unsigned long long pc, runs, pairs, blocks; };
++    static Row rows[2048];
++    size_t count = 0u;
++    double totalMs = 0.0;
++    for (size_t i = 0; i < 2048u; ++i)
++    {
++        const vu1cost::HotEntry &c = vu1cost::hot[i];
++        const vu1cost::HotEntry &p = prev[i];
++        if (c.runs == p.runs)
++            continue;
++        const double ms = static_cast<double>(c.ticks - p.ticks) * toMs;
++        rows[count++] = Row{ms, i * 8u, c.runs - p.runs, c.pairs - p.pairs, c.blocks - p.blocks};
++        totalMs += ms;
++        prev[i] = c;
++    }
++    std::sort(rows, rows + count, [](const Row &a, const Row &b) { return a.ms > b.ms; });
++    std::fprintf(stderr, "[vu1-hot] total_ms=%.0f entries=%zu wall=%.2fs", totalMs, count, wall);
++    for (size_t i = 0; i < count && i < 8u; ++i)
++    {
++        const Row &r = rows[i];
++        std::fprintf(stderr, " | pc=%x %.0fms %.1f%% runs=%.0f/s pairs=%.2fM ns_pair=%.1f",
++                     static_cast<unsigned>(r.pc), r.ms, totalMs > 0.0 ? r.ms * 100.0 / totalMs : 0.0,
++                     static_cast<double>(r.runs) / wall, static_cast<double>(r.pairs) * 1e-6,
++                     r.pairs ? r.ms * 1e6 / static_cast<double>(r.pairs) : 0.0);
++    }
++    std::fprintf(stderr, "\n");
++}
++
+ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+@@ -2377,6 +2428,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         ++vu1cost::counters.runs;
+         vu1CostReport();
+     }
++    vu1HotReport(); // patch 63: returns immediately while GOW_VU1_HOT is unset
+ }
+ 
+ // GOW-Port: GOW_VU1C_VERIFICAR. Antes de un bloque compilado se ejecutan sus pares con el interprete desde el
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 7a717d6..2a38f45 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -1067,6 +1067,12 @@ bool VU1Interpreter::runNative(StepContext &context)
+     static const bool costDiag = std::getenv("GOW_VU1_COST") != nullptr; // patch 62
+     const uint64_t costStart = costDiag ? vu1cost::ticks() : 0u;
+ 
++    // gow-native-pc (patch 63): one attribution sample per program run, keyed by the entry PC (m_state.pc is the
++    // microcode address the run starts at, before the loop rewrites it per block).
++    static const bool hotDiag = std::getenv("GOW_VU1_HOT") != nullptr;
++    const uint32_t hotPc = m_state.pc & 0x3FF8u;
++    const uint64_t hotStart = hotDiag ? vu1cost::ticks() : 0u;
++
+     const uint64_t generation = context.memory ? context.memory->getVU1CodeGeneration() : 0u;
+     if (generation != ns.generation)
+     {
+@@ -1286,6 +1292,16 @@ bool VU1Interpreter::runNative(StepContext &context)
+             ns.missHits.clear();
+         }
+     }
++    if (hotDiag && armed) // patch 63
++    {
++        const uint64_t raw = vu1cost::ticks() - hotStart;
++        const uint64_t overhead = vu1cost::rdtscOverhead();
++        vu1cost::HotEntry &h = vu1cost::hot[hotPc >> 3];
++        h.ticks += raw > overhead ? raw - overhead : 0u;
++        ++h.runs;
++        h.blocks += ctx.blocks;
++        h.pairs += ctx.pairs;
++    }
+     return handled;
+ }
+ 
+

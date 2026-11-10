@@ -1,0 +1,274 @@
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+@@ -4,6 +4,7 @@
+ #include <array>
+ #include <cstdint>
+ #include <functional>
++#include <mutex>
+ #include <vector>
+ 
+ enum class GifPathId : uint8_t
+@@ -37,7 +38,7 @@
+     // Receives the buffers given to submitBuffer once drain() has processed them (the DMA buffer pool).
+     using RecycleFn = std::function<void(std::vector<uint8_t> &&)>;
+     void setRecycleFn(RecycleFn fn) { m_recycleFn = std::move(fn); }
+-    void reset() { m_queue.clear(); m_path3Input = {}; }
++    void reset();
+ 
+     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+     // Move-in overload: takes over an already-materialized buffer (the DMA worker's packet copy) without the
+@@ -48,12 +49,19 @@
+     void submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+ 
+     void drain();
+-    bool empty() const { return m_queue.empty(); }
++    bool empty() const;
++    // gow-native-pc (patch 77): queued packets, for the caller's backpressure decision.
++    size_t size() const;
+ 
+ private:
+     ProcessPathPacketFn m_processFn;
+     RecycleFn m_recycleFn;
+     std::vector<GifArbiterPacket> m_queue;
++    // gow-native-pc (patch 77): submit() may run on any guest thread (VU1's XGKICK, the DMA thread) while the GS worker
++    // drains; m_mutex guards the queue and the Path3 tag state, m_drainMutex keeps exactly one thread inside the
++    // callback (recursive: a callback may submit, and drain() may be reached from inside processing).
++    mutable std::mutex m_mutex;
++    std::recursive_mutex m_drainMutex;
+ 
+     // GOW-Port: el primer quadword de un bloque DMA puede ser payload, no una GIFtag.
+     struct Path3InputState
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -71,10 +71,14 @@
+     GifArbiterPacket pkt;
+     pkt.pathId = pathId;
+     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
+-    pkt.path3Image = (pathId == GifPathId::Path3) && trackPath3Packet(data, sizeBytes);
+-    pkt.data.resize(sizeBytes);
+-    std::memcpy(pkt.data.data(), data, sizeBytes);
+-    m_queue.push_back(std::move(pkt));
++    {
++        // patch 77: the Path3 tag walk keeps a cursor across packets, so it is part of the queue's state
++        std::lock_guard<std::mutex> lock(m_mutex);
++        pkt.path3Image = (pathId == GifPathId::Path3) && trackPath3Packet(data, sizeBytes);
++        pkt.data.resize(sizeBytes);
++        std::memcpy(pkt.data.data(), data, sizeBytes);
++        m_queue.push_back(std::move(pkt));
++    }
+ }
+ 
+ void GifArbiter::submitBuffer(GifPathId pathId, std::vector<uint8_t> &&data, bool path2DirectHl)
+@@ -85,22 +89,51 @@
+     GifArbiterPacket pkt;
+     pkt.pathId = pathId;
+     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
+-    pkt.path3Image = (pathId == GifPathId::Path3) && trackPath3Packet(data.data(), static_cast<uint32_t>(data.size()));
+     pkt.data = std::move(data); // zero-copy handover of the DMA worker's buffer
+     pkt.recycle = true;
++    std::lock_guard<std::mutex> lock(m_mutex);
++    pkt.path3Image = (pathId == GifPathId::Path3) && trackPath3Packet(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+     m_queue.push_back(std::move(pkt));
++}
++
++void GifArbiter::reset()
++{
++    std::lock_guard<std::recursive_mutex> serial(m_drainMutex);
++    std::lock_guard<std::mutex> lock(m_mutex);
++    m_queue.clear();
++    m_path3Input = {};
++}
++
++bool GifArbiter::empty() const
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++    return m_queue.empty();
++}
++
++size_t GifArbiter::size() const
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++    return m_queue.size();
+ }
+ 
+ void GifArbiter::submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
+ {
+-    if (!m_queue.empty() || !data || sizeBytes < 16 || !m_processFn || pathId < GifPathId::Path1 || pathId > GifPathId::Path3)
++    if (!data || sizeBytes < 16 || !m_processFn || pathId < GifPathId::Path1 || pathId > GifPathId::Path3)
++        return;
++    // patch 77: one drainer at a time. The in-place path runs the callback outside the queue lock but inside this one, so a
++    // packet submitted by the VU1 thread while the GS worker drains (or the reverse) cannot interleave its callback.
++    std::lock_guard<std::recursive_mutex> serial(m_drainMutex);
++    if (!empty())
+     {
+         submit(pathId, data, sizeBytes, path2DirectHl);
+         drain();
+         return;
+     }
+     if (pathId == GifPathId::Path3)
++    {
++        std::lock_guard<std::mutex> lock(m_mutex);
+         trackPath3Packet(data, sizeBytes); // the PATH3 tag cursor follows every packet
++    }
+     m_processFn(pathId, data, sizeBytes);
+     drain(); // packets the callback submitted meanwhile
+ }
+@@ -109,27 +142,34 @@
+ {
+     if (!m_processFn)
+         return;
+-
+-    while (!m_queue.empty())
++    std::lock_guard<std::recursive_mutex> serial(m_drainMutex);
++    for (;;)
+     {
++        std::vector<GifArbiterPacket> batch;
++        {
++            std::lock_guard<std::mutex> lock(m_mutex);
++            if (m_queue.empty())
++                break;
++            batch.swap(m_queue);
++        }
++        const size_t count = batch.size();
+         // GOW-Port: la excepción DIRECTHL/IMAGE no es un orden débil estricto y no puede
+         // usarse como comparador de stable_sort. Agrupar solo por path conserva sus FIFO.
+-        std::stable_sort(m_queue.begin(), m_queue.end(),
++        std::stable_sort(batch.begin(), batch.end(),
+                          [](const GifArbiterPacket &a, const GifArbiterPacket &b)
+                          {
+                              return pathPriority(a.pathId) < pathPriority(b.pathId);
+                          });
+-        const size_t count = m_queue.size();
+         size_t path2Begin = 0u;
+-        while (path2Begin < count && m_queue[path2Begin].pathId == GifPathId::Path1)
++        while (path2Begin < count && batch[path2Begin].pathId == GifPathId::Path1)
+             ++path2Begin;
+         size_t path2End = path2Begin;
+-        while (path2End < count && m_queue[path2End].pathId == GifPathId::Path2)
++        while (path2End < count && batch[path2End].pathId == GifPathId::Path2)
+             ++path2End;
+ 
+         for (size_t i = 0u; i < path2Begin; ++i)
+         {
+-            auto &pkt = m_queue[i];
++            auto &pkt = batch[i];
+             if (!pkt.data.empty())
+                 m_processFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+@@ -139,18 +179,17 @@
+             // GOW-Port: decidir entre las cabeceras, nunca adelantar un paquete dentro del path.
+             // DIRECTHL espera a IMAGE en la cabecera PATH3; DIRECT mantiene prioridad normal.
+             const bool takePath2 = path2 < path2End &&
+-                (path3 == count || !m_queue[path2].path2DirectHl || !m_queue[path3].path3Image);
+-            auto &pkt = m_queue[takePath2 ? path2++ : path3++];
++                (path3 == count || !batch[path2].path2DirectHl || !batch[path3].path3Image);
++            auto &pkt = batch[takePath2 ? path2++ : path3++];
+             if (!pkt.data.empty())
+                 m_processFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+         // buffers taken over by submitBuffer go back to their owner's pool once processed
+         if (m_recycleFn)
+             for (size_t i = 0u; i < count; ++i)
+-                if (m_queue[i].recycle)
+-                    m_recycleFn(std::move(m_queue[i].data));
+-        // GOW-Port: conservar los paquetes que el callback haya añadido; se procesan en otra tanda.
+-        m_queue.erase(m_queue.begin(), m_queue.begin() + count);
++                if (batch[i].recycle)
++                    m_recycleFn(std::move(batch[i].data));
++        // GOW-Port: los paquetes que el callback haya añadido quedan en m_queue y se toman en otra tanda.
+     }
+ }
+ 
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -500,6 +500,7 @@
+         uint32_t fbrst = 0;
+         uint32_t earlyFinish = 0;   // patch 40: PATH2 FINISH writes found in the packet (already raised or to raise)
+         bool raiseAtStart = false;  // patch 40: raise the early FINISH when the worker starts this job
++        bool drainArbiter = false;  // patch 77: a PATH1 packet was queued for this worker instead of processed in place
+     };
+     bool needsGsWorkerSync(uint32_t address) const;
+     void syncGsWorkerFor(uint32_t address);
+@@ -508,6 +509,9 @@
+     void appendGuestBytes(uint32_t address, uint32_t bytes, std::vector<uint8_t> &out);
+     void deliverDma(DmaPath path, std::vector<uint8_t> &&bytes);
+     void runGsWorkerJob(GsWorkerJob &job);
++    // patch 77: hand a queued PATH1 packet to the GS worker (GOW_GS_ASYNC_SUBMIT)
++    void postGsArbiterDrain();
++    bool m_gsWorkerArbiterPending = false;
+     void gsWorkerLoop();
+     bool m_gsWorkerEnabled = false;
+     bool m_vu1EarlyFinish = false; // bound large VIF1 submissions while asynchronous FINISH is used
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2223,6 +2223,8 @@
+                 return; // stop requested and nothing left
+             job = std::move(m_gsWorkerJobs.front());
+             m_gsWorkerJobs.pop_front();
++            if (job.drainArbiter) // patch 77: cleared as taken, so a later PATH1 submit posts its own job
++                m_gsWorkerArbiterPending = false;
+             m_gsWorkerBusy = true;
+         }
+         try
+@@ -2367,7 +2369,21 @@
+ 
+ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
+ {
+-    syncGsWorkerIfOtherThread("submitGifPacket");
++    // gow-native-pc (patch 77, GOW_GS_ASYNC_SUBMIT=1): a PATH1 packet from the VU1 thread is queued for the GS worker
++    // instead of being parsed on the VU1 thread. Before this, every XGKICK waited for the worker to go fully idle and then
++    // ran the whole GIF/GS packet through the callback itself, measured at ~13 us per XGKICK (30-47% of the VU1 block
++    // time on the ship deck). The queue keeps the packet's own copy, so the caller's VU1 memory is free on return; the
++    // worker's drain is serialized with any other drain, and PATH1 FIFO order is the queue's order.
++    static const bool asyncPath1 = []
++    {
++        const char *v = std::getenv("GOW_GS_ASYNC_SUBMIT");
++        return v && *v != '0'; // default off: the synchronous path stays the safe one
++    }();
++    static constexpr size_t kMaxAsyncPackets = 512u; // backpressure: past this the VU1 thread drains in place as before
++    const bool queueForWorker = asyncPath1 && pathId == GifPathId::Path1 && drainImmediately && m_gifArbiter &&
++                                m_gsWorkerEnabled && !onGsWorkerThread() && m_gifArbiter->size() < kMaxAsyncPackets;
++    if (!queueForWorker)
++        syncGsWorkerIfOtherThread("submitGifPacket");
+     if (!data || sizeBytes < 16)
+         return;
+ 
+@@ -2382,11 +2398,37 @@
+     }
+ 
+     if (m_gifArbiter && drainImmediately)
+-        m_gifArbiter->submitAndDrain(pathId, data, sizeBytes, path2DirectHl);
++    {
++        if (queueForWorker)
++        {
++            m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
++            postGsArbiterDrain();
++        }
++        else
++            m_gifArbiter->submitAndDrain(pathId, data, sizeBytes, path2DirectHl);
++    }
+     else if (m_gifArbiter)
+         m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
+     else if (m_gifPacketCallback)
+         m_gifPacketCallback(data, sizeBytes);
++}
++
++// patch 77: one drain job per worker wake-up; a submit that lands while the worker is already draining posts a new one,
++// because the flag is cleared as the job is taken, not after it finishes.
++void PS2Memory::postGsArbiterDrain()
++{
++    if (!m_gsWorkerEnabled)
++        return;
++    {
++        std::lock_guard<std::mutex> lock(m_gsWorkerMutex);
++        if (m_gsWorkerArbiterPending || m_gsWorkerStop)
++            return;
++        m_gsWorkerArbiterPending = true;
++        GsWorkerJob job;
++        job.drainArbiter = true;
++        m_gsWorkerJobs.push_back(std::move(job));
++    }
++    m_gsWorkerCv.notify_one();
+ }
+ 
+ void PS2Memory::setGifArbiter(GifArbiter *arbiter)

@@ -1,0 +1,92 @@
+#include "raylib.h"
+#include "runtime/gow_qte_prompt.h"
+#include "rlgl.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+constexpr uint32_t PS2_RAM_SIZE=0x2000000;
+extern const unsigned char gowFuenteIconos[];
+extern const size_t gowFuenteIconosTam;
+@TYPES@
+Font g_fuente{};
+bool g_fuenteCargada=false;
+constexpr int kRadio=64;
+std::string rotulo(Estilo,Boton b) {
+    switch(b) {case BCruz:return "A";case BCirculo:return "B";case BCuadrado:return "X";
+    case BTriangulo:return "Y";case BL1:return "LB";case BR1:return "RB";case BL2:return "LT";case BR2:return "RT";
+    case BMoveUp:return "W";case BMoveLeft:return "A";case BMoveDown:return "S";case BMoveRight:return "D";
+    default:return "-";}
+}
+@FUNCTIONS@
+int main(int argc,char**argv) {
+    assert(argc==2);
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1200,1100,"Prompt artwork regression");
+    assert(IsWindowReady());
+    BeginDrawing();ClearBackground(BLACK);EndDrawing();
+    std::vector<uint8_t> ram(PS2_RAM_SIZE);
+    auto u=[&](uint32_t a,uint32_t v){std::memcpy(ram.data()+a,&v,4);};
+    auto f=[&](uint32_t a,float v){std::memcpy(ram.data()+a,&v,4);};
+    constexpr uint32_t n=0x110000,model=0x120000,res=0x130000,mesh=0x140000,w=0x150000,cam=0x160000;
+    u(n,15);u(n+0x18,model);u(model,1);u(model+0x1c,res);std::memcpy(ram.data()+res+12,"gominigamecircle",16);
+    u(n+0xe0,1);u(mesh+0x20,0x10);u(mesh+8,2);f(mesh+0x5c,2);u(0x35fa98,cam);
+    f(cam+0x40,0.75f);f(cam+0x54,-1);f(cam+0x68,1);f(cam+0x6c,1);
+    for(int i=0;i<4;++i)f(w+i*20,1);f(w+56,10);
+    // Create textures before drawing the preview: raylib texture baking changes the framebuffer.
+    const Boton buttons[]={BCruz,BCirculo,BCuadrado,BTriangulo,BL1,BL2,BR1,BR2};
+    for(auto b:buttons) for(auto v:{VNormal,VGriego}) assert(textura(EXbox,b,v).rt.texture.height==48);
+    for(auto b:{BMoveUp,BMoveLeft,BMoveDown,BMoveRight}) assert(textura(ETeclado,b,VNormal).rt.texture.height==48);
+    auto target=LoadRenderTexture(1200,1100);assert(target.id);
+    BeginDrawing();BeginTextureMode(target);ClearBackground(Color{21,23,22,255});
+    DrawText("XBOX  /  GAME-SIZED ARTWORK",40,28,24,Color{204,188,153,255});
+    DrawText("HUD / tutorials",40,86,18,GRAY);
+    DrawText("QTE",40,220,18,GRAY);
+    for(int j=0;j<8;++j) {
+        for(int row=0;row<2;++row) {
+            const auto&t=textura(EXbox,buttons[j],row?VGriego:VNormal);
+            const float size=row?96:64,x=70+j*140.0f,y=row?265:126;
+            DrawTexturePro(t.rt.texture,{0,0,48,-48},{x,y,size,size},{0,0},0,WHITE);
+        }
+        DrawText(rotulo(EXbox,buttons[j]).c_str(),92+j*140,377,18,Color{191,182,160,255});
+    }
+    DrawText("WORLD INDICATOR / SAMPLED GUEST ROTATION",40,435,20,Color{204,188,153,255});
+    const float angles[]={0,35,70,110,145,180};
+    for(int j=0;j<6;++j) {
+        float a=angles[j]*DEG2RAD;f(w,std::cos(a));f(w+32,std::sin(a));f(w+8,-std::sin(a));f(w+40,std::cos(a));
+        Icono icon{};assert(worldCircleIcon(ram.data(),n,mesh,w,0,icon));
+        drawWorldBadge(textura(EXbox,BCirculo,VGriego).rt.texture,icon,j*190.0f-540,65,1280,960,1,WHITE);
+        DrawText(TextFormat("%.0f deg",angles[j]),65+j*190,650,18,GRAY);
+    }
+    DrawText("KEYBOARD QTE / FOLLOW THE NUMBERED ARROWS",40,710,20,Color{204,188,153,255});
+    const char *names[]={"Up180CW","Up180CCW","Down180CW","Down180CCW","360CW","360CCW"};
+    const float matrices[][4]={{0,1,-1,0},{0,1,1,0},{0,-1,1,0},{0,-1,-1,0},{-1,0,0,1},{1,0,0,1}};
+    const Boton movements[]={BMoveUp,BMoveRight,BMoveDown,BMoveLeft};
+    for(int row=0;row<6;++row) {
+        const auto *m=matrices[row];auto sequence=gow_qte_prompt::sequence(names[row],m[0],m[1],m[2],m[3]);
+        const float x0=60+(row%2)*590,y=800+(row/2)*105;
+        DrawText(names[row],int(x0),int(y-48),16,GRAY);
+        for(unsigned k=0;k<sequence.count;++k) {
+            const auto&t=textura(ETeclado,movements[sequence.keys[k]],VNormal);
+            const float x=x0+k*70;
+            DrawTexturePro(t.rt.texture,{0,0,48,-48},{x,y,38,38},{0,0},0,WHITE);
+            Icono icon{};icon.guideStep=k+1;icon.guideCount=sequence.count;
+            drawGuideMarkers(icon,x+19,y+19,640*70.0f/52.0f,480*38.0f/28.0f,Color{204,188,153,255});
+        }
+    }
+    EndTextureMode();EndDrawing();
+    Image result=LoadImageFromTexture(target.texture);ImageFlipVertical(&result);
+    int marked=0;
+    for(int y=0;y<result.height;++y)for(int x=0;x<result.width;++x) {
+        const Color c=GetImageColor(result,x,y);
+        if(c.r>60 || c.g>60 || c.b>60)++marked;
+    }
+    assert(marked>10000);
+    assert(ExportImage(result,argv[1]));UnloadImage(result);UnloadRenderTexture(target);
+    for(auto&entry:g_texturas)UnloadRenderTexture(entry.second.rt);
+    CloseWindow();
+}

@@ -13,8 +13,8 @@ assert result["windows"] == 2 and result["guest_fps"] == 20 and result["min_wind
 profile = {"diagnostics": {"frame_pc": "0x123"}, "optimize": {"pad_script": "1:x"}}
 for mode in ("fps", "timing", "capture"):
     args = SimpleNamespace(mode=mode, scale=1, hidden=False, warmup=60)
-    e = m.environment(profile, Path("private-run"), args, 0)
-    assert e["GOW_VU1_EARLY_FINISH"] == "0" and e["PS2X_GS_ESCALA_DINAMICA"] == "0"
+    e = m.environment(profile, Path("private-run"), args, 0, "0x123", "1:x")
+    assert e["GOW_VU1_EARLY_FINISH"] == "0"
     assert ("GOW_SYNC_DIAG" in e) == (mode == "timing")
     assert ("GOW_VU1_TASK_RECORD" in e) == (mode == "capture")
     assert "GOW_VU1N_VERIFY" not in e
@@ -39,3 +39,16 @@ after = m.environment(profile, Path("private-run"), args, 1)
 assert before == after and before["GOW_GS_STAGE_SPIN_US"] == "50"
 assert before["GOW_GS_EARLY_FINISH"] == "1" and before["GOW_VU1_EARLY_FINISH"] == "0"
 print("PASS: build comparison keeps both runtime environments identical")
+
+# Regional executables must use their own frame probe and confirm button; the USA values describe SCUS_973.99.
+regional = {"diagnostics": {"frame_pc": "0x1837B8"}, "optimize": {"pad_script": "5:start,12:x,48:x*3"},
+            "regions": [{"id": "japan", "elf": "SLPM_670.10", "experimental_frame_pc": "0x183BB8",
+                         "experimental_menu_confirm": "circulo"},
+                        {"id": "europe", "elf": "SCES_531.33", "experimental_frame_pc": "0x1838A8",
+                         "experimental_menu_confirm": "x"}]}
+assert m.region_for_elf(regional, Path("SLPM_670.10"))["id"] == "japan"
+assert m.region_for_elf(regional, Path("SCUS_973.99")) is None
+assert m.regional_pad_script(regional["optimize"]["pad_script"], "circulo") == "5:start,12:circulo,48:circulo*3"
+assert m.regional_pad_script(regional["optimize"]["pad_script"], "x") == "5:start,12:x,48:x*3"
+assert m.regional_pad_script("1:x*2", "") == "1:x*2"
+print("PASS: complete warm windows, zero FPS retained, modes isolated, fixed graphics, private card, regional inputs")

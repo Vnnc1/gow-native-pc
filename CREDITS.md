@@ -17,6 +17,9 @@ patch) and in the history of this repository.
 
 ## Added in this project
 
+The experimental high logic-rate adaptation preserves the default 60 Hz path and adds isolated regression
+tests and a comparison mode; it does not establish whole-game high-FPS compatibility.
+
 - Game profiles (`games/<id>/game.toml`) and a pipeline driven by them (`tools/pipeline/build.ps1`, `profile.py`).
 - Disc identification and preparation (`tools/disc/identify.py`, `prepare.py`, `discfs.py`): one ISO or several, fan
   translations recognised and run on their own or on top of the original disc, one memory card for all languages.

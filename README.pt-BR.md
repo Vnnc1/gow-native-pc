@@ -11,11 +11,13 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/vers%C3%A3o-0.5.0-crimson)
+![version](https://img.shields.io/badge/vers%C3%A3o-0.6.0-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 </div>
+
+**Candidata 0.6.0 para testes:** menu com pausa e ajustes persistentes, carregamento de slots nativos, backups nos altares, ícones/QTEs remapeados, assistências opcionais e escolha da pasta da build. Veja [todas as mudanças](CHANGELOG.pt-BR.md) e [validações da candidata](docs/research/release-0.6.0-candidate.md). Distribuída apenas como v0.6.0-rc.1 para testes; v0.5.0 continua estável.
 
 **Linux / Steam Deck (experimental):** launcher nativo, pipeline e instalador Linux disponíveis para testes.
 Veja [instalação e validações pendentes](docs/linux.md). Hardware e desempenho no Steam Deck ainda não validados.
@@ -72,11 +74,14 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
   mapeamento botão a botão.
 - **Acessibilidade**: os minijogos que pedem apertos repetidos podem ser jogados segurando o botão
   ("Segurar em vez de apertar sem parar" na aba Acessibilidade), junto dos gestos de analógico e texture packs.
-- **Menu no jogo (F1)**: ajustes gráficos ao vivo, truques e cópias do cartão de memória.
+- **Menu no jogo (F1 / Select + Start)**: pausa a partida; gráficos, controles, áudio, acessibilidade, packs,
+  cheats e saves. Ajustes suportados persistem e sincronizam com o launcher.
 - **Launcher em nove idiomas**: inglês, português, espanhol, turco, francês, alemão, italiano, russo e chinês
   simplificado.
 
 ## Novidades da 0.5.0
+
+Para a candidata 0.6.0 mais recente, veja o [changelog completo](CHANGELOG.pt-BR.md). A seção abaixo é da versão anterior.
 
 - **Linux experimental:** launcher nativo, pipeline de compilação e instalador `.run` para testes em PCs Linux e
   Steam Deck. Compilação e testes iniciais feitos no WSL; compatibilidade e desempenho no Deck real ainda não validados.
@@ -188,6 +193,10 @@ launcher também ocupam espaço. A ISO não é necessária para jogar depois da 
 As compilações usam por padrão uma pasta curta no `C:`: `C:\gow-build-clang` para clang Release (a compilação de treino
 do PGO usa `C:\gow-build-clang-pgogen`). Se outra cópia já usar essa pasta, o pipeline escolhe `C:\gow-build-<hash>-clang`.
 O caminho fica registrado em `data/build-root.txt`; o launcher o lê automaticamente.
+No setup, use **Pasta da build → Alterar** para escolher um caminho local curto, como `D:\gow-build`
+(até 40 caracteres). A mesma opção aparece ao atualizar uma instalação existente.
+Alterar exige compilar novamente; os saves e a build anterior são preservados.
+O instalador não move caches compilados do CMake. Atualizar sem escolher outra pasta mantém o caminho atual.
 
 ## Como usar
 
@@ -245,13 +254,15 @@ Jogadores não precisam de Qt nem de compilador para o launcher.
 
 | Tecla | Ação |
 |---|---|
-| **F1** | Menu do jogo: Gráficos (ao vivo), Truques, Save |
+| **F1 / Select + Start** | Menu com pausa: Gráficos, Controles, Áudio, Texture packs, Cheats, Saves |
 | **F2** | Menu do jogo na aba Truques |
 | **F11** | Tela cheia / janela (sem bordas, quando esse modo estiver escolhido) |
 | **Ctrl+F1** | Depurador do runtime (para desenvolvedores) |
 
-As mudanças gráficas feitas no menu F1 valem para a sessão; o launcher guarda seus ajustes. Resolução interna e
-widescreen são mudadas no launcher (exigem reiniciar o jogo).
+Mudanças suportadas de gráficos, áudio, controles e acessibilidade persistem e sincronizam com o launcher.
+Opções do renderer lidas na inicialização ainda exigem reiniciar. Saves mostra slots do cartão ativo com local,
+miniatura e horário; carregar descarta o progresso desde o último altar após confirmação. Restaurar o histórico
+do cartão completo continua exigindo jogo fechado. Veja [documentação dos saves](docs/saves.md).
 
 ## Atualizações e manutenção
 
@@ -274,9 +285,13 @@ tela de carregamento, coloque imagens PNG, JPG ou WebP em `data/gow1/loading/`.
 
 ## Desempenho
 
-O jogo é limitado a 60 quadros por design (a lógica segue o VBlank de 60 Hz do PS2). Todas as medições, com o código e
+Por padrão, o jogo mantém o ritmo original de 60 Hz. Todas as medições, com o código e
 os ajustes usados: [`docs/tested-hardware.md`](docs/tested-hardware.md). Os resultados variam entre máquinas — use-os
 como referência.
+
+Há um **experimento de lógica a 120/240** para testes de desenvolvimento, desativado por padrão.
+Os testes locais no notebook não atingiram essas taxas de jogabilidade; a frequência de apresentação do host não é o FPS do jogo.
+Veja [instruções, resultados e validações pendentes](docs/research/experimental-logic-rate.md).
 
 No PC de testes do projeto, **Xeon E5-2666 v3 / 16 GB / Radeon RX 580 2048SP** (tela cheia 1080p, resolução interna 2×,
 PGO, Early FINISH), o navio inicial fica em **cerca de 55 fps de média**, com trechos de combate pesado em torno de

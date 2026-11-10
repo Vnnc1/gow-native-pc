@@ -1,0 +1,200 @@
+Restore checked shader linking and temporary-shader ownership alongside PR 26 warmup.
+A rejected CLUT program stays failed instead of recompiling on every draw.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -5,6 +5,7 @@
+ #include "gs_texture_store.h"
+ #include "runtime/gs/gs_swizzle.h"
+ #include "gs_gl.h"
++#include "gs_shader_program.h"
+ #include "../gs_gpu_profile.h" // GPU-side frame timing (GOW_GS_GPU_PROFILE=1)
+ #include "../gs_gpu_helpers.h"
+ // gow-native-pc (patch 52): texture packs (PCSX2 names: XXH3-64, dependency xxhash; PNGs decoded by raylib's loader, declared
+@@ -843,26 +844,6 @@
+ 
+     const Api &gl() const { return context.gl(); }
+ 
+-    GLuint compile(GLenum type, const char *src) { return compile(type, {src}); }
+-    GLuint compile(GLenum type, std::initializer_list<const char *> parts)
+-    {
+-        const Api &g = gl();
+-        const GLuint sh = g.CreateShader(type);
+-        g.ShaderSource(sh, static_cast<GLsizei>(parts.size()), parts.begin(), nullptr);
+-        g.CompileShader(sh);
+-        GLint ok = 0;
+-        g.GetShaderiv(sh, kCompileStatus, &ok);
+-        if (!ok)
+-        {
+-            char log[2048];
+-            GLsizei n = 0;
+-            g.GetShaderInfoLog(sh, sizeof(log), &n, log);
+-            std::fprintf(stderr, "[gs-hw] shader error: %s\n", log);
+-            return 0;
+-        }
+-        return sh;
+-    }
+-
+     bool ensure()
+     {
+         if (initialized)
+@@ -881,28 +862,9 @@
+             return false;
+         }
+         const Api &g = gl();
+-        const GLuint v = compile(GSGL::kVertexShader, kVsSource);
+-        const GLuint f = failTest == "shaders" ? 0u : compile(GSGL::kFragmentShader, {kFsSource, kReinterpretSource, kFsTail});
+-        if (!v || !f)
+-        {
+-            if (failTest == "shaders")
+-                std::fprintf(stderr, "[gs-hw] shader error: GOW_GS_FAIL_TEST=shaders\n");
+-            GSSharedPresent::SetRendererFailure(GSSharedPresent::RendererFailure::Shaders);
+-            failed = true;
+-            return false;
+-        }
+-        program = g.CreateProgram();
+-        g.AttachShader(program, v);
+-        g.AttachShader(program, f);
+-        g.LinkProgram(program);
+-        GLint ok = 0;
+-        g.GetProgramiv(program, kLinkStatus, &ok);
+-        if (!ok)
+-        {
+-            char log[2048];
+-            GLsizei n = 0;
+-            g.GetProgramInfoLog(program, sizeof(log), &n, log);
+-            std::fprintf(stderr, "[gs-hw] link error: %s\n", log);
++        program = failTest == "shaders" ? 0u : GSGL::BuildRasterProgram(g, {kVsSource}, {kFsSource, kReinterpretSource, kFsTail});
++        if (!program)
++        {
+             GSSharedPresent::SetRendererFailure(GSSharedPresent::RendererFailure::Shaders);
+             failed = true;
+             return false;
+@@ -975,13 +937,9 @@
+         }
+         buildTables();
+         {
+-            const GLuint sv = compile(GSGL::kVertexShader, kShuffleVs), sfs = compile(GSGL::kFragmentShader, kShuffleFs);
+-            if (sv && sfs)
+-            {
+-                shuffleProgram = g.CreateProgram();
+-                g.AttachShader(shuffleProgram, sv);
+-                g.AttachShader(shuffleProgram, sfs);
+-                g.LinkProgram(shuffleProgram);
++            shuffleProgram = GSGL::BuildRasterProgram(g, {kShuffleVs}, {kShuffleFs});
++            if (shuffleProgram)
++            {
+                 const auto sloc = [&](const char *name) { return g.GetUniformLocation(shuffleProgram, name); };
+                 locShInvSize = sloc("uInvSize"); locShSrc = sloc("uSrc"); locShSrcZ = sloc("uSrcZ"); locShZMax = sloc("uZMax");
+                 locShHd = sloc("uHd"); locShScale = sloc("uScale"); locShTexa = sloc("uTexa");
+@@ -1016,19 +974,21 @@
+             }
+         }
+         {
+-            const GLuint pv = compile(GSGL::kVertexShader, kPresentVs), pf = compile(GSGL::kFragmentShader, kPresentFs);
+-            if (pv && pf)
+-            {
+-                presentProgram = g.CreateProgram();
+-                g.AttachShader(presentProgram, pv);
+-                g.AttachShader(presentProgram, pf);
+-                g.LinkProgram(presentProgram);
++            presentProgram = GSGL::BuildRasterProgram(g, {kPresentVs}, {kPresentFs});
++            if (presentProgram)
++            {
+                 locPresentSrc = g.GetUniformLocation(presentProgram, "uSrc");
+                 locPresentOffset = g.GetUniformLocation(presentProgram, "uSrcOffset");
+                 locPresentEdge = g.GetUniformLocation(presentProgram, "uSrcEdge");
+                 g.GenVertexArrays(1, &presentVao);
+                 g.BindVertexArray(vao);
+             }
++        }
++        if (!presentProgram)
++        {
++            GSSharedPresent::SetRendererFailure(GSSharedPresent::RendererFailure::Shaders);
++            failed = true;
++            return false;
+         }
+         // gow-native-pc (patch 94): the CLUT-from-target program is linked lazily, on the first draw whose palette lives
+         // in a render target. That is a one-time compile in the middle of the frame that first needs it; doing it here
+@@ -2049,6 +2009,7 @@
+     // A CLUT whose source memory a render target was drawn into is read from that target on the GPU: one pass writes the
+     // raw source words (reinterpreting fetch, CPSM view of the target) into a 256x1 target, the 1 KB result goes to the
+     // CLUT store. Results are cached per target version, so a target read many times per frame costs one pass.
++    bool clutProgramFailed = false;
+     GLuint clutProgram = 0, clutFbo = 0, clutTex = 0, clutCoordTex = 0;
+     GLint locClTables = -1, locClRtColor = -1, locClCoords = -1, locClTexFmt = -1, locClTexFmt2 = -1, locClRtFmt = -1, locClRtFmt2 = -1,
+           locClTex0 = -1, locClRtPx = -1;
+@@ -2059,13 +2020,9 @@
+         if (clutProgram)
+             return true;
+         const Api &g = gl();
+-        const GLuint v = compile(GSGL::kVertexShader, kPresentVs), f = compile(GSGL::kFragmentShader, {kClutFsHead, kReinterpretSource, kClutFsMain});
+-        if (!v || !f)
+-            return false;
+-        clutProgram = g.CreateProgram();
+-        g.AttachShader(clutProgram, v);
+-        g.AttachShader(clutProgram, f);
+-        g.LinkProgram(clutProgram);
++        if (clutProgramFailed) return false;
++        clutProgram = GSGL::BuildRasterProgram(g, {kPresentVs}, {kClutFsHead, kReinterpretSource, kClutFsMain});
++        if (!clutProgram) { clutProgramFailed = true; return false; }
+         const auto loc = [&](const char *name) { return g.GetUniformLocation(clutProgram, name); };
+         locClTables = loc("uTables"); locClRtColor = loc("uRtColor"); locClCoords = loc("uCoords"); locClTexFmt = loc("uTexFmt");
+         locClTexFmt2 = loc("uTexFmt2"); locClRtFmt = loc("uRtFmt"); locClRtFmt2 = loc("uRtFmt2"); locClTex0 = loc("uTex0"); locClRtPx = loc("uRtPx");
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_shader_program.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include "gs_gl.h"
++#include <cstdio>
++#include <initializer_list>
++
++namespace GSGL
++{
++// Own temporary shaders; expose only a successfully linked program to callers.
++inline GLuint BuildRasterProgram(const Api &g, std::initializer_list<const char *> vertex,
++                                 std::initializer_list<const char *> fragment)
++{
++    const auto compile = [&](GLenum type, std::initializer_list<const char *> source) {
++        const GLuint shader = g.CreateShader(type);
++        if (!shader) return GLuint{0};
++        g.ShaderSource(shader, static_cast<GLsizei>(source.size()), source.begin(), nullptr);
++        g.CompileShader(shader);
++        GLint ok = 0;
++        g.GetShaderiv(shader, kCompileStatus, &ok);
++        if (!ok)
++        {
++            char log[2048]{};
++            g.GetShaderInfoLog(shader, sizeof(log), nullptr, log);
++            std::fprintf(stderr, "[gs-hw] shader error: %s\n", log);
++            g.DeleteShader(shader);
++            return GLuint{0};
++        }
++        return shader;
++    };
++    const GLuint v = compile(kVertexShader, vertex);
++    if (!v) return 0;
++    const GLuint f = compile(kFragmentShader, fragment);
++    if (!f) { g.DeleteShader(v); return 0; }
++    const GLuint program = g.CreateProgram();
++    GLint ok = 0;
++    if (program)
++    {
++        g.AttachShader(program, v);
++        g.AttachShader(program, f);
++        g.LinkProgram(program);
++        g.GetProgramiv(program, kLinkStatus, &ok);
++        if (!ok)
++        {
++            char log[2048]{};
++            g.GetProgramInfoLog(program, sizeof(log), nullptr, log);
++            std::fprintf(stderr, "[gs-hw] link error: %s\n", log);
++            g.DeleteProgram(program);
++        }
++    }
++    g.DeleteShader(v);
++    g.DeleteShader(f);
++    return ok ? program : 0;
++}
++}

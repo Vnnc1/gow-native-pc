@@ -1,0 +1,50 @@
+VU1 timing (patch 82): name the block/chain sampling strides, document the block-entry timing invariants
+
+The 1/8 block and 1/16 chain rdtsc samples were literals (& 7u / & 15u) at the two call sites; the stride is part of
+what a counter means (the reported ticks are scaled by it), so it is now kBlockSampleStride/kChainSampleStride and
+used at both sites. The block-entry timing predicate (idle table only when nothing read is in flight, memo only
+against the same predecessor identity, chain path in lockstep with the memo) was only implied by the code; it is
+now stated next to blockTiming, together with the relative/absolute cycle convention and the entry-flag ordering.
+
+No behaviour change: same strides, same predicate, same table.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -553,6 +553,18 @@ bool vu1nMemoTry(const NS &ns, const typename NS::Slot &sl, uint64_t start, cons
+ }
+ }
+ 
++// Invariants of VU block entry timing:
++//  - The returned table holds the issue cycles of the block's pairs *relative* to vu.m_cycle at entry; the absolute
++//    cycle of pair i is vu.m_cycle + cyc[i]. Only the block's reads of lanes written by a pair still in flight from the
++//    previous block can push a cycle past the idle table; everything else uses the idle table.
++//  - The idle table is exact only when no such read is in flight (and the flag queue is empty); otherwise the exact
++//    engine's stall model is run for the distinct (lane, slack) set and cached.
++//  - The memo may answer only when the predecessor ended exactly at `start`, its span is >= maxLat (so no lane can
++//    still be in flight), every array is ready, and the predecessor's timing identity (bt/cycId) is unchanged. The
++//    chain path (vu1nMemoTry) tests the exact same predicate; if the two ever disagreed, a block would be timed against
++//    the wrong predecessor, so keep them in lockstep (patch 76).
++//  - Entry flags are imported outside this function (syncInflight); blockTiming never mutates state, it only chooses
++//    the timing table.
+ // Issue cycles (relative to vu.m_cycle) of the block's pairs: the idle table unless a lane it reads is still in flight
+ // past that read; then the exact engine's stall model, run once per distinct (lane, slack) set and cached.
+ const uint8_t *VU1NativeAccess::blockTiming(VU1Interpreter &vu, VU1Interpreter::NativeState::Slot &sl, uint32_t &cycId)
+@@ -1073,7 +1085,7 @@ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint3
+     const bool opStatOn = opStatDiag && ns.opCats.size() == 2048u;
+     // patch 65: the per-block entry/exit bookkeeping below, timed under patch 62's GOW_VU1_COST (1/16 sample, scaled)
+     static const bool chainCost = std::getenv("GOW_VU1_COST") != nullptr;
+-    const bool chainSample = chainCost && ((vu1cost::counters.chainCalls & 15u) == 0u);
++    const bool chainSample = chainCost && ((vu1cost::counters.chainCalls & (vu1cost::kChainSampleStride - 1u)) == 0u);
+     const uint64_t chainStart = chainSample ? vu1cost::ticks() : 0u;
+     struct ChainScope
+     {
+@@ -1390,7 +1402,7 @@ bool VU1Interpreter::runNative(StepContext &context)
+         ctx.cycId = cycId;
+         ctx.depth = 0u;
+         // patch 62: 1/8 of the calls are timed, the report scales them back (rdtsc pair per call would cost ~15 % here)
+-        const bool costSample = costDiag && (((vu1cost::counters.blocks + static_cast<unsigned long long>(ctx.blocks)) & 7u) == 0u);
++        const bool costSample = costDiag && (((vu1cost::counters.blocks + static_cast<unsigned long long>(ctx.blocks)) & (vu1cost::kBlockSampleStride - 1u)) == 0u);
+         const uint64_t costBlock = costSample ? vu1cost::ticks() : 0u;
+         const uint32_t result = fn(ctx);
+         if (costSample)

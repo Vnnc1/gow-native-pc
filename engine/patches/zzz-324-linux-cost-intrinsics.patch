@@ -1,0 +1,32 @@
+Use compiler-appropriate x86 cycle-counter headers for GS and VU1 diagnostics. No execution or renderer behavior change.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -42,7 +42,11 @@
+ #include <unordered_map>
+ #include <vector>
+ #if defined(_M_X64) || defined(__x86_64__) // gow-native-pc (patch 62): GOW_GS_COST=1 timing
++#if defined(_MSC_VER)
+ #include <intrin.h>
++#else
++#include <x86intrin.h>
++#endif
+ #endif
+ 
+ namespace
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -18,7 +18,11 @@
+ #include <cstring>
+ #include <immintrin.h>
+ #if defined(_M_X64) || defined(__x86_64__)
++#if defined(_MSC_VER)
+ #include <intrin.h>
++#else
++#include <x86intrin.h>
++#endif
+ #endif
+ 
+ class PS2Memory;

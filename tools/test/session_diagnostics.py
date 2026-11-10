@@ -11,6 +11,8 @@ import tempfile
 import time
 import unittest
 import zipfile
+import ctypes
+from contextlib import contextmanager
 
 HELPER = Path(sys.argv.pop(1)).resolve()
 
@@ -27,6 +29,21 @@ class DiagnosticsTests(unittest.TestCase):
         self.env["GOW_PERF_DIAG"] = "frames"
         self.child = self.root / "child.py"
         self.process = None
+
+    def test_qte_auto_environment_reported(self):
+        self.env["GOW_QTE_AUTO"] = "1"
+        self.start("pass\n")
+        self.assertEqual(self.process.wait(timeout=20), 0)
+        self.assertEqual(self.metadata()["runtime_environment"]["GOW_QTE_AUTO"], "1")
+
+    def test_menu_audio_report_and_private_bridge(self):
+        self.env.update(GOW_AUDIO_VOLUME="65", GOW_AUDIO_MUTE="1", GOW_MENU_SETTINGS=str(self.root/"PRIVATE_BRIDGE"))
+        self.start("pass\n")
+        self.assertEqual(self.process.wait(timeout=20), 0)
+        env=self.metadata()["runtime_environment"]
+        self.assertEqual(env["GOW_AUDIO_VOLUME"], "65")
+        self.assertEqual(env["GOW_AUDIO_MUTE"], "1")
+        self.assertNotIn("GOW_MENU_SETTINGS", env)
 
     def tearDown(self):
         if self.process and self.process.poll() is None:
@@ -53,8 +70,92 @@ class DiagnosticsTests(unittest.TestCase):
                     raise
                 time.sleep(0.02)
 
+    @contextmanager
+    def locked_final_metadata(self):
+        self.start("from pathlib import Path\nimport time\nwhile not (Path(__file__).parent/'exit-now').exists(): time.sleep(.01)\n")
+        deadline = time.monotonic() + 10
+        while self.metadata().get('state') != 'running':
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.02)
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                      ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        # Allow reading/writing but deny atomic replacement of this file.
+        handle = kernel.CreateFileW(str(self.session / 'session.json'), 0x80000000, 3, None, 3, 128, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        try:
+            (self.root / 'exit-now').touch()
+            deadline = time.monotonic() + 10
+            while '"process_exit"' not in (self.session / 'events.jsonl').read_text():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.02)
+            yield
+        finally:
+            kernel.CloseHandle(handle)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows atomic-replacement sharing violation')
+    def test_final_metadata_retries_transient_lock(self):
+        with self.locked_final_metadata():
+            time.sleep(.2)
+        self.process.wait(timeout=10)
+        self.assertEqual(self.metadata()['state'], 'completed')
+        self.assertEqual(self.metadata()['exit_code'], 0)
+        self.assertTrue(self.metadata()['write_failure'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows atomic-replacement sharing violation')
+    def test_final_metadata_persistent_lock_recovered_on_export(self):
+        with self.locked_final_metadata():
+            self.process.wait(timeout=10)
+            self.assertEqual(self.metadata()['state'], 'running')
+            summary = json.loads((self.session / 'summary.json').read_text())
+            self.assertNotIn('session_not_completed', summary['flags'])
+            self.assertIn('final_metadata_incomplete', summary['flags'])
+        archive = self.root / 'recovered.zip'
+        subprocess.run([str(HELPER), '--export', str(self.session), str(archive)], check=True, timeout=15)
+        with zipfile.ZipFile(archive) as z:
+            meta = json.loads(z.read('session.json'))
+            self.assertEqual((meta['state'], meta['exit_code']), ('completed', 0))
+            self.assertTrue(meta['final_metadata_incomplete'])
+            self.assertIn('metadata_persist_failed', z.read('events.jsonl').decode())
+        self.assertEqual(self.metadata()['state'], 'running')  # Preserve the original evidence.
+
+    def test_recovered_exit_requires_valid_latest_terminal_event(self):
+        terminal = {'type': 'process_exit', 'state': 'completed', 'code': 0,
+                    'utc': '2026-11-09T16:07:01.113Z', 'elapsed_ms': 500}
+        cases = [
+            ('normal', [terminal], 'completed', 0),
+            ('nonzero', [dict(terminal, state='nonzero_exit', code=7)], 'nonzero_exit', 7),
+            ('crash', [dict(terminal, state='crashed', code=-1073741819)], 'crashed', -1073741819),
+            ('failed-start', [dict(terminal, state='failed_to_start', code=-1)], 'failed_to_start', -1),
+            ('new-start', [terminal, {'type': 'process_started'}], 'running', None),
+            ('missing', [], 'running', None),
+            ('wrong-code', [dict(terminal, code=7)], 'running', None),
+            ('string-code', [dict(terminal, code='0')], 'running', None),
+            ('fraction-code', [dict(terminal, code=.5)], 'running', None),
+            ('missing-time', [dict(terminal, utc='')], 'running', None),
+            ('negative-time', [dict(terminal, elapsed_ms=-1)], 'running', None),
+            ('invalid-latest', [terminal, dict(terminal, state='unknown')], 'running', None),
+        ]
+        for name, events, state, code in cases:
+            with self.subTest(name=name):
+                (self.session / 'session.json').write_text(json.dumps({'schema': 1, 'state': 'running'}))
+                (self.session / 'events.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
+                archive = self.root / (name + '.zip')
+                subprocess.run([str(HELPER), '--export', str(self.session), str(archive)], check=True, timeout=15)
+                with zipfile.ZipFile(archive) as z:
+                    meta = json.loads(z.read('session.json'))
+                    summary = json.loads(z.read('summary.json'))
+                    self.assertEqual(meta['state'], state)
+                    self.assertEqual(summary['state'], state)
+                    self.assertEqual(meta.get('exit_code'), code)
+                    self.assertEqual(meta.get('final_metadata_incomplete', False), code is not None)
+                    self.assertEqual('session_not_completed' in summary['flags'], state != 'completed')
+                self.assertEqual(self.metadata()['state'], 'running')
+
     def test_exit_metrics_redaction_and_export(self):
-        self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('[vu1n] nativePairs=123 nativeBlocks=24 missBlocks=7 laneFails=0',flush=True)\nprint('[vu1x] compiled=12 unsupported=1 codeKB=20 avgCompileUs=4.0',flush=True)\nprint('[gow-queue] queue=2 window=5 waits=3 wait_ms=12.5 max_ms=7 queued_peak=8 final=0',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)
+        self.start("import sys,time\nprint('[gow-perf] guest_flip_hz=59.5 host_hz=120.0 ee_ms=0',flush=True)\nprint('[gow-present] window=5 polls=300 fresh=12 repeated=288 unavailable=0 blank=0 skipped=40 acquire_hz=2.4 max_hold_ms=900',flush=True)\nprint('[audio-stats] requested=240000 missing=12 rate<=1.025 level=12-450',flush=True)\nprint('[vu1n] nativePairs=123 nativeBlocks=24 missBlocks=7 laneFails=0',flush=True)\nprint('[vu1x] compiled=12 unsupported=1 codeKB=20 avgCompileUs=4.0',flush=True)\nprint('[gow-queue] queue=2 window=5 waits=3 wait_ms=12.5 max_ms=7 queued_peak=8 final=0',flush=True)\nprint('error '+__file__+' person@example.com',flush=True)\ntime.sleep(5.6)\nsys.exit(7)\n").wait(timeout=20)
         meta = self.metadata()
         self.assertEqual(meta["state"], "nonzero_exit")
         self.assertEqual(meta["exit_code"], 7)
@@ -69,6 +170,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("ee_ms", perf["values"])
         queue = next(r["values"] for r in rows if r.get("tag") == "gow-queue")
         self.assertEqual((queue["queue"], queue["waits"], queue["wait_ms"], queue["max_ms"], queue["queued_peak"]), (2, 3, 12.5, 7, 8))
+        present = next(r["values"] for r in rows if r.get("tag") == "gow-present")
+        self.assertEqual((present["fresh"], present["repeated"], present["acquire_hz"], present["max_hold_ms"]), (12, 288, 2.4, 900))
+        self.assertEqual(meta["observations"]["guest_fps_min_window"], 59.5)
         audio = next(r["values"] for r in rows if r.get("tag") == "audio-stats")
         self.assertEqual((audio["missing"], audio["rate_max"], audio["level_min"], audio["level_max"]), (12, 1.025, 12, 450))
         native = next(r["values"] for r in rows if r.get("tag") == "vu1n")

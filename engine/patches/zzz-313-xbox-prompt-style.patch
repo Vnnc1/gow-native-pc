@@ -1,0 +1,179 @@
+Xbox prompt artwork and guest-driven world badge rotation.
+Use worn dark rims, colored letters and 48-pixel texture baking to match the game.
+Project the animated model plane, retaining readable faces on both sides and
+existing input mappings/fallback gates. World badges remain host overlays without
+shared guest depth. Release build, production mapping/projection tests and a
+hidden OpenGL artwork preview pass; real combat acceptance remains manual.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -2,6 +2,7 @@
+ #include "ps2_runtime.h"
+ #include "ps2_runtime_macros.h"
+ #include "raylib.h"
++#include "rlgl.h"
+ #include "runtime/gow_prompt_input.h"
+ 
+ #include <algorithm>
+@@ -438,6 +439,7 @@
+         float escala;
+         float r, g, b, a;
+         bool worldSpace = false;
++        std::array<float, 8> worldCorners{};
+     };
+     std::mutex g_mutex;
+ 
+@@ -505,8 +507,26 @@
+         if (!std::isfinite(diameter) || diameter <= 0) return false;
+         // The bound includes the original flares; keep the mapped button readable without covering combat.
+         icon = Icono{BCirculo, VNormal, 320.0f * (1.0f + clip[0]/clip[3]),
+-                     240.0f * (1.0f + clip[1]/clip[3]), std::clamp(diameter * 0.5f, 24.0f, 96.0f),
++                     240.0f * (1.0f + clip[1]/clip[3]), std::clamp(diameter * 0.5f, 24.0f, 64.0f),
+                      1, 1, 1, 1, true};
++        // Project the model's animated XY plane, including its turn and perspective.
++        // Sampling guest transforms also freezes the badge naturally when the game pauses.
++        const float fit = icon.escala / (diameter * 0.5f);
++        for (unsigned corner = 0; corner < 4; ++corner) {
++            const float x = center[0] + (corner < 2 ? -0.5f : 0.5f) * radius;
++            const float y = center[1] + (corner == 0 || corner == 3 ? 0.5f : -0.5f) * radius;
++            for (unsigned i = 0; i < 3; ++i)
++                position[i] = x * world[i] + y * world[4+i] + center[2] * world[8+i] + world[12+i];
++            for (unsigned i = 0; i < 4; ++i) {
++                clip[i] = position[0] * viewProjection[i] + position[1] * viewProjection[4+i] +
++                          position[2] * viewProjection[8+i] + viewProjection[12+i];
++                if (!std::isfinite(clip[i])) return false;
++            }
++            if (clip[3] <= 1.0f) return false;
++            icon.worldCorners[corner*2] = icon.x + (320.0f * (1.0f + clip[0]/clip[3]) - icon.x) * fit;
++            icon.worldCorners[corner*2+1] = icon.y + (240.0f * (1.0f + clip[1]/clip[3]) - icon.y) * fit;
++            if (!std::isfinite(icon.worldCorners[corner*2]) || !std::isfinite(icon.worldCorners[corner*2+1])) return false;
++        }
+         return true;
+     }
+ 
+@@ -887,10 +907,10 @@
+ 
+     Color colorXbox(const std::string &r)
+     {
+-        if (r == "A") return Color{96, 190, 60, 255};
+-        if (r == "B") return Color{224, 64, 52, 255};
+-        if (r == "X") return Color{52, 132, 228, 255};
+-        if (r == "Y") return Color{236, 190, 40, 255};
++        if (r == "A") return Color{128, 220, 85, 255};
++        if (r == "B") return Color{245, 95, 80, 255};
++        if (r == "X") return Color{85, 165, 255, 255};
++        if (r == "Y") return Color{250, 210, 70, 255};
+         return Color{232, 222, 200, 255};
+     }
+ 
+@@ -978,6 +998,7 @@
+         const Color borde{150, 138, 112, 255}, piedra{34, 30, 26, 255}, piedraBaja{14, 12, 10, 255};
+         const Color letra{236, 226, 202, 255}, oro{214, 176, 92, 255};
+         const bool griego = v == VGriego;
++        const bool xbox = e == EXbox;
+         const bool hombro = e == EXbox && (r == "LB" || r == "RB" || r == "LT" || r == "RT");
+         if (e == ETeclado || hombro)
+         {
+@@ -986,7 +1007,7 @@
+             DrawRectangleRounded(Rectangle{k.x, k.y + 4.0f, k.width, k.height}, 0.35f, 12, piedraBaja);
+             DrawRectangleRounded(k, 0.35f, 12, piedra);
+             DrawRectangleGradientV(int(k.x + 8), int(k.y + 6), int(k.width - 16), int(k.height * 0.5f), Color{62, 56, 48, 255}, piedra);
+-            DrawRectangleRoundedLinesEx(k, 0.35f, 12, griego ? 5.0f : 3.5f, griego ? oro : borde);
++            DrawRectangleRoundedLinesEx(k, 0.35f, 12, griego ? 5.0f : 3.5f, griego ? (xbox ? Color{126,93,46,255} : oro) : borde);
+             DrawRectangleRoundedLinesEx(Rectangle{k.x + 7.0f, k.y + 7.0f, k.width - 14.0f, k.height - 16.0f}, 0.3f, 12, 1.5f,
+                                         Color{90, 82, 68, 160});
+         }
+@@ -994,8 +1015,29 @@
+         {
+ 
+             DrawCircleGradient(int(c.x), int(c.y), R, Color{64, 58, 50, 255}, piedraBaja);
+-            DrawRing(c, R - (griego ? 6.0f : 4.0f), R, 0.0f, 360.0f, 64, griego ? oro : borde);
++            DrawRing(c, R - (griego ? 6.0f : 4.0f), R, 0.0f, 360.0f, 64, griego ? (xbox ? Color{126,93,46,255} : oro) : borde);
+             DrawRing(c, R - 10.0f, R - 8.5f, 0.0f, 360.0f, 64, Color{90, 82, 68, 140});
++            if (xbox) {
++                DrawRing(c, R - 12, R, 0, 360, 32, Color{15, 17, 17, 255});
++                DrawRing(c, R - 6, R - 3, 0, 360, 32, Color{69, 67, 59, 255});
++                DrawRing(c, R - 13, R - 10, 0, 360, 32, Color{8, 10, 10, 255});
++                for (int n = 0; n < 12; ++n) {
++                    const float angle = n * 30.0f;
++                    DrawRing(c, R - 8, R - 2, angle, angle + 8, 2, Color{28, 30, 29, 255});
++                    DrawRing(c, R - 5, R - 3, angle + 8, angle + 19, 2, Color{100, 90, 69, 255});
++                }
++            }
++        }
++        if (xbox) {
++            // Fixed stone grain: stable across frames and independent of gameplay RNG.
++            for (int y = 12; y < alto - 12; y += 3)
++                for (int x = 12; x < ancho - 12; x += 3) {
++                    const unsigned grain = unsigned(x * 37 + y * 71) ^ unsigned(x * y * 13);
++                    const float dx = x - c.x, dy = y - c.y;
++                    if ((hombro || dx*dx + dy*dy < (R-14)*(R-14)) && (grain & 7u) < 3u)
++                        DrawRectangle(x, y, 2, 2, (grain & 8u) ? Color{79,72,58,45} : Color{0,0,0,55});
++                }
++            if (griego && !hombro) DrawRing(c, R - 17, R - 15, 0, 360, 32, Color{126,93,46,255});
+         }
+         Color tinta = e == EXbox ? colorXbox(r) : (griego ? oro : letra);
+         if (e == EPS4) {
+@@ -1071,7 +1113,40 @@
+             textoCentrado(r, Vector2{c.x, c.y + 2.0f}, r.size() <= 1 ? alto * 0.74f : r.size() == 2 ? alto * 0.48f : alto * 0.44f, tinta,
+                           ancho - 26.0f);
+         EndTextureMode();
++        // Bake at PS2-sized UI resolution, then use soft sampling rather than crisp vector edges.
++        const int lowHeight = 48, lowWidth = int(lowHeight * t.aspecto);
++        RenderTexture2D low = LoadRenderTexture(lowWidth, lowHeight);
++        if (low.id && low.texture.id) {
++            BeginTextureMode(low);
++            ClearBackground(BLANK);
++            DrawTexturePro(t.rt.texture, {0,0,float(ancho),-float(alto)},
++                           {0,0,float(lowWidth),float(lowHeight)}, {0,0}, 0, WHITE);
++            EndTextureMode();
++            UnloadRenderTexture(t.rt);
++            t.rt = low;
++            SetTextureFilter(t.rt.texture, TEXTURE_FILTER_BILINEAR);
++        } else if (low.id) UnloadRenderTexture(low);
+         return g_texturas.emplace(clave, t).first->second;
++    }
++    void drawWorldBadge(Texture2D texture, const Icono &icon, float dx, float dy, float dw, float dh,
++                        float adjustment, Color tint)
++    {
++        const auto &p = icon.worldCorners;
++        const float area = (p[2]-p[0])*(p[5]-p[1]) - (p[3]-p[1])*(p[4]-p[0]);
++        // Show a readable face on both sides of the turning coin, without changing its silhouette.
++        rlSetTexture(texture.id);
++        rlBegin(RL_QUADS);
++        rlColor4ub(tint.r, tint.g, tint.b, tint.a);
++        rlNormal3f(0, 0, 1);
++        for (unsigned j = 0; j < 4; ++j) {
++            const unsigned k = area > 0 ? 3-j : j;
++            rlTexCoord2f(j < 2 ? 0.0f : 1.0f, j == 0 || j == 3 ? 1.0f : 0.0f);
++            const float x = icon.x + (p[k*2] - icon.x) * adjustment;
++            const float y = icon.y + (p[k*2+1] - icon.y) * adjustment;
++            rlVertex2f(dx + x / 640.0f * dw, dy + y / 480.0f * dh);
++        }
++        rlEnd();
++        rlSetTexture(0);
+     }
+ }
+ 
+@@ -1108,7 +1183,7 @@
+     bool allReady = true;
+     for (const Icono &i : iconos)
+     {
+-        const Textura &t = textura(e, i.boton, i.variante);
++        const Textura &t = textura(e, i.boton, i.worldSpace && e == EXbox ? VGriego : i.variante);
+         if (!t.rt.id || !t.rt.texture.id) {
+             allReady = false;
+             continue;
+@@ -1121,7 +1196,10 @@
+         const Rectangle origen{0.0f, 0.0f, float(t.rt.texture.width), -float(t.rt.texture.height)};
+         const Color tinte{static_cast<unsigned char>(255.0f * i.r), static_cast<unsigned char>(255.0f * i.g),
+                           static_cast<unsigned char>(255.0f * i.b), static_cast<unsigned char>(255.0f * i.a)};
+-        DrawTexturePro(t.rt.texture, origen, Rectangle{cx - ancho * 0.5f, cy - alto * 0.5f, ancho, alto}, Vector2{0.0f, 0.0f}, 0.0f, tinte);
++        if (i.worldSpace && e == EXbox)
++            drawWorldBadge(t.rt.texture, i, dx, dy, dw, dh, ajuste, tinte);
++        else
++            DrawTexturePro(t.rt.texture, origen, Rectangle{cx - ancho * 0.5f, cy - alto * 0.5f, ancho, alto}, Vector2{0.0f, 0.0f}, 0.0f, tinte);
+     }
+     g_replacementsReady.store(allReady, std::memory_order_relaxed);
+ }

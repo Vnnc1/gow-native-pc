@@ -7,8 +7,10 @@ The USA recompiler still rejects these foreign-code ELFs; the launcher selects
 their separately registered builds. See `docs/research/regional-port-2026-11-02.md` for local paths and
 the remaining acceptance limits.
 
-Run `python -I tools/test/regional-overlays.py` to check source baselines,
-patch applicability, bounded maps, stub/entry addresses and frame probes.
+Run `python -I tools/test/regional-overlays.py --runtime <pre-overlay-snapshot>`
+to check source baselines, patch applicability, bounded maps, stub/entry addresses
+and frame probes. Without `--runtime`, the test checks `engine/runtime` and must
+reject a newer incompatible USA source. An already-overlaid snapshot is not a baseline.
 
 Register a validated build with `python -I tools/pipeline/register_region.py
 --region <europe|japan> --runner <runner.exe> --elf <prepared ELF>
@@ -20,7 +22,7 @@ exact ISO identities on Install, offering selection instead of USA recompilation
 
 Each region contains:
 
-- `runtime.patch`: differences from the current patched USA runtime to the
+- `runtime.patch`: differences from the recorded patched USA baseline to the
   isolated regional source. Includes code/data relocation and disables the
   optional host target-lock assist whose camera allocation is unvalidated.
 - `baseline.json`: SHA-256 of each original UTF-8 source with normalized LF
@@ -29,8 +31,11 @@ Each region contains:
 - `entries.json`: relocated SDK stubs and additional entry-point declarations.
   These contain addresses and symbol names, not guest instructions or media.
 
-Reproduction requires the runtime revision in `engine/runtime.toml` with the
-current `engine/patches` chain applied, the exact ELF identity from
+The baseline was reproduced from repository revision
+`0807965ba9cbb464b2658f914b2ac2fb7b323bf9`: runtime commit
+`471c83180a8df575cff4abd3fae6c043b5096925` and that revision's ordinal patch chain
+through patch 58. Use those historical patch contents, not the current chain.
+Reproduction also requires the exact ELF identity from
 `games/gow1/game.toml`, and a separate runtime snapshot/build directory. Verify
 `baseline.json`, then run `git apply --check <absolute-runtime.patch>` and
 `git apply <absolute-runtime.patch>` from that snapshot. The overlay also changes

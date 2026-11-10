@@ -1,0 +1,101 @@
+Bound VU1 capture reads and keep decoded images local to each generation pass.
+Issue 6 reports std::bad_alloc in this generator. Retaining every decoded image
+scales memory with capture count even when generated pairs/blocks deduplicate.
+Keep input order and generated C++ unchanged; reject malformed sizes before allocation.
+Local 1000-image check: peak working set 158097408 -> 26755072 bytes; both succeed.
+All 13 output files match the baseline for synthetic and eight real captures.
+The reporter's original captures were unavailable; this is not full issue closure.
+
+--- a/tools/vu1/generar_vu1.cpp
++++ b/tools/vu1/generar_vu1.cpp
+@@ -173,18 +173,30 @@
+             inputs.push_back(argv[a]);
+     }
+     VU1Interpreter vu;
+-    std::vector<Code> codes;
++    // Retain only 16 KiB input images; decoded pairs are temporary for each pass.
++    std::vector<std::vector<uint8_t>> images;
+     for (const std::string &input : inputs)
+     {
+-        std::ifstream file(input, std::ios::binary);
++        std::ifstream file(input, std::ios::binary | std::ios::ate);
++        if (!file || file.tellg() != static_cast<std::streamoff>(PS2_VU1_CODE_SIZE))
++        {
++            std::cerr << input << ": VU1 micro-memory must contain exactly 16384 bytes\n";
++            return 1;
++        }
++        std::vector<uint8_t> bytes(PS2_VU1_CODE_SIZE);
++        file.seekg(0);
++        if (!file.read(reinterpret_cast<char *>(bytes.data()), bytes.size()))
++        {
++            std::cerr << input << ": could not read VU1 micro-memory\n";
++            return 1;
++        }
++        images.push_back(std::move(bytes));
++    }
++    const auto decode = [&](const std::vector<uint8_t> &bytes)
++    {
+         Code code;
+-        code.bytes.assign((std::istreambuf_iterator<char>(file)), {});
+-        if (code.bytes.size() != PS2_VU1_CODE_SIZE)
+-        {
+-            std::cerr << input << ": la micromemoria de VU1 debe tener 16384 bytes\n";
+-            return 1;
+-        }
+-        const uint32_t count = static_cast<uint32_t>(code.bytes.size() / 8u);
++        code.bytes = bytes;
++        const uint32_t count = static_cast<uint32_t>(bytes.size() / 8u);
+         code.pairs.resize(count);
+         code.valid.resize(count);
+         for (uint32_t i = 0; i < count; ++i)
+@@ -194,8 +206,8 @@
+             code.valid[i] = !(code.lower(pc) == 0u && code.upper(pc) == 0u) &&
+                             !code.pairs[i].upperUsage.reserved && !code.pairs[i].lowerUsage.reserved;
+         }
+-        codes.push_back(std::move(code));
+-    }
++        return code;
++    };
+ 
+     // Funciones por par: (pc, palabras, flags muertos) -> nombre.
+     std::map<std::tuple<uint32_t, uint32_t, uint32_t, bool>, std::string> pairFns;
+@@ -235,7 +247,9 @@
+     // Despacho par a par (sin flags muertos) para todas las palabras vistas.
+     std::map<uint32_t, std::vector<std::string>> pairCases;
+     std::set<std::tuple<uint32_t, uint32_t, uint32_t>> seenPairs;
+-    for (const Code &code : codes)
++    for (const auto &image : images)
++    {
++        const Code code = decode(image);
+         for (uint32_t pc = 0; pc + 8u <= code.bytes.size(); pc += 8u)
+         {
+             if (!code.valid[pc / 8u] || !seenPairs.insert({pc, code.lower(pc), code.upper(pc)}).second)
+@@ -249,6 +263,8 @@
+             pairCases[pc].push_back(test.str());
+         }
+ 
++    }
++
+     // Bloques.
+     // Prueba de cada bloque en el despacho y sus sucesores conocidos al generar (para encadenar sin el switch).
+     struct BlockCase
+@@ -259,8 +275,9 @@
+     std::map<uint32_t, std::vector<BlockCase>> blockCases;
+     std::set<std::pair<uint32_t, std::vector<uint32_t>>> seenBlocks;
+     size_t blockCount = 0, deadCount = 0, fmacCount = 0;
+-    for (const Code &code : codes)
+-    {
++    for (const auto &image : images)
++    {
++        const Code code = decode(image);
+         const uint32_t count = static_cast<uint32_t>(code.bytes.size() / 8u);
+         std::set<uint32_t> heads;
+         for (uint32_t i = 0; i < count; ++i)
+@@ -478,6 +495,6 @@
+         << footer;
+     writeIfChanged(base + "/programa0.cpp", out.str());
+     std::printf("[generar_vu1] %zu funciones de par, %zu bloques, %zu de %zu FMAC con flags muertos, %zu imagenes\n",
+-                pairFns.size(), blockCount, deadCount, fmacCount, codes.size());
++                pairFns.size(), blockCount, deadCount, fmacCount, images.size());
+     return 0;
+ }

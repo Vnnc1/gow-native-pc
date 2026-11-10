@@ -1,0 +1,211 @@
+GS efficiency candidate 73: specialized-shader.
+Opt-in pending GPU pixel, gameplay and resource acceptance.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -568,7 +568,18 @@
+     }
+ }
+ 
+-struct GSHwBackend::Impl
++namespace {
++struct GSDrawUniforms
++{
++    GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
++          locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locRtClamp = -1, locPxScale = -1, locAniso = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
++          locRtFmt = -1, locRtFmt2 = -1, locTex0 = -1, locRtPx = -1, locAem = -1;
++    GLint locIndexed = -1, locLinear = -1, locWrap = -1, locIdxPalette = -1;
++    GLint locSwBlend = -1, locColClamp = -1, locAbcd = -1, locFix = -1, locZAlias = -1, locZAliasWrite = -1, locZAliasMax = -1;
++};
++}
++
++struct GSHwBackend::Impl : GSDrawUniforms
+ {
+     bool xferWatchHit = false; // GOW_GS_HW_XFERWATCH: log the next upload's first bytes
+     GSTextureStore store; // uploaded texture bytes + CLUT (no rasteriser, no framebuffer)
+@@ -579,11 +590,7 @@
+ 
+     float scale = 2.0f;
+     GLuint program = 0, vao = 0, vbo = 0;
+-    GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+-          locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locRtClamp = -1, locPxScale = -1, locAniso = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
+-          locRtFmt = -1, locRtFmt2 = -1, locTex0 = -1, locRtPx = -1, locAem = -1;
+-    GLint locIndexed = -1, locLinear = -1, locWrap = -1, locIdxPalette = -1;
+-    GLint locSwBlend = -1, locColClamp = -1, locAbcd = -1, locFix = -1, locZAlias = -1, locZAliasWrite = -1, locZAliasMax = -1;
++
+ 
+     GLuint tableTex = 0, paletteTex = 0;
+     GLuint presentProgram = 0, presentVao = 0, presentFbo = 0, presentTex = 0;
+@@ -699,6 +706,24 @@
+         return sh;
+     }
+ 
++
++    GSDrawUniforms drawUniforms(GLuint id)
++    {
++        GSDrawUniforms result;
++        const auto loc = [&](const char *name) { return gl().GetUniformLocation(id, name); };
++        result.locInvSize = loc("uInvSize"); result.locTex = loc("uTex"); result.locTexSize = loc("uTexSize"); result.locTexDim = loc("uTexDim"); result.locTme = loc("uTme");
++        result.locFst = loc("uFst"); result.locTfx = loc("uTfx"); result.locTcc = loc("uTcc"); result.locIip = loc("uIip"); result.locAte = loc("uAte");
++        result.locAtst = loc("uAtst"); result.locFailTint = loc("uFailTint"); result.locAref = loc("uAref"); result.locPass = loc("uPass"); result.locBlendScale = loc("uBlendScale");
++        result.locReinterp = loc("uReinterp"); result.locDate = loc("uDate"); result.locDatm = loc("uDatm"); result.locDest = loc("uDest"); result.locZTex = loc("uZTex"); result.locZMax = loc("uZMax"); result.locTables = loc("uTables"); result.locRtColor = loc("uRtColor"); result.locPalette = loc("uPalette");
++        result.locTexFmt = loc("uTexFmt"); result.locTexFmt2 = loc("uTexFmt2"); result.locRtFmt = loc("uRtFmt"); result.locRtFmt2 = loc("uRtFmt2");
++        result.locTex0 = loc("uTex0"); result.locRtPx = loc("uRtPx");
++        result.locIndexed = loc("uIndexed"); result.locLinear = loc("uLinear"); result.locWrap = loc("uWrap"); result.locIdxPalette = loc("uIdxPalette");
++        result.locSwBlend = loc("uSwBlend"); result.locColClamp = loc("uColClamp"); result.locAbcd = loc("uAbcd"); result.locFix = loc("uFix");
++        result.locZAlias = loc("uZAlias"); result.locZAliasWrite = loc("uZAliasWrite"); result.locZAliasMax = loc("uZAliasMax");
++        result.locRtTex24 = loc("uRtTex24"); result.locRtClamp = loc("uRtClamp"); result.locPxScale = loc("uPxScale"); result.locAniso = loc("uAniso"); result.locTa0 = loc("uTa0"); result.locTa1 = loc("uTa1"); result.locAem = loc("uAem");
++        return result;
++    }
++
+     bool ensure()
+     {
+         if (initialized)
+@@ -743,17 +768,37 @@
+             failed = true;
+             return false;
+         }
+-        const auto loc = [&](const char *name) { return g.GetUniformLocation(program, name); };
+-        locInvSize = loc("uInvSize"); locTex = loc("uTex"); locTexSize = loc("uTexSize"); locTexDim = loc("uTexDim"); locTme = loc("uTme");
+-        locFst = loc("uFst"); locTfx = loc("uTfx"); locTcc = loc("uTcc"); locIip = loc("uIip"); locAte = loc("uAte");
+-        locAtst = loc("uAtst"); locFailTint = loc("uFailTint"); locAref = loc("uAref"); locPass = loc("uPass"); locBlendScale = loc("uBlendScale");
+-        locReinterp = loc("uReinterp"); locDate = loc("uDate"); locDatm = loc("uDatm"); locDest = loc("uDest"); locZTex = loc("uZTex"); locZMax = loc("uZMax"); locTables = loc("uTables"); locRtColor = loc("uRtColor"); locPalette = loc("uPalette");
+-        locTexFmt = loc("uTexFmt"); locTexFmt2 = loc("uTexFmt2"); locRtFmt = loc("uRtFmt"); locRtFmt2 = loc("uRtFmt2");
+-        locTex0 = loc("uTex0"); locRtPx = loc("uRtPx");
+-        locIndexed = loc("uIndexed"); locLinear = loc("uLinear"); locWrap = loc("uWrap"); locIdxPalette = loc("uIdxPalette");
+-        locSwBlend = loc("uSwBlend"); locColClamp = loc("uColClamp"); locAbcd = loc("uAbcd"); locFix = loc("uFix");
+-        locZAlias = loc("uZAlias"); locZAliasWrite = loc("uZAliasWrite"); locZAliasMax = loc("uZAliasMax");
+-        locRtTex24 = loc("uRtTex24"); locRtClamp = loc("uRtClamp"); locPxScale = loc("uPxScale"); locAniso = loc("uAniso"); locTa0 = loc("uTa0"); locTa1 = loc("uTa1"); locAem = loc("uAem");
++        fullUniforms = drawUniforms(program);
++        static_cast<GSDrawUniforms&>(*this) = fullUniforms;
++        activeProgram = program;
++        if (fastShaderRequested)
++        {
++            std::string source = std::string(kFsSource) + kReinterpretSource + kFsTail;
++            const auto replace = [&](const char *before, const char *after) {
++                const size_t at = source.find(before);
++                if (at != std::string::npos) source.replace(at, std::strlen(before), after);
++            };
++            replace("uniform int uReinterp;", "const int uReinterp = 0;");
++            replace("uniform int uDate, uDatm;", "const int uDate = 0; uniform int uDatm;");
++            replace("uniform int uSwBlend, uColClamp;", "const int uSwBlend = 0; uniform int uColClamp;");
++            replace("uniform int uZAlias, uZAliasWrite;", "const int uZAlias = 0, uZAliasWrite = 0;");
++            replace("uniform int uZTex;", "const int uZTex = 0;");
++            const char *failFast = std::getenv("GOW_GS_FAST_SHADER_FAIL");
++            const GLuint shader = failFast && failFast[0] == '1' ? 0 : compile(GSGL::kFragmentShader, source.c_str());
++            if (shader)
++            {
++                fastProgram = g.CreateProgram();
++                g.AttachShader(fastProgram, v);
++                g.AttachShader(fastProgram, shader);
++                g.LinkProgram(fastProgram);
++                GLint linked = 0;
++                g.GetProgramiv(fastProgram, kLinkStatus, &linked);
++                g.DeleteShader(shader);
++                if (!linked) { g.DeleteProgram(fastProgram); fastProgram = 0; }
++                else fastUniforms = drawUniforms(fastProgram);
++            }
++        }
++        std::fprintf(stderr, "[gs-fast-config] requested=%u available=%u\n", fastShaderRequested ? 1u : 0u, fastProgram ? 1u : 0u);
+ 
+         g.GenVertexArrays(1, &vao);
+         g.BindVertexArray(vao);
+@@ -1714,7 +1759,7 @@
+         g.PixelStorei(kPackAlignment, 4);
+         g.ReadPixels(0, 0, static_cast<GLsizei>(count), 1, kRgba, kUnsignedByte, words);
+         g.BindVertexArray(vao);
+-        g.UseProgram(program);
++        g.UseProgram(activeProgram);
+         g.BindBuffer(kArrayBuffer, vbo);
+         if (clutCache.size() > 4096u)
+             clutCache.clear();
+@@ -2586,7 +2631,36 @@
+         else
+             g.Disable(kBlend);
+ 
+-        g.UseProgram(program);
++        RenderTarget *src = nullptr, *zsrc = nullptr, *rsrc = nullptr;
++        if (s.prim.tme)
++        {
++            // a texture that lives in a render target of the same format is sampled straight from it
++            const auto family = [](uint8_t psm) { return (psm == GS_PSM_CT16 || psm == GS_PSM_CT16S) ? 16 : (psm == GS_PSM_CT32 || psm == GS_PSM_CT24) ? 32 : 0; };
++            if (family(c.tex0.psm) != 0 && (c.tex0.tbp0 % 32u) == 0u)
++                if (RenderTarget *candidate = findTarget(c.tex0.tbp0 / 32u))
++                    if (family(candidate->psm) == family(c.tex0.psm) && !uploadedSinceDraw(*candidate, c.tex0.tbp0) &&
++                        !overwrittenByDepth(*candidate))
++                        src = candidate;
++            const bool zFormat = c.tex0.psm == 0x30 || c.tex0.psm == 0x31 || c.tex0.psm == 0x32 || c.tex0.psm == 0x3A;
++            if (zFormat && (c.tex0.tbp0 % 32u) == 0u)
++                for (RenderTarget &t : targets)
++                    if (t.depth && t.zbp == c.tex0.tbp0 / 32u && t.fbp != t.zbp)
++                        zsrc = &t;
++            if (zsrc)
++                src = nullptr;
++            if (!src && !zsrc)
++                rsrc = findReinterpretSource(c.tex0.tbp0, c.tex0.psm);
++        }
++        const bool dateTest = ((c.test >> 14) & 1u) != 0u && c.frame.psm != GS_PSM_CT24;
++        const bool useFast = fastProgram && !rsrc && !zsrc && !dateTest && !softBlend && !zAlias;
++        const GLuint selected = useFast ? fastProgram : program;
++        if (selected != activeProgram)
++        {
++            static_cast<GSDrawUniforms&>(*this) = useFast ? fastUniforms : fullUniforms;
++            activeProgram = selected;
++        }
++        if (useFast) ++fastDraws; else ++fullDraws;
++        g.UseProgram(activeProgram);
+         {
+             const bool date = ((c.test >> 14) & 1u) != 0u && c.frame.psm != GS_PSM_CT24;
+             g.Uniform1i(locDate, date ? 1 : 0);
+@@ -2617,30 +2691,8 @@
+         g.Uniform1f(locBlendScale, 1.0f / 128.0f);
+         if (s.prim.tme)
+         {
+-            // a texture that lives in a render target of the same format is sampled straight from it
+-            RenderTarget *src = nullptr;
+-            const auto family = [](uint8_t psm) { return (psm == GS_PSM_CT16 || psm == GS_PSM_CT16S) ? 16 : (psm == GS_PSM_CT32 || psm == GS_PSM_CT24) ? 32 : 0; };
+-            if (family(c.tex0.psm) != 0 && (c.tex0.tbp0 % 32u) == 0u)
+-                if (RenderTarget *candidate = findTarget(c.tex0.tbp0 / 32u))
+-                    if (family(candidate->psm) == family(c.tex0.psm) && !uploadedSinceDraw(*candidate, c.tex0.tbp0) &&
+-                        !overwrittenByDepth(*candidate))
+-                        src = candidate;
+-            if (src == &rt)
+-                g.TextureBarrier();
+             Texture dummy;
+-            RenderTarget *zsrc = nullptr;
+-            const bool zFormat = c.tex0.psm == 0x30 || c.tex0.psm == 0x31 || c.tex0.psm == 0x32 || c.tex0.psm == 0x3A;
+-            if (zFormat && (c.tex0.tbp0 % 32u) == 0u)
+-                for (RenderTarget &t : targets)
+-                    if (t.depth && t.zbp == c.tex0.tbp0 / 32u && t.fbp != t.zbp)
+-                        zsrc = &t;
+-            if (zsrc)
+-                src = nullptr;
+-            RenderTarget *rsrc = nullptr;
+-            if (!src && !zsrc)
+-                rsrc = findReinterpretSource(c.tex0.tbp0, c.tex0.psm);
+-            if (rsrc == &rt)
+-                g.TextureBarrier();
++            if (src == &rt || rsrc == &rt) g.TextureBarrier();
+             const bool uploaded = !(src || rsrc || zsrc) && vram != nullptr;
+             const bool indexedSource = uploaded && isIndexed(c.tex0.psm);
+             Texture &tex = (src || rsrc || zsrc) ? dummy : indexedSource ? indexTextureFor(s) : textureFor(s);
+@@ -2930,6 +2982,8 @@
+         if (now - stats.last < std::chrono::seconds(5))
+             return;
+         stats.last = now;
++        std::fprintf(stderr, "[gs-fast] fast=%llu full=%llu\n", (unsigned long long)fastDraws, (unsigned long long)fullDraws);
++        fastDraws = fullDraws = 0;
+         std::fprintf(stderr, "[gs-sampler] cache=%u calls=%llu avoided=%llu\n", samplerCache ? 1u : 0u,
+             (unsigned long long)samplerCalls, (unsigned long long)samplerCallsSaved);
+         samplerCalls = samplerCallsSaved = 0;
+@@ -2954,6 +3008,10 @@
+         return nullptr;
+     }
+     // Keep existing hot renderer members at their previous offsets.
++    GSDrawUniforms fullUniforms, fastUniforms;
++    GLuint fastProgram = 0, activeProgram = 0;
++    const bool fastShaderRequested = [] { const char *v = std::getenv("GOW_GS_FAST_SHADER"); return v && v[0] == '1'; }();
++    uint64_t fastDraws = 0, fullDraws = 0;
+     const bool samplerCache = [] { const char *v = std::getenv("GOW_GS_SAMPLER_CACHE"); return v && v[0] == '1'; }();
+     uint64_t samplerCalls = 0, samplerCallsSaved = 0;
+     uint64_t textureBytes = 0;

@@ -1,0 +1,130 @@
+gs-native-pc (patch 67): a vertex chunk larger than the ring can no longer write past it
+
+ringAppend() wraps by resetting vertexRingOffset to 0 and then memcpy()ing the chunk. If the chunk
+itself is larger than the whole ring, that reset happens and the copy runs past the end of the
+persistent map: silent heap corruption, or a crash, in a path that only appears when one batch
+exceeds 32 MB. Nothing measured reaches it today (the largest batch seen is 84 KB), which is exactly
+why it would have stayed hidden until a scene produced one.
+
+ringAppend() now returns kRingOverflow, without touching the ring, when the chunk cannot fit. The
+draw path falls back to its own spillVbo: the ring is created with glBufferStorage, so it cannot be
+respecified with glBufferData, and doing so would raise GL_INVALID_OPERATION. The shuffle path falls
+back to the shuffleVbo it already owns for the non-ring case.
+
+Also adds two counters to the GOW_GS_HW_STATS line, because ring pressure had no observable value:
+  ringWraps   wraps of the ring in the window (> 2 per frame means the ring is too small)
+  oversized   chunks that took the fallback (expected to stay 0)
+
+Verified: builds clean (clang, C:\gow-build-jpn); 30 s Asia-disc run reports ringWraps=15,
+oversized=0 at 0.5x, i.e. the ring is correctly sized and the new branch is not taken. No behaviour
+change on the normal path.
+
+Files: PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 1f1cd49..26b0cc5 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -588,10 +588,12 @@ struct GSHwBackend::Impl
+     // glBindVertexBuffer and writes its vertices into a persistently mapped window; a ring wrap waits on a fence taken
+     // at the previous wrap, so the memory reused there has long been consumed.
+     static constexpr uint32_t kVertexRingBytes = 32u << 20;
++    static constexpr uint32_t kRingOverflow = 0xFFFFFFFFu; // ringAppend: the chunk cannot fit in the ring
+     GLuint vertexRingOffset = 0;
+     uint8_t *vertexRingMap = nullptr;
+     GLsync vertexFence = nullptr;
+     bool vertexRing = false;
++    GLuint spillVbo = 0; // only for a chunk larger than the ring; the ring itself is immutable, so it cannot be respecified
+     GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+           locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locRtClamp = -1, locPxScale = -1, locAniso = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
+           locRtFmt = -1, locRtFmt2 = -1, locTex0 = -1, locRtPx = -1, locAem = -1;
+@@ -683,6 +685,7 @@ struct GSHwBackend::Impl
+         uint64_t shuffles = 0;
+         uint64_t draws = 0, batches = 0, skippedPsm = 0, unsupportedBlend = 0, texDecodes = 0, texHits = 0, skippedPrim = 0;
+         uint64_t texReuse = 0, shuffleDraws = 0; // patch 61: revalidated decodes, shuffle pass draws
++        uint64_t ringWraps = 0, oversizedBatches = 0; // vertex ring pressure: > 2 wraps/frame means the ring is too small
+         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+@@ -2084,7 +2087,17 @@ struct GSHwBackend::Impl
+             g.Uniform1i(locShHd, static_cast<GLint>(hd));
+             g.ColorMask(hd == 0u ? lo : kFalse, hd == 0u ? hi : kFalse, hd == 1u ? lo : kFalse, hd == 1u ? hi : kFalse);
+             if (vertexRing)
+-                g.BindVertexBuffer(0, vbo, ringAppend(q.data(), q.size() * sizeof(ShuffleVertex)), sizeof(ShuffleVertex));
++            {
++                const uint32_t off = ringAppend(q.data(), q.size() * sizeof(ShuffleVertex));
++                if (off == kRingOverflow) // larger than the whole ring: use this VAO's own buffer instead
++                {
++                    g.BindBuffer(kArrayBuffer, shuffleVbo);
++                    g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(q.size() * sizeof(ShuffleVertex)), q.data(), kStreamDraw);
++                    g.BindVertexBuffer(0, shuffleVbo, 0, sizeof(ShuffleVertex));
++                }
++                else
++                    g.BindVertexBuffer(0, vbo, off, sizeof(ShuffleVertex));
++            }
+             else
+                 g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(q.size() * sizeof(ShuffleVertex)), q.data(), kStreamDraw);
+             g.DrawArrays(kTriangles, 0, static_cast<GLsizei>(q.size()));
+@@ -2574,16 +2587,34 @@ struct GSHwBackend::Impl
+             g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(bytes), verts.data(), kStreamDraw);
+             return;
+         }
+-        g.BindVertexBuffer(0, vbo, ringAppend(verts.data(), bytes), sizeof(HwVertex));
++        const uint32_t off = ringAppend(verts.data(), bytes);
++        if (off == kRingOverflow)
++        {
++            // One batch larger than the whole ring (never seen: the largest measured batch is 84 KB). The ring is an
++            // immutable store, so it cannot be respecified: give this draw its own buffer instead of writing past the map.
++            if (!spillVbo)
++                g.GenBuffers(1, &spillVbo);
++            g.BindBuffer(kArrayBuffer, spillVbo);
++            g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(bytes), verts.data(), kStreamDraw);
++            g.BindVertexBuffer(0, spillVbo, 0, sizeof(HwVertex));
++            return;
++        }
++        g.BindVertexBuffer(0, vbo, off, sizeof(HwVertex));
+     }
+ 
+     // Copies a chunk into the persistent vertex ring and returns its offset. Shared by the draw batches and the shuffle
+     // passes (patch 61); the caller binds binding 0 with its own stride. A wrap waits on the fence taken at the previous
+-    // wrap, so the memory reused there has long been consumed.
++    // wrap, so the memory reused there has long been consumed. Returns kRingOverflow, without touching the ring, when the
++    // chunk cannot fit at all: wrapping there would reset the offset and copy past the end of the mapped storage.
+     uint32_t ringAppend(const void *data, size_t bytes)
+     {
+         const Api &g = gl();
+         const uint32_t need = static_cast<uint32_t>((bytes + 63u) & ~static_cast<size_t>(63u));
++        if (need > kVertexRingBytes)
++        {
++            ++stats.oversizedBatches;
++            return kRingOverflow;
++        }
+         if (vertexRingOffset + need > kVertexRingBytes)
+         {
+             if (vertexFence)
+@@ -2594,6 +2625,7 @@ struct GSHwBackend::Impl
+             }
+             vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
+             vertexRingOffset = 0;
++            ++stats.ringWraps;
+         }
+         const uint32_t at = vertexRingOffset;
+         if (vertexRingMap)
+@@ -3203,13 +3235,14 @@ struct GSHwBackend::Impl
+         if (now - stats.last < std::chrono::seconds(5))
+             return;
+         stats.last = now;
+-        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu textures=%zu\n",
++        std::fprintf(stderr, "[gs-hw] shuffles=%llu shuffleDraws=%llu draws=%llu batches=%llu texDecodes=%llu texHits=%llu texReuse=%llu skippedPsm=%llu skippedPrim=%llu unsupportedBlend=%llu ringWraps=%llu oversized=%llu textures=%zu\n",
+                      (unsigned long long)stats.shuffles, (unsigned long long)stats.shuffleDraws, (unsigned long long)stats.draws,
+                      (unsigned long long)stats.batches, (unsigned long long)stats.texDecodes, (unsigned long long)stats.texHits,
+                      (unsigned long long)stats.texReuse, (unsigned long long)stats.skippedPsm, (unsigned long long)stats.skippedPrim,
+-                     (unsigned long long)stats.unsupportedBlend, textures.size());
++                     (unsigned long long)stats.unsupportedBlend, (unsigned long long)stats.ringWraps,
++                     (unsigned long long)stats.oversizedBatches, textures.size());
+         stats.shuffles = stats.shuffleDraws = stats.draws = stats.batches = stats.texDecodes = stats.texHits = stats.texReuse =
+-            stats.skippedPsm = stats.skippedPrim = stats.unsupportedBlend = 0;
++            stats.skippedPsm = stats.skippedPrim = stats.unsupportedBlend = stats.ringWraps = stats.oversizedBatches = 0;
+     }
+ 
+     RenderTarget *findTarget(uint32_t fbp)

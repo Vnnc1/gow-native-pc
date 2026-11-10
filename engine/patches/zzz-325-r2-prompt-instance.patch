@@ -1,0 +1,40 @@
+Require a live R2ButtonPress instance before replacing shared Greek R2 leaves. Preserve the other animated HUD layers and masks; bounded diagnostics record instance identity.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -720,6 +720,11 @@
+         Boton namedButton = BCruz; Variante namedVariant = VNormal; int identity = -1;
+         const bool named = botonDeForma(rdram, entrada, namedButton, namedVariant, &identity);
+         const int instanceIdentity = symbolFromInstance(rdram, ctx, entrada);
++        if (g_diag) {
++            static std::set<uint32_t> seen;
++            if (seen.size()<3000 && seen.insert(entrada).second)
++                std::fprintf(stderr,"[gow-iconos-instance] shape=%08X named=%d leaf=%d instance=%d\n",entrada,int(named),identity,instanceIdentity);
++        }
+         if (instanceIdentity >= 0) identity = instanceIdentity;
+         Anterior fondo = g_anterior;
+         float fx = 0.0f, fy = 0.0f, fr = 0.0f;
+@@ -731,7 +736,10 @@
+             esBoton = true;
+             g_buttonBackgrounds.insert(fondo.entrada);
+         }
+-        else if (named && namedButton != BCruz && namedButton != BCirculo && namedButton != BCuadrado && namedButton != BTriangulo)
++        // Greek R2 artwork shares leaves with the Spartan HUD. A leaf alone is not a live button.
++        else if (named && !(namedButton == BR2 && namedVariant == VGriego &&
++                 (instanceIdentity < 0 || std::strcmp(kSimbolos[instanceIdentity].nombre, "R2ButtonPress") != 0)) &&
++                 namedButton != BCruz && namedButton != BCirculo && namedButton != BCuadrado && namedButton != BTriangulo)
+         {
+             b = namedButton; v = namedVariant;
+             esBoton = true;
+@@ -792,8 +800,8 @@
+         {
+             static std::map<uint32_t, int> vistos;
+             if (vistos[entrada]++ % 60 == 0)
+-                std::fprintf(stderr, "[gow-iconos] t=%.2f %s (%d) en %.1f,%.1f radio %.1f forma %08X alfa %.2f\n", segundos(), kAccion[b], int(v),
+-                             i.x, i.y, i.escala * 0.5f, entrada, i.a);
++                std::fprintf(stderr, "[gow-iconos] t=%.2f %s (%d) en %.1f,%.1f radio %.1f forma %08X alfa %.2f instance=%d\n", segundos(), kAccion[b], int(v),
++                             i.x, i.y, i.escala * 0.5f, entrada, i.a, instanceIdentity);
+         }
+         if (identity >= 0 && namedVariant == VGriego && namedButton == b && i.a > 0.25f) {
+             const uint16_t bits[] = {0x4000,0x2000,0x8000,0x1000,0x0400,0x0800,0x0100,0x0200};

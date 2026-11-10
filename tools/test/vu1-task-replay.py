@@ -19,6 +19,7 @@ def main():
     p.add_argument("corpus", type=Path)
     p.add_argument("--modes", nargs="+", choices=("hybrid", "jit", "helper", "sse", "exact"), default=["hybrid", "jit", "helper", "sse", "exact"])
     p.add_argument("--repetitions", type=int, default=5)
+    p.add_argument("--inline-chain", action="store_true", help="Opt into the JIT chain candidate")
     p.add_argument("--output", type=Path)
     a = p.parse_args()
     if not 1 <= a.repetitions <= 100: p.error("repetitions must be 1–100")
@@ -30,12 +31,14 @@ def main():
     report = {"schema": 1, "executable_sha256": sha(exe), "corpus_sha256": sha(corpus),
               "scope": "Isolated MSCAL execution loops; excludes reconstruction/hashing/final flush, not FPS. Each backend must match its own captured baseline.", "modes": {}}
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
+    if a.inline_chain: env["GOW_VU1X_CHAIN_INLINE"] = "1"
+    report["inline_chain"] = a.inline_chain
     failed = False
     for mode in a.modes:
         with (output / (mode + ".log")).open("wb") as log:
             r = subprocess.run([str(exe), "--replay", str(corpus), mode, str(a.repetitions)], env=env,
                                stdout=log, stderr=subprocess.STDOUT, timeout=600)
-        text = (output / (mode + ".log")).read_text(errors="replace")
+        text = (output / (mode + ".log")).read_text(encoding="utf-8", errors="replace")
         records = []
         for line in text.splitlines():
             if "[gow-vu1-replay] record=" not in line: continue
@@ -43,6 +46,8 @@ def main():
             records.append({k: v if k == "code_hash" else float(v) if k.endswith("_us") else int(v) for k, v in values.items()})
         summary = re.search(r"records=(\d+) mismatches=(\d+) baseline_backend_differences=(\d+)", text)
         passed = r.returncode == 0 and bool(summary) and int(summary[1]) > 0 and int(summary[2]) == 0
+        if a.inline_chain and mode == "jit":
+            passed = passed and "[vu1-chain] inline=1" in text
         failed |= not passed
         report["modes"][mode] = {"passed": passed, "exit_code": r.returncode,
             "baseline_backend_differences": int(summary[3]) if summary else None,

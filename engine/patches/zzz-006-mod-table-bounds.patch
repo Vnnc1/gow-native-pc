@@ -1,0 +1,56 @@
+Reject malformed or overflowing declarative mod numbers before narrowing or address arithmetic.
+Keep valid table semantics and the 512-patch bound.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_mod_patches.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_mod_patches.cpp
+@@ -40,12 +40,17 @@
+ bool g_firstFrameDone = false;
+ bool g_log = false;
+ 
+-uint32_t parseNumber(const std::string &text)
++bool parseNumber(const std::string &text, uint32_t &out)
+ {
+     try {
+-        return static_cast<uint32_t>(std::stoull(text, nullptr, 0));
++        if (text.empty() || text.front() == '-') return false;
++        size_t end = 0;
++        const auto value = std::stoull(text, &end, 0);
++        if (end != text.size() || value > UINT32_MAX) return false;
++        out = static_cast<uint32_t>(value);
++        return true;
+     } catch (...) {
+-        return 0u;
++        return false;
+     }
+ }
+ 
+@@ -80,19 +85,17 @@
+         if (line.empty() || line.front() == '#')
+             continue;
+         const std::vector<std::string> fields = splitTabs(line);
+-        if (fields.size() < 6)
+-            continue;
++        if (fields.size() != 6) continue;
+         DataPatch patch;
+-        patch.address = parseNumber(fields[0]);
+-        patch.width = static_cast<uint8_t>(parseNumber(fields[1]));
+-        patch.value = parseNumber(fields[2]);
+-        patch.mask = parseNumber(fields[3]);
+-        patch.expected = parseNumber(fields[4]);
+-        patch.once = parseNumber(fields[5]) != 0u;
+-        if (patch.width != 1u && patch.width != 2u && patch.width != 4u)
+-            continue;
+-        if (patch.address < kRamMin || patch.address + patch.width > kRamSize)
+-            continue;
++        uint32_t width = 0, once = 0;
++        if (!parseNumber(fields[0], patch.address) || !parseNumber(fields[1], width) ||
++            !parseNumber(fields[2], patch.value) || !parseNumber(fields[3], patch.mask) ||
++            !parseNumber(fields[4], patch.expected) || !parseNumber(fields[5], once)) continue;
++        if ((width != 1u && width != 2u && width != 4u) || once > 1u) continue;
++        patch.width = static_cast<uint8_t>(width);
++        patch.once = once != 0u;
++        // Subtraction cannot wrap a high address into an apparently valid range.
++        if (patch.address < kRamMin || patch.address > kRamSize - width) continue;
+         if (patch.address % patch.width != 0u)
+             continue;
+         g_patches.push_back(patch);

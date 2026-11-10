@@ -1,0 +1,46 @@
+Bound the ModVfsTable trace dedup set, not just the file (GOW_MOD_VFS_TRACE only; no gameplay change)
+
+`GOW_MOD_VFS_TRACE` documents a bounded trace ("Bounded; misses are included"), and the file itself stops at
+`kMaxTraceEntries`. The dedup set did not: `appendTrace` inserted every new guest path into `m_traceSeen` before
+checking the cap, so a session that looked up many distinct paths (or a trace left on by mistake) kept growing the
+set for the whole run even after the file stopped at 4096 lines. The cap is now checked first, so neither the file
+nor the set grows past `kMaxTraceEntries`. The miss-first classification comment is kept, moved above the dedup probe.
+
+Only the diagnostics path changes: with `GOW_MOD_VFS_TRACE` unset nothing calls `appendTrace`, so the default
+gameplay path is untouched. `ps2EntryRunner` rebuilt clean after the edit. Six 63 s ship-deck runs (three per
+binary, alternating before/after the change, 0.5x, loaded window t=50-60 s) reach `state=11 levelReady=1` with
+`anomalies=0`; `vu_ms` 4680.4 vs the patch-89 window 4651.3 (+0.6 %, inside the +/-1 % band).
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp b/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp
+index 8df84a0..ca62915 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/mod_vfs_table.cpp
+@@ -171,17 +171,16 @@ void ModVfsTable::writeStats() const
+ void ModVfsTable::appendTrace(const std::string &key, bool hit) const
+ {
+     std::lock_guard<std::mutex> lock(m_traceMutex);
+-    if (m_traceSeen.emplace(key).second)
+-    {
+-        if (m_traceCount++ >= kMaxTraceEntries)
+-            return;
+-        m_traceOut << (hit ? 'H' : 'M') << '\t' << key << '\n';
+-        m_traceOut.flush();
+-    }
+-    else
+-    {
+-        // A path that was first looked up as a miss and is later overridden keeps its first line: the table does not
+-        // change while the game runs, so the first classification is also the final one.
+-    }
++    // Bound the dedup set as well as the file: once the cap is reached a new path must not be remembered, otherwise
++    // a trace left on by mistake grows with every distinct guest path for the whole session.
++    if (m_traceCount >= kMaxTraceEntries)
++        return;
++    // A path that was first looked up as a miss and is later overridden keeps its first line: the table does not
++    // change while the game runs, so the first classification is also the final one.
++    if (!m_traceSeen.emplace(key).second)
++        return;
++    ++m_traceCount;
++    m_traceOut << (hit ? 'H' : 'M') << '\t' << key << '\n';
++    m_traceOut.flush();
+ }
+ }

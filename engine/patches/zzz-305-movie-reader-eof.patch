@@ -1,0 +1,67 @@
+Finish USA movie reads at drained EOF and preserve pending decoded pictures.
+P04MP05 otherwise retries an empty reader forever; signaling EOF alone loses its last picture.
+Keep original cancellation, buffered-input, movie-format and checkpoint-resume paths.
+Validation: docs/research/issue-30-movie-eof-2026-11-09.md.
+
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -6,6 +6,7 @@
+ extern std::atomic<uint64_t> g_gowAudioFramesPlayed, g_gowAudioFramesMissing;
+ #include "game_overrides.h"
+ #include "ps2_runtime.h"
++#include "ps2_stubs.h"
+ #include "ps2_runtime_macros.h"
+ #include "ps2_host_backend.h"
+ #include "gow_pad2_packet.h"
+@@ -1306,6 +1307,42 @@
+         sub_0018AAA8_0x18aaa8(rdram, ctx, runtime);
+     }
+ 
++    void gowMovieRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        // GOW-Port: the MPEG refill loop retries zero (temporarily empty), but needs a negative
++        // result at EOF. Preserve queued blocks, cancellation, and every original resume path.
++        const uint32_t caller = GPR_U32(ctx, 31);
++        constexpr uint32_t stream = 0x002FDE10u;
++        if (ctx->pc == 0x00188848u && (caller == 0x0018AC70u || caller == 0x0018AD34u) &&
++            static_cast<int32_t>(GPR_U32(ctx, 5)) > 0 && readGuest32(rdram, 0x0029C848u) == 0u &&
++            readGuest32(rdram, stream + 0x28u) == 3u && readGuest32(rdram, stream + 0x24u) == 0u)
++        {
++            padReturn(ctx, 0xFFFFFFFFu);
++            return;
++        }
++        sub_00188848_0x188848(rdram, ctx, runtime);
++    }
++
++    void gowMovieIsEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        const uint32_t movie = readGuest32(rdram, 0x00304F20u);
++        if (ctx->pc == 0x00189B00u && movie != 0u && readGuest32(rdram, movie + 0x140u) == 2u &&
++            readGuest32(rdram, movie + 0x154u) != 0u && readGuest32(rdram, 0x0029C848u) == 0u &&
++            readGuest32(rdram, 0x002FDE38u) == 3u && readGuest32(rdram, 0x002FDE34u) == 0u)
++        {
++            // Read EOF must not discard pictures decoded by the final demux callback.
++            R5900Context probe = *ctx;
++            SET_GPR_U32((&probe), 4, movie);
++            ps2_stubs::sceMpegIsRefBuffEmpty(rdram, &probe, runtime);
++            if (GPR_U32((&probe), 2) == 0u)
++            {
++                padReturn(ctx, 0u);
++                return;
++            }
++        }
++        sub_00189B00_0x189b00(rdram, ctx, runtime);
++    }
++
+     void gowMovieStreamService(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         // GOW_MPEG_DIAG: once per second, the movie struct words (0x304D10 + 0x80..0x140) that changed, the movie
+@@ -2285,6 +2322,8 @@
+         }
+         else
+         {
++            runtime.replaceFunction(0x00188848u, gowMovieRead);
++            runtime.replaceFunction(0x00189B00u, gowMovieIsEnd);
+             runtime.replaceFunction(0x00188B80u, gowMovieStreamService);
+             runtime.replaceFunction(0x00189A88u, gowMovieTailAudio);
+             runtime.replaceFunction(0x0018A788u, gowMovieVideoRingWrite);

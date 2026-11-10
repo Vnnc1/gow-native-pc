@@ -1,0 +1,56 @@
+Outline scalar scheduling from the common VU1 chain frame.
+Preserves scalar issue order and timing; no generator or arithmetic changes.
+Five preserved-binary replay pairs reduced isolated cost by 4.62%; not an FPS claim.
+Integration: fix-chore patch 72-vu1-scalar-outline, regenerated on the PR 26 chain (same change, new context).
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 7f2b357..9053b32 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -704,6 +704,26 @@ const uint8_t *VU1NativeAccess::blockTiming(VU1Interpreter &vu, VU1Interpreter::
+     return remember(slot.cyc.data(), slot.id);
+ }
+ 
++// Keep scalar scheduling loops out of every chain frame. The common block exit
++// still records its history inline, and scalar issue/retirement order is unchanged.
++template <typename Slot, typename Pipeline>
++VU1N_NOINLINE static void vu1nFinishScalarTiming(VU1Interpreter &vu, const Slot &sl,
++                                               const uint8_t *cyc, uint64_t start, Pipeline fdivPipeline)
++{
++    if (sl.scalarCount <= std::size(sl.scalar))
++    {
++        for (uint32_t k = 0; k < sl.scalarCount; ++k)
++            VU1NativeAccess::scalarStart(vu, start + cyc[sl.scalar[k].pair], sl.scalar[k].latency, sl.scalar[k].fdiv);
++        return;
++    }
++    const auto &bt = *sl.bt;
++    for (const uint8_t i : bt.scalarPairs)
++    {
++        const auto &d = bt.dec[i];
++        VU1NativeAccess::scalarStart(vu, start + cyc[i], d.lowerUsage.latency, d.lowerUsage.pipeline == fdivPipeline);
++    }
++}
++
+ // After a native block: it joins the history (its results that outlive it are found there when needed); FDIV/EFU stay
+ // busy until their ready cycle.
+ // An FDIV / EFU operation a native block started at `issue`: busy until its ready cycle.
+@@ -791,18 +811,7 @@ VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU
+     vu.m_cycle = end;
+     if (sl.scalarCount == 0u)
+         return;
+-    if (sl.scalarCount != NS::kScalarMany)
+-    {
+-        for (uint32_t k = 0; k < sl.scalarCount; ++k)
+-            scalarStart(vu, start + cyc[sl.scalar[k].pair], sl.scalar[k].latency, sl.scalar[k].fdiv);
+-        return;
+-    }
+-    const NS::BlockTiming &bt = *sl.bt;
+-    for (const uint8_t i : bt.scalarPairs)
+-    {
+-        const VU1Interpreter::DecodedInstructionPair &d = bt.dec[i];
+-        scalarStart(vu, start + cyc[i], d.lowerUsage.latency, d.lowerUsage.pipeline == VU1Interpreter::PipelineFdiv);
+-    }
++    vu1nFinishScalarTiming(vu, sl, cyc, start, VU1Interpreter::PipelineFdiv);
+ }
+ 
+ // The micro memory has a new generation (VIF MPG, EE writes): slots whose extent scan read a changed pair are set up again

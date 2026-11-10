@@ -47,6 +47,7 @@ See [MAME's chdman documentation](https://docs.mamedev.org/tools/chdman.html).
 | Japan | SLPM_670.10 | Exact measured image: isolated Windows build, opening gameplay validated; selectable when registered |
 | Supplied Asia ISO | SCUS_973.99 | Built and tested in opening gameplay; executable identical to USA |
 | Other Asia serial | SCAJ_300.10 | Recognized; this serial has not been validated |
+| Asia, second pressing | SCAJ_973.99 | Carries the Japanese executable byte for byte (CRC `CA052D22`, same `.text`): runs the Japan build through `code = "japan"`, its own disc data included |
 | Europe / Australia | SCES_531.33 | Exact measured image: isolated Windows build, opening gameplay validated; selectable when registered |
 | Europe alternate serial | SCES_515.33 | Recognized; no local disc/runtime validation |
 | USA / Europe demos | SCUS_974.67 / SCED_534.31 | Explicitly excluded |
@@ -56,6 +57,23 @@ The `regions` table is a recognition catalog, not an allowlist for gameplay.
 Unknown serials are also blocked. Code-compatible translations of the USA
 executable retain their existing validation. Renaming an ELF or selecting another
 file extension does not bypass the code-signature check.
+
+A pressing can also carry another region's executable under its own serial. Such a
+region records `code = "<region id>"` in the profile, and identification reports
+`code`/`reason_code = "region_alias"` only when the disc's CRC **and** `.text` SHA-1
+equal that region's measured values: the bytes decide, never the serial. The disc
+keeps its own data, cards and saves; `prepare.py` also links its executable under
+the name that build keys on, and `register_region.py` registers it against that
+build's overlay. It never enters the USA generation path.
+
+The SCAJ-97399 image was inspected on 2026-11-03: ELF CRC `CA052D22`, `.text` SHA-1
+`8ed48ca88c73e7e340be3a8e7ff16b07825cb96c` (1,690,724 bytes, the Japanese executable
+byte for byte), two PAKs of 4.26 GB and 4.25 GB, 1663 TOC entries. Its shell is Chinese:
+the first boot on a Japan build rendered "新游戏" / "确定" over the Japanese logo, so the
+localization lives in the disc's textures while the executable stays the Japanese one.
+The profile's `language_hints` only find the Japanese build's internal English strings
+and cannot detect that, which is why the region records `language = "zh"` by hand.
+It boots the Japan build; no second build of identical code is asked for.
 
 The supplied Japan disc was inspected on 2026-11-02:
 

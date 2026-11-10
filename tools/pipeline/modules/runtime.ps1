@@ -27,7 +27,9 @@ if ($Stages -contains 'fetch') {
         & $git -C $rt read-tree HEAD
         $trees = @("$(& $git -C $rt write-tree)".Trim())
         foreach ($patch in $patches) {
-            & $git -C $rt apply --cached $patch.FullName 2>$null
+            # --allow-empty: a patch file with no file diff (a note, a retired patch) carries nothing to apply.
+            # Without it git refuses the input ("No valid patches in input") and the stage fails on it.
+            & $git -C $rt apply --cached --allow-empty $patch.FullName 2>$null
             if ($LASTEXITCODE -ne 0) { throw "patch $($patch.Name) does not apply to runtime commit $runtimeCommit" }
             $trees += "$(& $git -C $rt write-tree)".Trim()
         }
@@ -48,7 +50,7 @@ if ($Stages -contains 'fetch') {
     if ($done -lt 0) { throw 'engine\runtime differs from the patch chain: preserve local work and compare it with engine\patches before retrying' }
     for ($i = 0; $i -lt $patches.Count; $i++) {
         if ($i -lt $done) { Write-Host "patch $($patches[$i].Name): applied"; continue }
-        Native $git @('-C', $rt, 'apply', $patches[$i].FullName) "patch $($patches[$i].Name)"
+        Native $git @('-C', $rt, 'apply', '--allow-empty', $patches[$i].FullName) "patch $($patches[$i].Name)"
         Write-Host "patch $($patches[$i].Name): applied now"
     }
 }

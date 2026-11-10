@@ -1,6 +1,10 @@
+#include "menu_settings.h"
+#include "native_save_slots.h"
+#include <QUuid>
 #include "lanzador.h"
 #include "regional_installations.h"
 #include "session_diagnostics.h"
+#include "session_summary.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -347,7 +351,7 @@ void Lanzador::aplicarTarjeta(QProcessEnvironment &entorno, const QString &id, c
 #endif
 }
 
-bool Lanzador::iniciar(const QVariantMap &a)
+bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
 {
     if (jugando())
         return false;
@@ -410,6 +414,10 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.remove(QStringLiteral("GOW_QTE_HOLD"));
         entorno.remove(QStringLiteral("GOW_QTE_HOLD_HZ"));
     }
+    if (a.value(QStringLiteral("qteAuto"), false).toBool())
+        entorno.insert(QStringLiteral("GOW_QTE_AUTO"), QStringLiteral("1"));
+    else
+        entorno.remove(QStringLiteral("GOW_QTE_AUTO"));
     const QString stickMode = a.value(QStringLiteral("qteStickMode"), QStringLiteral("off")).toString();
     if (stickMode == QStringLiteral("shake") || stickMode == QStringLiteral("rotate"))
         entorno.insert(QStringLiteral("GOW_QTE_STICK"), stickMode);
@@ -455,6 +463,27 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.insert(QStringLiteral("GOW_TEXTURE_PACK"), QDir::toNativeSeparators(pacote));
     else
         entorno.remove(QStringLiteral("GOW_TEXTURE_PACK"));
+    // The rest of the texture-pack controls (patch 52): GPU budget, hit statistics, the sampled-name list and
+    // the texture dump. GOW_TEXTURE_PACK_STATS and the dump readers treat "set" as on, so off removes the
+    // variable instead of writing "0". The name list goes to the launcher's own report folder, never to a
+    // user-chosen path, so it stays out of the exported session reports.
+    const int texMb = std::clamp(a.value(QStringLiteral("texPresupuestoMb"), 1024).toInt(), 64, 8192);
+    if (texMb == 1024)
+        entorno.remove(QStringLiteral("GOW_TEXTURE_PACK_MB"));
+    else
+        entorno.insert(QStringLiteral("GOW_TEXTURE_PACK_MB"), QString::number(texMb));
+    bandera("GOW_TEXTURE_PACK_STATS", a.value(QStringLiteral("texEstadisticas")).toBool());
+    const QString dirNombres = carpetaDatos() + QStringLiteral("/registros");
+    if (a.value(QStringLiteral("texNombres")).toBool() && QDir().mkpath(dirNombres))
+        entorno.insert(QStringLiteral("GOW_TEX_PCSX2_NAMES"),
+                       QDir::toNativeSeparators(dirNombres + QStringLiteral("/gow-texture-names.txt")));
+    else
+        entorno.remove(QStringLiteral("GOW_TEX_PCSX2_NAMES"));
+    const int texVolcado = std::clamp(a.value(QStringLiteral("texVolcado"), 0).toInt(), 0, 256);
+    if (texVolcado > 0)
+        entorno.insert(QStringLiteral("GOW_GS_HW_TEXDUMP"), QString::number(texVolcado));
+    else
+        entorno.remove(QStringLiteral("GOW_GS_HW_TEXDUMP"));
     entorno.insert(QStringLiteral("GOW_VU1_FAST"), a.value(QStringLiteral("vuRapida"), false).toBool() ? QStringLiteral("1") : QStringLiteral("0"));
     // gow-native-pc: VU1 code the build did not compile (areas the first-play recording never reached) is compiled while
     // playing by the in-process x86-64 JIT (engine/patches/18, GOW_VU1N_X64: no compiler or files needed, any toolchain).
@@ -481,9 +510,28 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.remove(QStringLiteral("TOBIICHI_PANORAMICO"));
     else
         entorno.insert(QStringLiteral("TOBIICHI_PANORAMICO"), aspecto);
-    entorno.insert(QStringLiteral("TOBIICHI_ASPECTO"), a.value(QStringLiteral("estirar")).toBool() ? QStringLiteral("estirar") : QStringLiteral("auto"));
+    // Presentation and video mode. TOBIICHI_ASPECTO accepts "auto", "estirar", "W:H" or a float; only the
+    // values offered by the Graphics page are forwarded so a stale setting cannot inject arbitrary text.
+    bandera("GOW_PROGRESIVO", a.value(QStringLiteral("progresivo"), true).toBool(), "0");
+    {
+        const QString presentacion = a.value(QStringLiteral("presentacion"), QStringLiteral("auto")).toString();
+        const bool valida = presentacion == QStringLiteral("auto") || presentacion == QStringLiteral("estirar")
+            || presentacion == QStringLiteral("4:3") || presentacion == QStringLiteral("16:9")
+            || presentacion == QStringLiteral("16:10") || presentacion == QStringLiteral("21:9")
+            || presentacion == QStringLiteral("32:9");
+        entorno.insert(QStringLiteral("TOBIICHI_ASPECTO"), valida ? presentacion : QStringLiteral("auto"));
+    }
+    bandera("PS2X_GS_DIRECT_PRESENT", a.value(QStringLiteral("presentacionDirecta"), true).toBool(), "0");
+    // Runtime patch 47 tries 4.6, 4.5, 4.4 and 4.3; 6 is the default, so only a lower start is written.
+    const int glMenor = std::clamp(a.value(QStringLiteral("glMenor"), 6).toInt(), 3, 6);
+    if (glMenor == 6)
+        entorno.remove(QStringLiteral("GOW_GL_MAX_MINOR"));
+    else
+        entorno.insert(QStringLiteral("GOW_GL_MAX_MINOR"), QString::number(glMenor));
     // Sharpness 0..1 in the interface -> GOW_SHARPEN below.
     const double nitidez = std::clamp(a.value(QStringLiteral("nitidez"), 0.8).toDouble(), 0.0, 1.0);
+    entorno.insert("GOW_AUDIO_VOLUME", QString::number(qBound(0,a.value("audioVolume",100).toInt(),100)));
+    bandera("GOW_AUDIO_MUTE", a.value("audioMute",false).toBool());
     bandera("TOBIICHI_FXAA", a.value(QStringLiteral("fxaa")).toBool());
     // Anisotropic filtering of the game's textures (gs_hw_backend.cpp, from the God of War II port): 1 = off.
     const int aniso = std::clamp(a.value(QStringLiteral("anisotropico"), 1).toInt(), 1, 16);
@@ -506,13 +554,47 @@ bool Lanzador::iniciar(const QVariantMap &a)
             entorno.insert(QStringLiteral("GOW_SHARPEN"), QStringLiteral("0"));
         }
     }
-    // GS internal resolution (1..8; the interface resolves "automatic" from the display). The render-target renderer
-    // reads only PS2X_GS_HW_SCALE: it is always on and has no dynamic scale or line-doubling switch, so the variables
-    // older launchers set for those (and the unread filter/sharpness/shader-cache names) are removed.
-    entorno.insert(QStringLiteral("PS2X_GS_HW_SCALE"), QString::number(std::clamp(a.value(QStringLiteral("escala"), 2).toInt(), 1, 8)));
-    for (const char *unread : {"PS2X_GS_ESCALA", "PS2X_GS_NITIDO", "PS2X_GS_ESCALA_DINAMICA", "PS2X_GS_HW", "TOBIICHI_FILTRO",
+    // GS internal resolution as a multiple of 512x448, the range the render-target renderer accepts (0.25..4).
+    // The interface resolves "automatic" from the display before it gets here; below 1x is where an integrated
+    // GPU lives (on an HD 4400, 1x runs at half the rate of 0.7x).
+    entorno.insert(QStringLiteral("PS2X_GS_HW_SCALE"),
+                   QString::number(std::clamp(a.value(QStringLiteral("escala"), 2).toDouble(), 0.25, 4.0), 'g', 3));
+    // gow-native-pc (runtime patch 80): effect switches. Default off; the runtime filters GS draws at the frontend.
+    // PS2X_GS_FOG_OFF is not exposed: the game never draws with GS fog (0 draws with FGE in the sample window), so the
+    // switch could not change anything. GOW_FX_NO_SHADOWS is experimental: it removes the shadow-volume pass, but the
+    // picture difference on the rain-lit ship deck is small.
+    bandera("GOW_FX_NO_SHADOWS", a.value(QStringLiteral("fxSinSombras")).toBool());
+    bandera("GOW_FX_NO_ADDITIVE3D", a.value(QStringLiteral("fxSinAditivos")).toBool());
+    bandera("GOW_FX_NO_TEXTURE_FILTER", a.value(QStringLiteral("fxSinFiltrado")).toBool());
+    // gow-native-pc: PS2X_GS_HW is no longer a dead switch: the runtime reads it (0 = software rasterizer, for a
+    // GPU that cannot give an OpenGL 4.3 context). The others are still not read by anything.
+    entorno.insert(QStringLiteral("PS2X_GS_RENDERER"),
+                   a.value(QStringLiteral("dibujoHardware"), true).toBool() ? QStringLiteral("hw") : QStringLiteral("sw"));
+    for (const char *unread : {"PS2X_GS_ESCALA", "PS2X_GS_NITIDO", "PS2X_GS_ESCALA_DINAMICA", "TOBIICHI_FILTRO",
                                "TOBIICHI_NITIDEZ", "PS2X_GS_SHADER_CACHE_DIR"})
         entorno.remove(QString::fromLatin1(unread));
+    // Renderer pipeline (advanced). Every one of these readers is on by default and only "0" turns it off,
+    // so writing "1" reproduces the shipped picture exactly. GOW_GS_ASYNC_SUBMIT is the exception: it is off
+    // unless the variable is set, so its off state removes the variable.
+    bandera("GOW_GS_STATE_CACHE", a.value(QStringLiteral("gsCacheEstado"), true).toBool(), "0");
+    bandera("GOW_GS_TEXREUSE", a.value(QStringLiteral("gsReusoTexturas"), true).toBool(), "0");
+    bandera("GOW_GS_HW_RING", a.value(QStringLiteral("gsAnilloVertices"), true).toBool(), "0");
+    bandera("GOW_GS_DEPTH_PER_ZBP", a.value(QStringLiteral("gsProfundidadZbp"), true).toBool(), "0");
+    bandera("PS2X_GS_RUN", a.value(QStringLiteral("gsAgruparPrimitivas"), true).toBool(), "0");
+    bandera("PS2X_GS_RUN_STATE_FAST", a.value(QStringLiteral("gsRunRapido"), true).toBool(), "0");
+    bandera("PS2X_GS_COMPACT_QUEUE", a.value(QStringLiteral("gsColaCompacta"), true).toBool(), "0");
+    bandera("PS2X_GS_WORKER", a.value(QStringLiteral("gsHiloWorker"), true).toBool(), "0");
+    bandera("PS2X_GS_PIPELINE", a.value(QStringLiteral("gsHiloPipeline"), true).toBool(), "0");
+    bandera("GOW_GS_FINISH_ASINCRONO", a.value(QStringLiteral("gsFinishAsincrono"), true).toBool(), "0");
+    bandera("GOW_GS_ASYNC_SUBMIT", a.value(QStringLiteral("gsEnvioAsincrono"), false).toBool());
+    const int bloquesCola = std::clamp(a.value(QStringLiteral("gsBloquesCola"), 0).toInt(), 0, 64);
+    if (bloquesCola > 0)
+        entorno.insert(QStringLiteral("PS2X_GS_QUEUE_CHUNKS"), QString::number(bloquesCola));
+    else
+        entorno.remove(QStringLiteral("PS2X_GS_QUEUE_CHUNKS"));
+    // Renderer diagnostics: counters to stderr / the session report, no change to the picture.
+    bandera("GOW_GS_HW_STATS", a.value(QStringLiteral("gsEstadisticas")).toBool());
+    bandera("GOW_GS_GPU_PROFILE", a.value(QStringLiteral("gsPerfilGpu")).toBool());
     // Window pacing.
     entorno.insert(QStringLiteral("TOBIICHI_VENTANA_FPS"), QString::number(a.value(QStringLiteral("fpsLimite"), 120).toInt()));
     bandera("TOBIICHI_VSYNC", a.value(QStringLiteral("vsync")).toBool());
@@ -557,6 +639,22 @@ bool Lanzador::iniciar(const QVariantMap &a)
         entorno.insert(QStringLiteral("GOW_SAVES_DIR"), regional.value("saves").toString());
     }
 
+    // Mod manager (launcher patch 73): apply the staged plan last so the mod's texture pack replaces the manual one,
+    // and remove every mod variable when nothing is enabled (an inherited or previously saved value must not leak).
+    for (const char *nombre : {"GOW_ACTIVE_MODS", "GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_MOD_VFS_LOG"})
+        entorno.remove(QString::fromLatin1(nombre));
+    for (auto it = entornoMods.begin(); it != entornoMods.end(); ++it) {
+        if (it.value().toString().isEmpty())
+            entorno.remove(it.key());
+        else
+            entorno.insert(it.key(), it.value().toString());
+    }
+
+    entorno.remove("GOW_SAVE_ASSETS");
+    const QString saveAssets = QFileInfo(elf).absolutePath() + "/.gow-save-slots";
+    if (regional.isEmpty() && QFileInfo::exists(saveAssets + "/directory"))
+        entorno.insert("GOW_SAVE_ASSETS", saveAssets);
+    entorno.remove("GOW_MENU_SETTINGS"); // Per-session bridge must never survive in the reusable boot file.
     // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
     QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
     if (boot.open(QIODevice::WriteOnly))
@@ -591,6 +689,21 @@ bool Lanzador::iniciar(const QVariantMap &a)
     // A separate collector keeps draining and sampling if the launcher window is closed.
     m_proceso->setProgram(helper);
     m_proceso->setArguments({m_session, ejecutable, elf, root});
+    const QString menuDirectory = carpetaDatos() + "/menu-settings/" + QDateTime::currentDateTimeUtc().toString("yyyyMMddHHmmsszzz") + "-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (QDir().mkpath(menuDirectory)) entorno.insert("GOW_MENU_SETTINGS", menuDirectory);
+    else entorno.remove("GOW_MENU_SETTINGS");
+    m_menuDirectory = entorno.value("GOW_MENU_SETTINGS");
+    if (m_initialSlot >= 0 && m_gameElf != QFileInfo(elf).canonicalFilePath()) m_initialSlot = -1;
+    m_gameElf = QFileInfo(elf).canonicalFilePath();
+    if (m_initialSlot >= 0) {
+        const int slot = std::exchange(m_initialSlot, -1);
+        QSaveFile request(m_menuDirectory + "/load.request");
+        const QByteArray bytes = QByteArray::number(slot) + '\n';
+        if (m_menuDirectory.isEmpty() || !request.open(QIODevice::WriteOnly) || request.write(bytes) != bytes.size() || !request.commit()) {
+            emit error(QStringLiteral("diagnosticsError"), QStringLiteral("Cannot queue the selected save slot."));
+            return false;
+        }
+    }
     m_proceso->setProcessEnvironment(entorno);
     m_proceso->setWorkingDirectory(carpetaDatos());
     m_proceso->setProcessChannelMode(QProcess::MergedChannels);
@@ -612,12 +725,9 @@ bool Lanzador::iniciar(const QVariantMap &a)
 
 void Lanzador::terminado(int codigo, QProcess::ExitStatus estado)
 {
-    QFile report(m_session + "/session.json");
-    if (report.open(QIODevice::ReadOnly)) {
-        const auto metadata = QJsonDocument::fromJson(report.readAll()).object();
-        if (metadata.contains("exit_code")) codigo = metadata.value("exit_code").toInt();
-        if (metadata.value("state").toString() == "crashed") estado = QProcess::CrashExit;
-    }
+    const auto metadata = SessionDiagnostics::sessionMetadata(m_session);
+    if (metadata.contains("exit_code")) codigo = metadata.value("exit_code").toInt();
+    if (metadata.value("state").toString() == "crashed") estado = QProcess::CrashExit;
     const int segundos = static_cast<int>(m_reloj.elapsed() / 1000);
     const bool fallo = estado == QProcess::CrashExit || codigo != 0;
     QString resumen;
@@ -723,6 +833,44 @@ QString Lanzador::nuevaPartida(const QString &carpeta, const QByteArray &tarjeta
         return {};
     }
     return nombre;
+}
+
+QVariantList Lanzador::partidasIndividuales(const QString &elf) const
+{
+    QVariantList result;
+    const QString assets = QFileInfo(elf).absolutePath() + "/.gow-save-slots";
+    QFile directory(assets + "/directory");
+    if (directory.size() > 32 || !directory.open(QIODevice::ReadOnly)) return result;
+    const auto name = directory.readAll().trimmed();
+    if (name.isEmpty() || name.contains('/') || name.contains('\\')) return result;
+    try {
+        const auto nativeEntries = gow_native_saves::read(std::filesystem::u8path(rutaTarjeta(elf).toUtf8().toStdString()), name.toStdString());
+        for (const auto &slot : nativeEntries) {
+            QFile label(assets + "/" + QString::number(slot.location) + ".name");
+            QString title;
+            if (label.size() <= 512 && label.open(QIODevice::ReadOnly)) title = QString::fromUtf8(label.readAll()).trimmed();
+            if (title.isEmpty()) title = QStringLiteral("Slot %1 · %2").arg(slot.slot + 1).arg(QString::fromStdString(slot.zone));
+            const QString preview = assets + "/" + QString::number(slot.location) + ".png";
+            result.append(QVariantMap{{"slot", slot.slot}, {"file", slot.file}, {"nombre", title},
+                {"fecha", QString::fromStdString(gow_native_saves::localTime(slot.time))},
+                {"segundos", slot.seconds}, {"imagen", QFileInfo::exists(preview) ? QUrl::fromLocalFile(preview) : QUrl()}});
+        }
+    } catch (const std::exception &) { /* A partial index is never offered as a load target. */ }
+    return result;
+}
+
+bool Lanzador::seleccionarPartida(const QString &elf, int slot)
+{
+    if (slot < 0 || slot > 3) return false;
+    bool found = false;
+    for (const auto &entry : partidasIndividuales(elf)) found |= entry.toMap().value("slot").toInt() == slot;
+    if (!found) return false;
+    const QString canonical = QFileInfo(elf).canonicalFilePath();
+    if (!jugando()) { m_gameElf = canonical; m_initialSlot = slot; return true; }
+    if (canonical != m_gameElf || m_menuDirectory.isEmpty() || QFileInfo::exists(m_menuDirectory + "/load.request")) return false;
+    QSaveFile request(m_menuDirectory + "/load.request");
+    const QByteArray bytes = QByteArray::number(slot) + '\n';
+    return request.open(QIODevice::WriteOnly) && request.write(bytes) == bytes.size() && request.commit();
 }
 
 QVariantList Lanzador::partidas(const QString &carpeta) const
@@ -895,4 +1043,8 @@ bool Lanzador::esRecorte(const QString &ruta) const
         mirar(imagen.width() - 1, y);
     }
     return total > 0 && transparentes * 10 >= total * 7;
+}
+
+QVariantMap Lanzador::sincronizarMenu() {
+    return MenuSettings::consume(carpetaDatos()+"/menu-settings");
 }

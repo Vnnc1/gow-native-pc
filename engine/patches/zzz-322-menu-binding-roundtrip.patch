@@ -1,0 +1,28 @@
+Preserve modifier-alias semantics when menu bindings are serialized through the launcher; retain explicit empty maps.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -96,6 +96,7 @@
+                 if (igual != std::string::npos)
+                 {
+                     const std::string nombre = par.substr(0, igual);
++                    if(nombre=="_modifierAliases") m.modifierAliases=par.substr(igual+1)!="0";
+                     for (size_t a = 0; a < NumAcciones; ++a)
+                     {
+                         if (nombre != kNombresAccion[a])
+@@ -827,8 +828,13 @@
+ std::string gowMenuBindingsJson(bool pad) {
+     std::string json="{";
+     const auto keys=mapaTeclas(); const auto buttons=mapaMando();
++    if(!pad) {
++        const char *classic=std::getenv("TOBIICHI_DMC5_CONTROLS");
++        const bool aliases=keys->activo?keys->modifierAliases:!(classic && !std::strcmp(classic,"0"));
++        json+=std::string("\"_modifierAliases\":")+(aliases?"true":"false");
++    }
+     for(size_t a=0;a<(pad?size_t(AccFuria)+1:NumAcciones);++a) {
+-        if(a) json+=",";
++        if(a || !pad) json+=",";
+         json+="\""; json+=kNombresAccion[a]; json+="\":[";
+         std::vector<int> codes;
+         if(pad) {

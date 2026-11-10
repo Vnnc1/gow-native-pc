@@ -62,7 +62,7 @@ def jobs():
 
 
 def fetch(root):
-    config = tomllib.loads((root / 'engine/runtime.toml').read_text())
+    config = tomllib.loads((root / 'engine/runtime.toml').read_text(encoding='utf-8'))
     runtime = root / 'engine/runtime'
     if not runtime.exists():
         run(['git', 'clone', config['repository'], runtime])
@@ -80,7 +80,8 @@ def fetch(root):
         run(git + ['read-tree', 'HEAD'], env=env)
         trees = [output(git + ['write-tree'], env=env)]
         for patch in patches:
-            run(git + ['apply', '--cached', patch], env=env)
+            # Retired patches may contain documentation only, as in the Windows chain.
+            run(git + ['apply', '--cached', '--allow-empty', patch], env=env)
             trees.append(output(git + ['write-tree'], env=env))
         touched = output(git + ['diff', '--name-only', 'HEAD', trees[-1]], env=env).splitlines()
         run(git + ['read-tree', 'HEAD'], env=env)
@@ -92,7 +93,7 @@ def fetch(root):
         if current not in trees:
             raise RuntimeError('Runtime differs from the patch chain; preserve local work before retrying')
         for patch in patches[trees.index(current):]:
-            run(git + ['apply', patch])
+            run(git + ['apply', '--allow-empty', patch])
 
 
 class Pipeline:
@@ -103,17 +104,18 @@ class Pipeline:
         self.source = self.runtime / 'PS2Recomp'
         self.data = ROOT / 'data' / args.game
         self.build = ROOT / 'data/build-linux' / args.game
-        self.profile = tomllib.loads((ROOT / 'games' / args.game / 'game.toml').read_text())
+        self.profile = tomllib.loads((ROOT / 'games' / args.game / 'game.toml').read_text(encoding='utf-8'))
         self.count = args.jobs or jobs()
 
     def python(self, script, *args):
         run([sys.executable, '-I', ROOT / script, *args])
 
     def elf(self):
-        return Path(json.loads((self.data / 'languages.json').read_text())['recompile_elf'])
+        return Path(json.loads((self.data / 'languages.json').read_text(encoding='utf-8'))['recompile_elf'])
 
     def configure(self):
-        extra = []
+        brand = self.profile['runtime'].get('branding_image')
+        extra = [f'-DGOW_BRAND_IMAGE={self.root / "games" / self.args.game / brand if brand else ""}']
         captures = self.data / 'vu1_capture'
         if any(captures.glob('*.bin')):
             sources = [captures / 'vu1n_heads_seen.txt']
@@ -121,10 +123,10 @@ class Pipeline:
             if profile_heads:
                 sources.append(self.runtime / profile_heads)
             heads = {line.strip().lower() for p in sources if p.exists()
-                     for line in p.read_text().splitlines() if re.fullmatch('[0-9a-fA-F]+', line.strip())}
+                     for line in p.read_text(encoding='utf-8').splitlines() if re.fullmatch('[0-9a-fA-F]+', line.strip())}
             text = '\n'.join(sorted(heads)) + '\n'
             target = self.data / 'vu1n_heads.txt'
-            if not target.exists() or target.read_text() != text:
+            if not target.exists() or target.read_text(encoding='utf-8') != text:
                 atomic_text(target, text)
             extra += [f'-DPS2X_VU1_MICROCODE_DIR={captures}',
                       f'-DPS2X_VU1_GENERATOR_SOURCE={self.runtime / self.profile["runtime"]["vu1_generator"]}',
@@ -171,6 +173,7 @@ class Pipeline:
         elif stage == 'sync':
             step('generated code into the runner')
             self.python('tools/pipeline/recompile.py', 'sync', '--root', ROOT, '--game', self.args.game)
+            self.python('tools/disc/save_slots.py', '--prepare-data', self.data, '--game', self.args.game)
         elif stage in ('build', 'native'):
             step('build the game (Linux, Clang)' if stage == 'build' else 'native (Linux recorded VU1)')
             self.configure()

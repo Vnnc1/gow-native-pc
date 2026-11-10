@@ -1,0 +1,52 @@
+// Production scanner and instance lookup. Real game memory is optional and never committed.
+#include <algorithm>
+#include <vector>
+#include <map>
+#include <set>
+#include <chrono>
+#include <cstring>
+#include <cstdint>
+#include <cstdio>
+#include <cctype>
+#include <cassert>
+constexpr uint32_t PS2_RAM_SIZE=0x2000000;
+bool g_diag=false;
+std::set<uint32_t> g_buttonBackgrounds;
+void resetMeshBounds() {}
+struct R5900Context { uint32_t regs[32]{}; };
+#define GPR_U32(c,n) ((c)->regs[n])
+@SCAN@
+int main(int argc,char**argv) {
+    std::vector<uint8_t> ram(PS2_RAM_SIZE);
+    auto u=[&](uint32_t a,uint32_t v){std::memcpy(ram.data()+a,&v,4);};
+    Pelicula p;p.cabecera=0x100000;p.formas=0x110000;p.numFormas=10;
+    p.namedSprites[0x120000]=22;
+    g_peliculas.push_back(p);
+    u(p.cabecera+8,0x25803200);u(p.cabecera+0x18,p.formas);
+    R5900Context c;c.regs[29]=0x180000;c.regs[31]=0x1478a0;
+    u(0x1800d0,0x1474f0);u(0x1800b4,0x130000);
+    u(0x130004,0x2bf4c0);u(0x13001c,0x120000);u(0x130020,0x140000);u(0x140cd0,p.cabecera);
+    assert(symbolFromInstance(ram.data(),&c,p.formas)==22);
+    c.regs[31]++;assert(symbolFromInstance(ram.data(),&c,p.formas)==-1);c.regs[31]--;
+    u(0x1800d0,0);assert(symbolFromInstance(ram.data(),&c,p.formas)==-1);u(0x1800d0,0x1474f0);
+    u(0x130004,0);assert(symbolFromInstance(ram.data(),&c,p.formas)==-1);u(0x130004,0x2bf4c0);
+    u(0x140cd0,0);assert(symbolFromInstance(ram.data(),&c,p.formas)==-1);u(0x140cd0,p.cabecera);
+    u(0x13001c,0);u(0x130000,0x130000);assert(symbolFromInstance(ram.data(),&c,p.formas)==-1);
+    u(0x130000,0x150000);u(0x150000,0x130000);u(0x150004,0x2bf4c0);u(0x150020,0x140000);
+    assert(symbolFromInstance(ram.data(),&c,p.formas)==-1); // Bounded multi-node cycle.
+    u(0x15001c,0x120000);assert(symbolFromInstance(ram.data(),&c,p.formas)==22);
+    assert(symbolFromInstance(ram.data(),&c,0x110080)==-1);
+    c.regs[29]=PS2_RAM_SIZE-8;assert(symbolFromInstance(ram.data(),&c,p.formas)==-1);
+    if(argc>1) {
+        FILE*f=std::fopen(argv[1],"rb");assert(f);assert(std::fread(ram.data(),1,ram.size(),f)==ram.size());std::fclose(f);
+        escanearPeliculas(ram.data());
+        for(const char*name:{"360CW","360CCW","Up180CW","Up180CCW","Down180CW","Down180CCW"}) {
+            bool found=false;
+            for(auto &movie:g_peliculas) for(auto &[address,symbol]:movie.namedSprites)
+                if(symbol>=0 && std::strcmp(kSimbolos[symbol].nombre,name)==0) found=true;
+            assert(found);
+        }
+        std::puts("PASS: all six directional sprite identities found in local guest capture");
+    }
+    std::puts("PASS: production QTE instance caller, frame, vtable, movie, ancestry, bounds and cycle gates");
+}

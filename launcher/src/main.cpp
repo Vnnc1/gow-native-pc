@@ -4,6 +4,7 @@
 #include "installer_backend.h"
 #include "lanzador.h"
 #include "mando.h"
+#include "mods_model.h"
 
 #include <QDir>
 #include <QFontDatabase>
@@ -81,6 +82,7 @@ int main(int argc, char *argv[])
 
     Lanzador lanzador;
     InstallerBackend installer;
+    ModsModel modeloMods(&installer);
     // Read-only diagnostics also exercise the same region selection used by QML.
     if (app.arguments().contains(QStringLiteral("--inspect-installation"))) {
         const auto bytes = QJsonDocument(QJsonArray::fromVariantList(installer.languages())).toJson();
@@ -106,6 +108,7 @@ int main(int argc, char *argv[])
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("lanzador"), &lanzador);
     engine.rootContext()->setContextProperty(QStringLiteral("installer"), &installer);
+    engine.rootContext()->setContextProperty(QStringLiteral("modeloMods"), &modeloMods);
     engine.rootContext()->setContextProperty(QStringLiteral("mando"), &mando);
     engine.rootContext()->setContextProperty(QStringLiteral("fuenteTitulo"), familiaTitulo);
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },

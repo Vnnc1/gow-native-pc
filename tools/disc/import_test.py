@@ -98,6 +98,53 @@ class ImportTests(TempTests):
                     self.assertEqual(result['edition'], region['id'])
                     self.assertEqual(result['reason_code'], 'demo_excluded' if region.get('demo') else 'region_not_ported')
 
+    def test_region_with_code_reuses_that_build_only_when_the_bytes_match(self):
+        profile = copy.deepcopy(identify.profiles.load('gow1'))
+        profile['executable']['text_sha1'] = discfs.text_sha1(elf())
+        region = next(r for r in profile['regions'] if r['id'] == 'asia-97399')
+        with patch.object(identify.profiles, 'all_profiles', return_value=[profile]), \
+                patch.object(identify, 'regional_builds', return_value=[]):
+            # The recorded identity is the Japanese executable; the synthetic one is not it.
+            result = identify.identify(iso(self.root / 'asia other code.iso', region['elf']))
+            self.assertNotIn('code', result)
+            self.assertEqual(result['reason_code'], 'region_not_ported')
+            # Same disc, same serial: once its measured identity is the shared one it reuses that build.
+            target = next(r for r in profile['regions'] if r['id'] == region['code'])
+            target['known_crc'] = discfs.pcsx2_crc(elf())
+            target['known_text_sha1'] = discfs.text_sha1(elf())
+            result = identify.identify(iso(self.root / 'asia same code.iso', region['elf']))
+            self.assertEqual(result['reason_code'], 'region_alias')
+            self.assertEqual(result['code'], 'japan')
+            self.assertEqual(result['label'], region['label'])
+            self.assertFalse(result['compatible'])  # it still never enters the USA generation path
+            self.assertNotIn('playable', result)     # nothing registered yet
+
+    def test_registered_build_makes_the_disc_playable(self):
+        profile = copy.deepcopy(identify.profiles.load('gow1'))
+        region = next(r for r in profile['regions'] if r['id'] == 'asia-97399')
+        target = next(r for r in profile['regions'] if r['id'] == region['code'])
+        target['known_crc'] = discfs.pcsx2_crc(elf())
+        target['known_text_sha1'] = discfs.text_sha1(elf())
+        runner, prepared = self.root / 'runner.exe', self.root / 'SLPM_670.10'
+        runner.write_bytes(b'runner')
+        prepared.write_bytes(elf())
+        build = {'region': region['id'], 'label': region['label'], 'runner': str(runner), 'elf': str(prepared),
+                 'elf_crc': target['known_crc'], 'text_sha1': target['known_text_sha1']}
+        profiles = patch.object(identify.profiles, 'all_profiles', return_value=[profile])
+        registry = patch.object(identify, 'regional_builds', return_value=[build])
+        with profiles, registry:
+            result = identify.identify(iso(self.root / 'asia registered.iso', region['elf']))
+            self.assertTrue(result['playable'])
+            self.assertTrue(result['regional_installed'])
+            self.assertEqual(result['reason_code'], 'regional_installed')
+            self.assertEqual(result['regional_build'], region['id'])
+            self.assertTrue(result['compatible'] is False)
+            # A registered build whose files are gone is not offered: the registry records files, not promises.
+            runner.unlink()
+            result = identify.identify(iso(self.root / 'asia missing runner.iso', region['elf']))
+            self.assertNotIn('playable', result)
+            self.assertEqual(result['reason_code'], 'region_alias')
+
     def test_cli_returns_per_file_errors(self):
         bad = self.root / 'bad.iso'
         bad.write_bytes(b'bad')

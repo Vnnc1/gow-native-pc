@@ -1,5 +1,6 @@
 # Test configure invalidation and process cleanup without configuring or running a game.
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'build-root-tests.ps1')
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 & (Join-Path $PSScriptRoot 'build-progress-tests.ps1')
 $CompilerCache = 'sccache'
@@ -59,6 +60,9 @@ $pgoProfile = Join-Path $scratch 'profile with spaces.profdata'
 $Config = 'Release'
 $Stages = @()
 . (Join-Path $root 'tools/pipeline/modules/game.ps1')
+# The fixture supplies identity only; production manifest parsing and profile selection remain under test.
+function Get-ProfileIdentity { return @{ runtime='runtime'; patches='patches'; game='game'; code='code' } }
+$Game = '__pipeline_fixture'
 $script:configured = @()
 # Record the real Configure arguments; only the external CMake process is replaced.
 function Native($exe, [string[]]$a, $what) {
@@ -71,7 +75,13 @@ function Native($exe, [string[]]$a, $what) {
 Configure -MaySkip
 Configure -MaySkip
 if ($script:configured.Count -ne 1) { throw 'Unchanged configure should be skipped' }
+if ($script:configuredGameProfile.mode -ne 'off' -or $script:configuredGameProfile.pgoApplied -or
+    $null -ne $script:configuredGameProfile.appliedPgoHash) { throw 'Unprofiled configure metadata must remain unprofiled on a configure skip' }
+if ('-DPS2X_ENABLE_FFMPEG=OFF' -notin $script:configured[0]) {
+    throw 'Windows builds must clear a cached FFmpeg opt-in and use the bundled MPEG decoder'
+}
 [IO.File]::WriteAllText($pgoProfile, 'profile-one')
+[IO.File]::WriteAllText("$pgoProfile.json", ((Get-ProfileIdentity) | ConvertTo-Json))
 Configure -MaySkip
 $stamp = (Get-Item $pgoProfile).LastWriteTimeUtc
 [IO.File]::WriteAllText($pgoProfile, 'profile-two')
@@ -83,7 +93,13 @@ $current = $script:configured[2] | Where-Object { $_ -like '-DCMAKE_CXX_FLAGS=*'
 if ($previous -eq $current -or $current -notmatch 'GOW_PGO_REVISION=' -or $current -notmatch 'use="[^"]+"') {
     throw 'PGO digest and quoted path must reach compiler commands'
 }
+if ($script:configuredGameProfile.mode -ne 'use' -or -not $script:configuredGameProfile.pgoApplied -or
+    $script:configuredGameProfile.appliedPgoHash -ne (Get-FileHash $pgoProfile -Algorithm SHA256).Hash) {
+    throw 'Configure metadata must capture the hash actually put into compiler flags'
+}
 Configure $bld 'generate' -MaySkip
+if ($script:configuredGameProfile.mode -ne 'generate' -or $script:configuredGameProfile.pgoApplied -or
+    $null -ne $script:configuredGameProfile.appliedPgoHash) { throw 'Instrumented training must not claim to use the available profile' }
 $instrumented = $script:configured[-1]
 if ('-DCMAKE_CXX_COMPILER_LAUNCHER=' -notin $instrumented -or '-DPS2X_ENABLE_SCCACHE=OFF' -notin $instrumented) {
     throw 'Instrumented builds must bypass compiler caches'
@@ -122,6 +138,40 @@ $ramGb = 8
 Configure -MaySkip
 if ('-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8' -notin $script:configured[-1]) { throw 'Low-memory builds must retain the smaller unity batch' }
 Write-Host 'PASS: CPU target and RAM-aware unity batch configure invalidation'
+
+$validManifest = [IO.File]::ReadAllText("$pgoProfile.json")
+foreach ($invalid in @('missing', '{invalid json', '{"runtime":"old","patches":"patches","game":"game","code":"code"}')) {
+    if ($invalid -eq 'missing') { Remove-Item -LiteralPath "$pgoProfile.json" }
+    else { [IO.File]::WriteAllText("$pgoProfile.json", $invalid) }
+    Configure -MaySkip
+    if ($script:configured[-1] -match 'CXX_FLAGS=.*-fprofile-instr-use=') {
+        throw 'Missing, malformed and mismatched manifests must not apply a local PGO profile'
+    }
+    if ($script:configuredGameProfile.pgoApplied -or $null -ne $script:configuredGameProfile.appliedPgoHash) {
+        throw 'Rejected profiles must not appear as applied in configure metadata'
+    }
+    if ([IO.File]::ReadAllText($pgoProfile) -ne 'profile-two') { throw 'Rejected profiles must remain untouched' }
+}
+[IO.File]::WriteAllText("$pgoProfile.json", $validManifest)
+Configure -MaySkip
+if (-not ($script:configured[-1] -match 'CXX_FLAGS=.*-fprofile-instr-use=')) {
+    throw 'A matching local profile must restore PGO and invalidate configure'
+}
+$savedRoot = $root
+try {
+    $root = $scratch
+    $pgoDir = Split-Path $pgoProfile
+    $shippedDir = Join-Path $root "games/$Game/pgo"
+    New-Item -ItemType Directory -Force $shippedDir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $shippedDir 'shipped.profdata'), 'shipped-profile')
+    [IO.File]::WriteAllText((Join-Path $shippedDir 'shipped.profdata.json'), $validManifest)
+    [IO.File]::WriteAllText("$pgoProfile.json", '{invalid json')
+    if (-not (Use-ReleaseProfile) -or [IO.File]::ReadAllText($pgoProfile) -ne 'shipped-profile') {
+        throw 'A matching shipped profile must recover from an invalid local manifest'
+    }
+    if (-not (Use-ReleaseProfile)) { throw 'The restored profile must remain eligible for tune training reuse' }
+} finally { $root = $savedRoot }
+Write-Host 'PASS: PGO manifest rejection, preserved data, valid recovery and shipped-profile reuse'
 
 $probe = Join-Path $scratch 'probe.py'
 [IO.File]::WriteAllText($probe, "import os, sys`nsys.exit(0 if os.environ.get('GOW_FOUNDATION_PROBE') == 'temporary' else 2)`n")

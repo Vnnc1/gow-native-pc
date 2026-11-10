@@ -1,0 +1,660 @@
+# gow-native-pc (patch 66): the GS frontend hands primitives that share one draw state to the backend as a single run
+# (new Op::Run in the threaded backend queue; one record instead of one per primitive). The run is flushed before any
+# upload, CLUT load, transfer, texture flush, FINISH/present, VRAM access and at the end of every GIF packet, so the
+# order the backend sees is unchanged. PS2X_GS_RUN=0 restores one backend call per primitive.
+# Measured (GOW_GS_COST=1, same scene): frontend submit 366-427 ns -> 86-118 ns per vertex, build unchanged.
+# Reviewed and hardened: Present/backup readback/snapshotVRAM flush the pending run under m_stateMutex only; malformed
+# or oversized queue records are dropped and counted (run_drops/run_overflows) instead of breaking the chunk; the run
+# cap is one shared constant (kGsRunMaxPrims); vc<3 vertices are zeroed identically on both paths; [gs-run] reports
+# flush/compare/whole-packet time (GOW_GS_COST=1).
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_backend.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_backend.h
+index dcb4a07..ac5a0a1 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_backend.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_backend.h
+@@ -2,6 +2,7 @@
+ 
+ #include "runtime/gs/gs_types.h"
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <vector>
+ 
+@@ -14,6 +15,25 @@ public:
+     virtual void Reset() = 0;
+ 
+     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
++    // gow-native-pc (patch 66): a run of primitives that share one draw state (GS frontend coalescing). The default
++    // replays the per-primitive path, so a backend without an override keeps the exact order and semantics.
++    virtual void SubmitRun(const GSDrawState &state, const GSVertex *vertices, const uint8_t *counts, uint32_t primCount)
++    {
++        GSPrimitiveBatch batch{};
++        batch.state = state;
++        for (uint32_t i = 0; i < primCount; ++i)
++        {
++            const uint8_t n = static_cast<uint8_t>(std::min<uint32_t>(counts[i], 3u));
++            batch.vertexCount = n;
++            for (uint8_t v = 0; v < n; ++v)
++                batch.vertices[v] = vertices[static_cast<size_t>(i) * 3u + v];
++            // gow-native-pc (patch 66): vertices past counts[i] are zeroed, exactly like the queue encoder, so a
++            // backend sees the same bytes whether the primitive came locked in a run or one at a time.
++            for (uint8_t v = n; v < 3u; ++v)
++                batch.vertices[v] = GSVertex{};
++            Submit(batch);
++        }
++    }
+     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
+ 
+     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 3fe57f8..5c50205 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -167,6 +167,25 @@ private:
+                                    const uint8_t *data,
+                                    uint32_t sizeBytes);
+     void vertexKick(bool drawing);
++    // gow-native-pc (patch 66): primitives that share one draw state are handed to the backend as one run. The run is
++    // flushed before anything that changes GS memory or the order (uploads, CLUT, transfers, FINISH, present, a state
++    // change) and at the end of every GIF packet. PS2X_GS_RUN=0 keeps one backend call per primitive.
++    void submitDraw(const GSPrimitiveBatch &batch);
++    void flushRun();
++    static constexpr uint32_t kMaxRunPrims = kGsRunMaxPrims;
++    bool m_runEnabled = false;
++    bool m_runDiag = false;
++    bool m_runValid = false;
++    uint32_t m_runPrims = 0;
++    GSDrawState m_runState{};
++    std::array<GSVertex, kGsRunMaxPrims * 3u> m_runVertices{};
++    std::array<uint8_t, kGsRunMaxPrims> m_runCounts{};
++    // gow-native-pc (patch 66): GOW_GS_COST=1 [gs-run] buckets; all touched under m_stateMutex.
++    uint64_t m_runDiagFlushes = 0u;
++    uint64_t m_runDiagPrims = 0u;
++    uint64_t m_runDiagCompareTicks = 0u;
++    uint64_t m_runDiagCompares = 0u;
++    uint64_t m_runDiagFlushTicks = 0u;
+ 
+     void recordDebugEventUnlocked(GSDebugHistoryEntry entry, uint64_t tickOverride = UINT64_MAX);
+     GSDebugHistoryEntry makeDebugEventUnlocked(GSDebugEventKind kind) const;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+index ec2fbe9..d378f1f 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+@@ -28,6 +28,7 @@ public:
+     void Reset() override;
+ 
+     void Submit(const GSPrimitiveBatch &batch) override;
++    void SubmitRun(const GSDrawState &state, const GSVertex *vertices, const uint8_t *counts, uint32_t primCount) override;
+     void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override;
+ 
+     void BeginTransfer(const GSTransferCommand &command) override;
+@@ -66,6 +67,7 @@ private:
+         Present,
+         DrawState,
+         Vertices,
++        Run,
+         Call,
+     };
+ 
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h
+index cccea7a..114840a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_types.h
+@@ -5,6 +5,10 @@
+ #include <cstdint>
+ #include <vector>
+ 
++// gow-native-pc (patch 66): upper bound of primitives in one Op::Run record; shared by the GS frontend (buffer size)
++// and the threaded backend (record validation), so the two never drift apart.
++inline constexpr uint32_t kGsRunMaxPrims = 64u;
++
+ enum GSPrimType : uint8_t
+ {
+     GS_PRIM_POINT = 0,
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index f6f2801..d483451 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -24,6 +24,17 @@ namespace
+ {
+     static constexpr uint32_t kHostFrameWidth = 640u;
+ 
++    // gow-native-pc (patch 66): GOW_GS_COST=1, whole processGIFPacket time (every path and early return). It is
++    // reported next to [gs-run] so a cheaper flushRun cannot be mistaken for a gain when the packet is simply
++    // waiting outside the window (chunk slot, XGKICK handoff, stage thread).
++    uint64_t s_runPacketTicks = 0u;
++    uint64_t s_runPacketCount = 0u;
++    void runPacketDiagAdd(uint64_t ticks)
++    {
++        s_runPacketTicks += ticks;
++        ++s_runPacketCount;
++    }
++
+     // GOW-Port: what setRasterBackend(nullptr) installs (host shutdown): it releases the renderer and its GL context
+     // and ignores the GS packets the EE may still send while the process exits. The GS memory image stays as it is.
+     class GSNullBackend final : public GSRasterBackend
+@@ -326,9 +337,112 @@ namespace
+ GS::GS()
+     : m_backend(GSThreadedBackend::MakeDefault())
+ {
++    // gow-native-pc (patch 66): primitives of one draw state go to the backend as one run by default; PS2X_GS_RUN=0
++    // restores one backend call per primitive.
++    static const bool runEnabled = []
++    {
++        const char *v = std::getenv("PS2X_GS_RUN");
++        return !(v && v[0] == '0');
++    }();
++    m_runEnabled = runEnabled;
++    m_runDiag = std::getenv("GOW_GS_COST") != nullptr;
+     reset();
+ }
+ 
++void GS::submitDraw(const GSPrimitiveBatch &batch)
++{
++    if (!m_runEnabled)
++    {
++        m_backend->Submit(batch);
++        return;
++    }
++    if (m_runValid)
++    {
++        const uint64_t d0 = m_runDiag ? __rdtsc() : 0u;
++        const bool same = m_runState == batch.state;
++        if (m_runDiag)
++        {
++            m_runDiagCompareTicks += __rdtsc() - d0;
++            ++m_runDiagCompares;
++        }
++        if (m_runPrims >= kMaxRunPrims || !same)
++            flushRun();
++    }
++    if (!m_runValid)
++    {
++        m_runState = batch.state;
++        m_runValid = true;
++        m_runPrims = 0u;
++    }
++    const uint32_t at = m_runPrims * 3u;
++    const uint8_t count = static_cast<uint8_t>(std::min<uint32_t>(batch.vertexCount, 3u));
++    for (uint32_t i = 0u; i < 3u; ++i)
++        m_runVertices[at + i] = (i < count) ? batch.vertices[i] : GSVertex{};
++    m_runCounts[m_runPrims] = count;
++    ++m_runPrims;
++}
++
++void GS::flushRun()
++{
++    if (!m_runValid)
++        return;
++    const uint32_t prims = m_runPrims;
++    m_runValid = false;
++    m_runPrims = 0u;
++    if (m_backend && prims != 0u)
++    {
++        const uint64_t d0 = m_runDiag ? __rdtsc() : 0u;
++        m_backend->SubmitRun(m_runState, m_runVertices.data(), m_runCounts.data(), prims);
++        if (m_runDiag)
++        {
++            m_runDiagFlushTicks += __rdtsc() - d0;
++            ++m_runDiagFlushes;
++            m_runDiagPrims += prims;
++            // gow-native-pc (patch 66): [gs-run] every 5 s: run coalescing and its cost (compare per primitive,
++            // flush per run incl. the producer enqueue and any wait for the render worker).
++            static const double nsPerTick = []
++            {
++                const auto t0 = std::chrono::steady_clock::now();
++                const uint64_t c0 = __rdtsc();
++                while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
++                const uint64_t c1 = __rdtsc();
++                const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
++                return ns > 0.0 ? ns / static_cast<double>(c1 - c0) : 1.0;
++            }();
++            static auto lastReport = std::chrono::steady_clock::now();
++            static uint64_t cmpTicks = 0u, cmpCount = 0u;
++            cmpTicks += m_runDiagCompareTicks;
++            cmpCount += m_runDiagCompares;
++            m_runDiagCompareTicks = 0u;
++            m_runDiagCompares = 0u;
++            const auto now = std::chrono::steady_clock::now();
++            const double wall = std::chrono::duration<double>(now - lastReport).count();
++            if (wall >= 5.0)
++            {
++                const double flushN = 1.0 / static_cast<double>(m_runDiagFlushes ? m_runDiagFlushes : 1u);
++                // gow-native-pc (patch 66): pkt/s and pkt_ms cover the whole processGIFPacket, early returns included.
++                std::fprintf(stderr,
++                             "[gs-run] flushes=%.0f/s prims_per_run=%.1f cmp_ns=%.1f flush_ns=%.0f (per run, incl. enqueue+wait) prims=%llu pkt=%.0f/s pkt_ms=%.0f\n",
++                             static_cast<double>(m_runDiagFlushes) / wall,
++                             static_cast<double>(m_runDiagPrims) / static_cast<double>(m_runDiagFlushes ? m_runDiagFlushes : 1u),
++                             static_cast<double>(cmpTicks) * nsPerTick / static_cast<double>(cmpCount ? cmpCount : 1u),
++                             static_cast<double>(m_runDiagFlushTicks) * nsPerTick * flushN,
++                             static_cast<unsigned long long>(m_runDiagPrims),
++                             static_cast<double>(s_runPacketCount) / wall,
++                             static_cast<double>(s_runPacketTicks) * nsPerTick / 1e6);
++                m_runDiagFlushes = 0u;
++                m_runDiagPrims = 0u;
++                m_runDiagFlushTicks = 0u;
++                s_runPacketTicks = 0u;
++                s_runPacketCount = 0u;
++                cmpTicks = 0u;
++                cmpCount = 0u;
++                lastReport = now;
++            }
++        }
++    }
++}
++
+ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
+ {
+     m_localMemoryStorage = vram;
+@@ -381,6 +495,7 @@ void GS::reset()
+     m_hasPreferredDisplaySource = false;
+     if (m_backend)
+     {
++        flushRun();
+         m_backend->Flush();
+         m_backend->Sync(GSSyncReason::Reset);
+         m_backend->Reset();
+@@ -426,6 +541,12 @@ void GS::snapshotVRAM()
+     // Presentation/debug snapshots run outside m_stateMutex so the EE can keep
+     // feeding the GS while a backend performs host-side conversion. Keep the
+     // selected backend alive and unswappable for the duration of the call.
++    // gow-native-pc (patch 66): flush the pending run first so the snapshot includes everything parsed so far; the
++    // state lock covers flushRun only, the conversion stays outside it.
++    {
++        std::lock_guard<std::recursive_mutex> runLock(m_stateMutex);
++        flushRun();
++    }
+     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+     if (!m_backend)
+         return;
+@@ -774,12 +895,18 @@ void GS::latchHostPresentationFrame()
+ 
+     PresentationFrame frame{};
+     bool shared = false;
++    // GOW-Port: Present compartido encola y procesa los draws previos en FIFO.
++    // Flush aqui anularia la asincronia; las lecturas y FINISH conservan su barrera.
++    // gow-native-pc (patch 66): a pending run must be in the FIFO before the present request; flush it under the state
++    // lock only (never hold it across the whole present) and in the same order the other callers use (state -> lifetime).
++    {
++        std::lock_guard<std::recursive_mutex> runLock(m_stateMutex);
++        flushRun();
++    }
+     {
+         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+         if (m_backend)
+         {
+-            // GOW-Port: Present compartido encola y procesa los draws previos en FIFO.
+-            // Flush aqui anularia la asincronia; las lecturas y FINISH conservan su barrera.
+             shared = m_backend->UsesSharedPresentation();
+             if (!shared)
+             {
+@@ -889,6 +1016,10 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+     // La barrera y todo GL se ejecutan en el hilo propietario del backend.
+     request.forceReadback = true;
+     PresentationFrame frame{};
++    {
++        std::lock_guard<std::recursive_mutex> runLock(m_stateMutex);
++        const_cast<GS *>(this)->flushRun(); // readback of a const path still has to reach the backend
++    }
+     {
+         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+         if (m_backend && m_backend->UsesSharedPresentation())
+@@ -941,6 +1072,18 @@ void GS::runtimeMarker(const uint8_t *data, uint32_t sizeBytes)
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
+ {
+     ps2_perf::Scope perf(ps2_perf::Bucket::Gs); // GOW-Port: incluye rasterizado y transferencias GIF.
++    // gow-native-pc (patch 66): whole-packet time for GOW_GS_COST. The RAII guard also measures the early returns
++    // (marker path, incomplete packet, native image shortcut), so no exit is left out of the account.
++    struct PacketTimer
++    {
++        const bool active;
++        const uint64_t start;
++        ~PacketTimer()
++        {
++            if (active)
++                runPacketDiagAdd(__rdtsc() - start);
++        }
++    } packetTimer{m_runDiag, m_runDiag ? __rdtsc() : 0u};
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (path == static_cast<GifPathId>(0))
+     {
+@@ -1058,6 +1201,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId pat
+             --input.registersLeft;
+         }
+     }
++    // gow-native-pc (patch 66): close the run at the packet boundary. Merging across packets would save a few
++    // flushes, but the next packet may start with an upload or a register write that must follow every primitive
++    // parsed here, so the run never outlives its packet.
++    flushRun();
+ }
+ 
+ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
+@@ -1100,6 +1247,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes, G
+     if (!processed)
+         return false;
+ 
++    flushRun();
+     ++m_nativePackedGIFPacketCount;
+     return true;
+ }
+@@ -1133,8 +1281,14 @@ void GS::uploadImageNativeUnlocked(uint64_t bitbltbuf,
+                                    uint32_t sizeBytes)
+ {
+     if (!data || sizeBytes == 0 || !m_backend)
++    {
++        // gow-native-pc (patch 66): no transfer follows, but a run parsed before this packet still has to reach the
++        // backend (processImageData flushes below when there is data; this covers the empty/shortcut exit).
++        flushRun();
+         return;
++    }
+ 
++    flushRun(); // gow-native-pc (patch 66): the run ends before this upload in queue order.
+     writeRegisterUnlocked(GS_REG_BITBLTBUF, bitbltbuf);
+     writeRegisterUnlocked(GS_REG_TRXPOS, trxpos);
+     writeRegisterUnlocked(GS_REG_TRXREG, trxreg);
+@@ -1588,6 +1742,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
++        flushRun();
+         m_backend->LoadClut(t, m_texclut);
+         break;
+     }
+@@ -1619,6 +1774,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
++        flushRun();
+         m_backend->LoadClut(t, m_texclut);
+         break;
+     }
+@@ -1740,6 +1896,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+             command.trxpos = m_trxpos;
+             command.trxreg = m_trxreg;
+             command.direction = m_trxdir;
++            flushRun();
+             m_backend->BeginTransfer(command);
+         }
+         recordTransferDebugEventUnlocked();
+@@ -1763,7 +1920,10 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         break;
+     case GS_REG_TEXFLUSH:
+         if (m_backend)
++        {
++            flushRun();
+             m_backend->TextureFlush();
++        }
+         break;
+     case GS_REG_SCANMSK:
+         m_scanmsk = value;
+@@ -1831,12 +1991,16 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         {
+             --m_finishSuppress;
+             if (m_backend)
++            {
++                flushRun();
+                 m_backend->Sync(GSSyncReason::Finish);
++            }
+             break;
+         }
+         if (m_backend)
+         {
+             static const bool finishAsync = [] { const char *v = std::getenv("GOW_GS_FINISH_ASINCRONO"); return v && v[0] == '1'; }();
++            flushRun();
+             if (!finishAsync)
+                 m_backend->Flush();
+             m_backend->Sync(GSSyncReason::Finish);
+@@ -2001,7 +2165,7 @@ void GS::vertexKick(bool drawing)
+         const uint64_t fe1 = feDiag ? __rdtsc() : 0u;
+         updatePreferredDisplaySourceForDraw(batch);
+         gowFogDiagDraw(batch); // GOW-Port: PS2X_GS_FOG_DIAG.
+-        m_backend->Submit(batch);
++        submitDraw(batch);
+         const uint64_t fe2 = feDiag ? __rdtsc() : 0u;
+         if (feDiag)
+             gsFeDiagAdd(fe1 - fe0, fe2 - fe1, fe2 - fe0);
+@@ -2037,6 +2201,7 @@ void GS::vertexKick(bool drawing)
+ 
+ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ {
++    flushRun();
+     if (m_backend)
+         m_backend->UploadImage(data, sizeBytes);
+ }
+@@ -2045,18 +2210,21 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    flushRun();
+     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+ bool GS::clearActiveFramebuffer(uint32_t rgba)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    flushRun();
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
+ 
+ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    flushRun();
+     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+ }
+ 
+@@ -2069,6 +2237,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+     if (m_backend)
+     {
++        flushRun();
+         m_backend->Flush();
+         m_backend->Sync(GSSyncReason::Reset);
+ 
+@@ -2107,12 +2276,14 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+ uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    const_cast<GS *>(this)->flushRun();
+     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
+ }
+ 
+ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    flushRun();
+     if (m_backend)
+         m_backend->WriteVram(psm, base, bw, x, y, value);
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index c8407dd..04cbf81 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <atomic>
+ #include <algorithm>
++#include <array>
+ #include <chrono>
+ #include <cstdlib>
+ #include <cstring>
+@@ -21,6 +22,17 @@ namespace
+     constexpr size_t kMaxPendingChunks = 256u;
+     std::atomic<bool> s_enabledByDefault{false};
+ 
++    // gow-native-pc (patch 66): Op::Run bookkeeping. Malformed or over-long records are dropped one by one (the chunk
++    // keeps being parsed); the first one prints a line, the counters are reported with the GS stats.
++    std::atomic<uint64_t> g_gsRunDrops{0u};
++    std::atomic<uint64_t> g_gsRunOverflows{0u};
++    void reportRunAnomaly(const char *what)
++    {
++        static std::atomic<bool> reported{false};
++        if (!reported.exchange(true, std::memory_order_relaxed))
++            std::fprintf(stderr, "[gs-run] dropped a queue record: %s\n", what);
++    }
++
+     // gow-native-pc (patch 64): GOW_GS_COST=1, every 5 s: how often the producer (the VU1 worker inside XGKICK) finds
+     // the published-chunk limit full and has to wait for the render worker. This is the only unbounded producer stall
+     // in the queue path; with PS2X_GS_QUEUE_CHUNKS=8 the backlog is 512 KB of commands.
+@@ -48,10 +60,14 @@ namespace
+         const double wall = std::chrono::duration<double>(now - last).count();
+         if (wall < 5.0)
+             return;
+-        std::fprintf(stderr, "[gs-pub] publishes=%.0f/s waits=%.0f/s blocked_ms=%.0f publish_ms=%.0f\n",
++        // gow-native-pc (patch 66): the Op::Run drop/overflow counters ride along with the publisher stats, so a
++        // malformed or oversized record is never silent. Both must stay at zero on a healthy trace.
++        std::fprintf(stderr, "[gs-pub] publishes=%.0f/s waits=%.0f/s blocked_ms=%.0f publish_ms=%.0f run_drops=%llu run_overflows=%llu\n",
+                      static_cast<double>(publishes) / wall, static_cast<double>(waits) / wall,
+                      static_cast<double>(waitTicksSum) * nsPerTick / 1e6,
+-                     static_cast<double>(publishTicksSum) * nsPerTick / 1e6);
++                     static_cast<double>(publishTicksSum) * nsPerTick / 1e6,
++                     static_cast<unsigned long long>(g_gsRunDrops.load(std::memory_order_relaxed)),
++                     static_cast<unsigned long long>(g_gsRunOverflows.load(std::memory_order_relaxed)));
+         publishes = waits = waitTicksSum = publishTicksSum = 0u;
+         last = now;
+     }
+@@ -256,6 +272,13 @@ void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBa
+     {
+         const Op op = static_cast<Op>(data[offset]);
+         const uint32_t length = readAt<uint32_t>(data + offset + 1u);
++        // gow-native-pc (patch 66): a record that runs past the chunk cannot be framed; count it, tell once, drop the rest.
++        if (length > size - offset - 5u)
++        {
++            reportRunAnomaly("record past the chunk");
++            ++g_gsRunDrops;
++            break;
++        }
+         const uint8_t *payload = data + offset + 5u;
+         offset += 5u + length;
+         switch (op)
+@@ -299,6 +322,32 @@ void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBa
+             if (!discardDraws())
+                 m_inner->Submit(draw);
+             break;
++        case Op::Run:
++        {
++            // gow-native-pc (patch 66): skip only this record when it is malformed (the offset already moved past it).
++            if (length < 4u)
++            {
++                reportRunAnomaly("run record truncated");
++                ++g_gsRunDrops;
++                break;
++            }
++            const uint32_t n = readAt<uint32_t>(payload);
++            if (n == 0u || n > kGsRunMaxPrims ||
++                length < 4u + static_cast<size_t>(n) + static_cast<size_t>(n) * 3u * sizeof(GSVertex))
++            {
++                reportRunAnomaly(n > kGsRunMaxPrims ? "run record too long" : "run record malformed");
++                ++g_gsRunDrops;
++                break;
++            }
++            const uint8_t *counts = payload + 4u;
++            // gow-native-pc (patch 66): no zero fill here; the encoder already zeroes the vertices a primitive does not
++            // use, and both SubmitRun paths ignore anything past counts[i].
++            static thread_local std::array<GSVertex, kGsRunMaxPrims * 3u> runVerts;
++            std::memcpy(runVerts.data(), counts + n, static_cast<size_t>(n) * 3u * sizeof(GSVertex));
++            if (!discardDraws())
++                m_inner->SubmitRun(draw.state, runVerts.data(), counts, n);
++            break;
++        }
+         case Op::Present:
+             m_inner->Present(readAt<GSPresentationRequest>(payload));
+             break;
+@@ -337,6 +386,98 @@ void GSThreadedBackend::Submit(const GSPrimitiveBatch &batch)
+     Enqueue(Op::Submit, &batch, sizeof(batch));
+ }
+ 
++// gow-native-pc (patch 66): one queue record for a run of primitives that share a state, instead of one record per
++// primitive (5-byte header + up to 3 vertices each, producer lock and publish per primitive). The state is still sent
++// once per change (Op::DrawState), so the worker's order and its state handling are unchanged.
++void GSThreadedBackend::SubmitRun(const GSDrawState &state, const GSVertex *vertices, const uint8_t *counts, uint32_t primCount)
++{
++    if (!primCount || !vertices || !counts)
++        return;
++    if (!m_compactQueue)
++    {
++        GSPrimitiveBatch batch{};
++        batch.state = state;
++        for (uint32_t i = 0u; i < primCount; ++i)
++        {
++            const uint8_t vc = static_cast<uint8_t>(std::min<uint32_t>(counts[i], 3u));
++            batch.vertexCount = vc;
++            for (uint8_t v = 0; v < vc; ++v)
++                batch.vertices[v] = vertices[static_cast<size_t>(i) * 3u + v];
++            for (uint8_t v = vc; v < 3u; ++v)
++                batch.vertices[v] = GSVertex{}; // same tail as the encoded record (see Op::Run)
++            Submit(batch);
++        }
++        return;
++    }
++    if (GsInventory::get().enabled())
++    {
++        GSPrimitiveBatch batch{};
++        batch.state = state;
++        for (uint32_t i = 0u; i < primCount; ++i)
++        {
++            const uint8_t vc = static_cast<uint8_t>(std::min<uint32_t>(counts[i], 3u));
++            batch.vertexCount = vc;
++            for (uint8_t v = 0; v < vc; ++v)
++                batch.vertices[v] = vertices[static_cast<size_t>(i) * 3u + v];
++            for (uint8_t v = vc; v < 3u; ++v)
++                batch.vertices[v] = GSVertex{}; // same tail as the encoded record (see Op::Run)
++            GsInventory::get().draw(batch);
++        }
++    }
++    std::lock_guard<std::mutex> lock(m_producerMutex);
++    const uint32_t csr = _mm_getcsr();
++    if (csr != m_lastMxcsr)
++    {
++        m_lastMxcsr = csr;
++        const uint8_t header = static_cast<uint8_t>(Op::Mxcsr);
++        const uint32_t csrSize = sizeof(csr);
++        m_open.push_back(header);
++        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&csrSize), reinterpret_cast<const uint8_t *>(&csrSize) + 4);
++        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&csr), reinterpret_cast<const uint8_t *>(&csr) + 4);
++    }
++    if (!m_drawStateValid || !(m_lastDrawState == state))
++    {
++        std::memcpy(&m_lastDrawState, &state, sizeof(state));
++        m_drawStateValid = true;
++        const uint8_t header = static_cast<uint8_t>(Op::DrawState);
++        const uint32_t stateSize = sizeof(state);
++        m_open.push_back(header);
++        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&stateSize), reinterpret_cast<const uint8_t *>(&stateSize) + 4);
++        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&state), reinterpret_cast<const uint8_t *>(&state) + stateSize);
++    }
++    // gow-native-pc (patch 66): records are cut at the shared kGsRunMaxPrims bound; the frontend never exceeds it, this
++    // only keeps a caller that does from producing an unparsable record.
++    if (primCount > kGsRunMaxPrims)
++    {
++        ++g_gsRunOverflows;
++        reportRunAnomaly("primCount over the run bound");
++    }
++    for (uint32_t base = 0u; base < primCount; base += kGsRunMaxPrims)
++    {
++        const uint32_t n = std::min(kGsRunMaxPrims, primCount - base);
++        const uint32_t payloadSize = 4u + n + n * 3u * static_cast<uint32_t>(sizeof(GSVertex));
++        const uint8_t header = static_cast<uint8_t>(Op::Run);
++        m_open.push_back(header);
++        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&payloadSize), reinterpret_cast<const uint8_t *>(&payloadSize) + 4);
++        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&n), reinterpret_cast<const uint8_t *>(&n) + 4);
++        m_open.insert(m_open.end(), counts + base, counts + base + n);
++        for (uint32_t i = 0u; i < n; ++i)
++        {
++            const uint8_t vc = static_cast<uint8_t>(std::min<uint32_t>(counts[base + i], 3u));
++            const GSVertex *src = vertices + static_cast<size_t>(base + i) * 3u;
++            m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(src), reinterpret_cast<const uint8_t *>(src + vc));
++            if (vc < 3u)
++            {
++                // Unused vertices are zeroed once here so a decoder does not have to special-case them.
++                const GSVertex empty{};
++                m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&empty), reinterpret_cast<const uint8_t *>(&empty) + (3u - vc) * sizeof(GSVertex));
++            }
++        }
++    }
++    if (m_open.size() >= kPublishBytes)
++        PublishLocked();
++}
++
+ void GSThreadedBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+ {
+     if (GsInventory::get().enabled())

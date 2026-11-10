@@ -1,0 +1,198 @@
+﻿# 59-gs-vertex-ring: one persistent vertex ring for the GS draw batches.
+#
+# Problem: every batch re-specified its vertices with glBufferData. On the Intel HD 4400 driver that reallocates the
+# store and blocks on the GPU; draw submission cost ~0.71 s of every 5 s at 0.5x (387 batches/frame, title/attract).
+#
+# Change: one 32 MB vertex buffer, glBufferStorage + persistent coherent map when the context has OpenGL 4.4
+# (GL_DYNAMIC_DRAW is not a valid BufferStorage flag: GL_DYNAMIC_STORAGE_BIT 0x0100 is), else a plain BufferData ring.
+# Attributes move to ARB_vertex_attrib_binding (VertexAttribFormat/Binding) so a batch only needs glBindVertexBuffer
+# with its ring offset. A ring wrap waits on a fence taken at the previous wrap. GOW_GS_HW_RING=0 keeps the old path.
+#
+# Also clamps PS2X_GS_HW_SCALE to 0.25..4 instead of std::max(1.0f, ...): on the 471c831 baseline any scale below 1x
+# silently stayed at 1x, so the launcher's low-spec profiles could not lower the internal resolution.
+#
+# Measured (i3-4170 + HD 4400, Asia disc, title/attract loop, VU1 x64 JIT, 5 s windows, 0.5x internal):
+#   baseline       guest 52.5-53.0 fps, gs_ms 2130-2200
+#   59 (this)      guest 52.6-55.8 fps, gs_ms 1940-2130 (draw submission ~0.55 s/5 s, was ~0.71)
+#   draws discarded guest 59.9 fps -> the remaining wall is VU1 (~92% of a core), not the renderer.
+#   0.35x internal  guest unchanged (53.8-56.6): the remaining cost is per batch, not per pixel.
+#
+# Tried and not kept (measured slower or neutral on this driver, details in the 2026-11-04 renderer notes):
+#   std140 uniform block per batch, GL state cache early-outs, palette atlas across CLUT loads, canonical state
+#   comparison, TEXFLUSH as a no-op.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+index a4183e8..d6e8be5 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.cpp
+@@ -196,6 +196,11 @@ namespace
+         load(a.Uniform2f, "glUniform2f", hwMissing);
+         load(a.Uniform4f, "glUniform4f", hwMissing);
+         load(a.Uniform4i, "glUniform4i", hwMissing);
++        // GOW-Port: vertex ring (optional: a driver without them keeps the per-batch BufferData path)
++        std::string attribMissing;
++        load(a.BindVertexBuffer, "glBindVertexBuffer", attribMissing);
++        load(a.VertexAttribFormat, "glVertexAttribFormat", attribMissing);
++        load(a.VertexAttribBinding, "glVertexAttribBinding", attribMissing);
+         load(a.VertexAttribPointer, "glVertexAttribPointer", hwMissing);
+         load(a.VertexAttribIPointer, "glVertexAttribIPointer", hwMissing);
+         load(a.EnableVertexAttribArray, "glEnableVertexAttribArray", hwMissing);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h
+index a9568ed..523f3b5 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_gl.h
+@@ -121,6 +121,10 @@ namespace GSGL
+         void (*Uniform1uiv)(GLint, GLsizei, const GLuint *) = nullptr;
+         void (*DispatchCompute)(GLuint, GLuint, GLuint) = nullptr;
+         void (*MemBarrier)(GLbitfield) = nullptr;
++        // GOW-Port: ARB_vertex_attrib_binding (OpenGL 4.3), used by the vertex ring: one bind per batch instead of re-uploading
++        void (*BindVertexBuffer)(GLuint, GLuint, GLintptr, GLsizei) = nullptr;
++        void (*VertexAttribFormat)(GLuint, GLint, GLenum, GLboolean, GLuint) = nullptr;
++        void (*VertexAttribBinding)(GLuint, GLuint) = nullptr;
+         GLsync (*FenceSync)(GLenum, GLbitfield) = nullptr;
+         GLenum (*ClientWaitSync)(GLsync, GLbitfield, GLuint64) = nullptr;
+         void (*DeleteSync)(GLsync) = nullptr;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 4457d48..82d054a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -574,6 +574,14 @@ struct GSHwBackend::Impl
+ 
+     float scale = 2.0f;
+     GLuint program = 0, vao = 0, vbo = 0;
++    // GOW-Port (patch 59): one vertex ring instead of a glBufferData per batch. A batch hands the GPU an offset with
++    // glBindVertexBuffer and writes its vertices into a persistently mapped window; a ring wrap waits on a fence taken
++    // at the previous wrap, so the memory reused there has long been consumed.
++    static constexpr uint32_t kVertexRingBytes = 32u << 20;
++    GLuint vertexRingOffset = 0;
++    uint8_t *vertexRingMap = nullptr;
++    GLsync vertexFence = nullptr;
++    bool vertexRing = false;
+     GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+           locAte = -1, locFailTint = -1, locAtst = -1, locAref = -1, locPass = -1, locBlendScale = -1, locRtTex24 = -1, locRtClamp = -1, locPxScale = -1, locAniso = -1, locTa0 = -1, locTa1 = -1, locReinterp = -1, locDate = -1, locDatm = -1, locDest = -1, locZTex = -1, locZMax = -1, locTables = -1, locRtColor = -1, locPalette = -1, locTexFmt = -1, locTexFmt2 = -1,
+           locRtFmt = -1, locRtFmt2 = -1, locTex0 = -1, locRtPx = -1, locAem = -1;
+@@ -751,14 +759,55 @@ struct GSHwBackend::Impl
+         g.GenBuffers(1, &vbo);
+         g.BindBuffer(kArrayBuffer, vbo);
+         const GLsizei stride = sizeof(HwVertex);
+-        g.VertexAttribPointer(0, 2, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, x)));
+-        g.VertexAttribPointer(1, 1, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, z)));
+-        g.VertexAttribPointer(2, 4, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, r)));
+-        g.VertexAttribPointer(3, 3, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, s)));
+-        g.VertexAttribPointer(4, 2, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, u)));
+-        g.VertexAttribPointer(5, 4, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, cu0)));
+-        for (GLuint i = 0; i < 6; ++i)
+-            g.EnableVertexAttribArray(i);
++        static const bool ringOff = []
++        {
++            const char *v = std::getenv("GOW_GS_HW_RING");
++            return v && v[0] == '0';
++        }();
++        vertexRing = !ringOff && g.BindVertexBuffer && g.VertexAttribFormat && g.VertexAttribBinding;
++        if (vertexRing)
++        {
++            bool immutable = false;
++            if (g.BufferStorage && g.MapBufferRange)
++            {
++                // BufferStorage takes GL_DYNAMIC_STORAGE_BIT (0x0100), not the GL_DYNAMIC_DRAW usage hint
++                constexpr GLbitfield kDynamicStorageBit = 0x0100;
++                g.BufferStorage(kArrayBuffer, kVertexRingBytes, nullptr, kDynamicStorageBit | kMapWriteBit | kMapPersistentBit | kMapCoherentBit);
++                vertexRingMap = static_cast<uint8_t *>(g.MapBufferRange(kArrayBuffer, 0, kVertexRingBytes, kMapWriteBit | kMapPersistentBit | kMapCoherentBit));
++                immutable = true;
++            }
++            if (!vertexRingMap)
++            {
++                if (immutable) // an immutable store cannot be respecified: make a plain one
++                {
++                    g.DeleteBuffers(1, &vbo);
++                    g.GenBuffers(1, &vbo);
++                    g.BindBuffer(kArrayBuffer, vbo);
++                }
++                g.BufferData(kArrayBuffer, kVertexRingBytes, nullptr, kStreamDraw);
++            }
++            const GLint sizes[6] = {2, 1, 4, 3, 2, 4};
++            const GLuint offsets[6] = {offsetof(HwVertex, x), offsetof(HwVertex, z), offsetof(HwVertex, r),
++                                       offsetof(HwVertex, s), offsetof(HwVertex, u), offsetof(HwVertex, cu0)};
++            for (GLuint i = 0; i < 6; ++i)
++            {
++                g.VertexAttribFormat(i, sizes[i], kFloat, kFalse, offsets[i]);
++                g.VertexAttribBinding(i, 0);
++                g.EnableVertexAttribArray(i);
++            }
++            g.BindVertexBuffer(0, vbo, 0, stride);
++        }
++        else
++        {
++            g.VertexAttribPointer(0, 2, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, x)));
++            g.VertexAttribPointer(1, 1, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, z)));
++            g.VertexAttribPointer(2, 4, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, r)));
++            g.VertexAttribPointer(3, 3, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, s)));
++            g.VertexAttribPointer(4, 2, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, u)));
++            g.VertexAttribPointer(5, 4, kFloat, kFalse, stride, reinterpret_cast<const void *>(offsetof(HwVertex, cu0)));
++            for (GLuint i = 0; i < 6; ++i)
++                g.EnableVertexAttribArray(i);
++        }
+         buildTables();
+         {
+             const GLuint sv = compile(GSGL::kVertexShader, kShuffleVs), sfs = compile(GSGL::kFragmentShader, kShuffleFs);
+@@ -799,7 +848,7 @@ struct GSHwBackend::Impl
+             }
+         }
+         if (const char *s = std::getenv("PS2X_GS_HW_SCALE"))
+-            scale = std::max(1.0f, static_cast<float>(std::atof(s)));
++            scale = std::clamp(static_cast<float>(std::atof(s)), 0.25f, 4.0f);
+         std::fprintf(stderr, "[gs-hw] render-target renderer ready, scale %.2f (%s)\n", scale,
+                      reinterpret_cast<const char *>(g.GetString(kRenderer)));
+         initialized = true;
+@@ -2382,6 +2431,41 @@ struct GSHwBackend::Impl
+     }
+     std::vector<HwVertex> splitRun;
+ 
++    // Puts a batch's vertices in the ring and points binding 0 at them (one glBindVertexBuffer per batch).
++    void appendVertices(const std::vector<HwVertex> &verts)
++    {
++        const Api &g = gl();
++        const size_t bytes = verts.size() * sizeof(HwVertex);
++        g.BindVertexArray(vao);
++        if (!vertexRing)
++        {
++            g.BindBuffer(kArrayBuffer, vbo);
++            g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(bytes), verts.data(), kStreamDraw);
++            return;
++        }
++        const uint32_t need = static_cast<uint32_t>((bytes + 63u) & ~static_cast<size_t>(63u));
++        if (vertexRingOffset + need > kVertexRingBytes)
++        {
++            if (vertexFence)
++            {
++                if (g.ClientWaitSync(vertexFence, 0, 0) == kTimeoutExpired)
++                    g.ClientWaitSync(vertexFence, kSyncFlushCommandsBit, 1000000000ull);
++                g.DeleteSync(vertexFence);
++            }
++            vertexFence = g.FenceSync(kSyncGpuCommandsComplete, 0);
++            vertexRingOffset = 0;
++        }
++        if (vertexRingMap)
++            std::memcpy(vertexRingMap + vertexRingOffset, verts.data(), bytes);
++        else
++        {
++            g.BindBuffer(kArrayBuffer, vbo);
++            g.BufferSubData(kArrayBuffer, vertexRingOffset, static_cast<GLsizeiptr>(bytes), verts.data());
++        }
++        g.BindVertexBuffer(0, vbo, vertexRingOffset, sizeof(HwVertex));
++        vertexRingOffset += need;
++    }
++
+     void drawOne(const GSDrawState &s, const std::vector<HwVertex> &verts)
+     {
+         const Api &g = gl();
+@@ -2664,9 +2748,7 @@ struct GSHwBackend::Impl
+             else
+                 g.Uniform2f(locTexSize, static_cast<float>(tex.width), static_cast<float>(tex.height));
+         }
+-        g.BindVertexArray(vao);
+-        g.BindBuffer(kArrayBuffer, vbo);
+-        g.BufferData(kArrayBuffer, static_cast<GLsizeiptr>(dverts.size() * sizeof(HwVertex)), dverts.data(), kStreamDraw);
++        appendVertices(dverts);
+ 
+         const bool ate = (c.test & 1u) != 0u;
+         const uint32_t atst = static_cast<uint32_t>((c.test >> 1) & 7u), aref = static_cast<uint32_t>((c.test >> 4) & 0xFFu);

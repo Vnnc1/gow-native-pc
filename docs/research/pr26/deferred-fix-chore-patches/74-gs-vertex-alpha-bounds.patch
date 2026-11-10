@@ -1,0 +1,98 @@
+GS efficiency candidate 74: vertex-alpha-bounds.
+Opt-in pending GPU pixel, gameplay and resource acceptance.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -5,6 +5,7 @@
+ #include "runtime/gow_ajustes_vivo.h"
+ #include "gs_texture_store.h"
+ #include "gs_alpha_pass.h"
++#include "gs_alpha_bounds.h"
+ #include "runtime/gs/gs_swizzle.h"
+ #include "gs_gl.h"
+ #include "../gs_gpu_helpers.h"
+@@ -2782,10 +2783,31 @@
+         g.Uniform1i(locAref, static_cast<GLint>(aref));
+         static const bool forceNoTest = std::getenv("GOW_GS_HW_NOATEST") != nullptr;
+         static const bool noFailPass = std::getenv("GOW_GS_HW_NOFAIL") != nullptr;
+-        const auto alphaPass = gsAlphaPassPlan(ate, atst, afail, forceNoTest, noFailPass, alphaPrune);
++        auto alphaPass = gsAlphaPassPlan(ate, atst, afail, forceNoTest, noFailPass, alphaPrune);
++        GSAlphaBoundsResult bounds{false, false};
++        // Texture alpha is deliberately unknown here. Without TCC, every TFX
++        // preserves vertex alpha; a conservative interval also covers interpolation.
++        if (alphaBounds && ate && (!s.prim.tme || c.tex0.tcc == 0u) && !dverts.empty())
++        {
++            float low = 255.0f, high = 0.0f;
++            bool known = true;
++            for (const HwVertex &v : dverts)
++            {
++                known = known && std::isfinite(v.a) && v.a >= 0.0f && v.a <= 255.0f;
++                low = std::min(low, v.a);
++                high = std::max(high, v.a);
++            }
++            if (known)
++                bounds = gsAlphaBounds(atst, aref,
++                    static_cast<uint32_t>(std::max(0.0f, std::floor(low) - 1.0f)),
++                    static_cast<uint32_t>(std::min(255.0f, std::ceil(high) + 1.0f)));
++            if (!forceNoTest && bounds.allFail) alphaPass.passing = false;
++            if (bounds.allPass) alphaPass.failing = false;
++            if (bounds.allPass || bounds.allFail) ++alphaBoundsDraws;
++        }
+         stats.alphaPassesSkipped += !alphaPass.passing;
+         stats.alphaFailPassesSkipped += ate && afail != 0u && !noFailPass && !alphaPass.failing;
+-        g.Uniform1i(locPass, (ate && !forceNoTest) ? 1 : 0);
++        g.Uniform1i(locPass, (ate && !forceNoTest && !bounds.allPass) ? 1 : 0);
+         g.Uniform1i(locFailTint, 0);
+         static const int traceAt = std::getenv("GOW_GS_HW_DEPTHTRACE") ? std::atoi(std::getenv("GOW_GS_HW_DEPTHTRACE")) : -1;
+         const bool tracing = traceAt >= 0 && presentCount >= traceAt && presentCount < traceAt + 1 && rt.depth && rt.fbp == 0;
+@@ -2982,6 +3004,8 @@
+         if (now - stats.last < std::chrono::seconds(5))
+             return;
+         stats.last = now;
++        std::fprintf(stderr, "[gs-alpha-bounds] enabled=%u decided=%llu\n", alphaBounds ? 1u : 0u, (unsigned long long)alphaBoundsDraws);
++        alphaBoundsDraws = 0;
+         std::fprintf(stderr, "[gs-fast] fast=%llu full=%llu\n", (unsigned long long)fastDraws, (unsigned long long)fullDraws);
+         fastDraws = fullDraws = 0;
+         std::fprintf(stderr, "[gs-sampler] cache=%u calls=%llu avoided=%llu\n", samplerCache ? 1u : 0u,
+@@ -3012,6 +3036,8 @@
+     GLuint fastProgram = 0, activeProgram = 0;
+     const bool fastShaderRequested = [] { const char *v = std::getenv("GOW_GS_FAST_SHADER"); return v && v[0] == '1'; }();
+     uint64_t fastDraws = 0, fullDraws = 0;
++    const bool alphaBounds = [] { const char *v = std::getenv("GOW_GS_ALPHA_BOUNDS"); return v && v[0] == '1'; }();
++    uint64_t alphaBoundsDraws = 0;
+     const bool samplerCache = [] { const char *v = std::getenv("GOW_GS_SAMPLER_CACHE"); return v && v[0] == '1'; }();
+     uint64_t samplerCalls = 0, samplerCallsSaved = 0;
+     uint64_t textureBytes = 0;
+@@ -3020,6 +3046,7 @@
+ 
+ GSHwBackend::GSHwBackend() : m_impl(std::make_unique<Impl>())
+ {
++    std::fprintf(stderr, "[gs-alpha-bounds-config] enabled=%u\n", m_impl->alphaBounds ? 1u : 0u);
+     std::fprintf(stderr, "[gs-sampler-config] cache=%u\n", m_impl->samplerCache ? 1u : 0u);
+     std::fprintf(stderr, "[gs-alpha-config] prune=%u\n", m_impl->alphaPrune ? 1u : 0u);
+ }
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_alpha_bounds.h
+@@ -0,0 +1,22 @@
++#pragma once
++#include <cstdint>
++
++struct GSAlphaBoundsResult { bool allPass, allFail; };
++
++// Inclusive integer alpha interval. An unknown/invalid interval must not remove a pass.
++constexpr GSAlphaBoundsResult gsAlphaBounds(uint32_t test, uint32_t ref, uint32_t low, uint32_t high)
++{
++    if (low > high || high > 255 || ref > 255) return {false, false};
++    switch (test)
++    {
++    case 0: return {false, true};
++    case 1: return {true, false};
++    case 2: return {high < ref, low >= ref};
++    case 3: return {high <= ref, low > ref};
++    case 4: return {low == ref && high == ref, ref < low || ref > high};
++    case 5: return {low >= ref, high < ref};
++    case 6: return {low > ref, high <= ref};
++    case 7: return {ref < low || ref > high, low == ref && high == ref};
++    default: return {false, false};
++    }
++}

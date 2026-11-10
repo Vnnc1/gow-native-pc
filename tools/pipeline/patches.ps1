@@ -75,7 +75,8 @@ function Test-Rebase {
 function Get-PatchHeader([string]$path) {
     $text = [IO.File]::ReadAllText($path, $utf8) -replace "`r`n", "`n"
     $m = [regex]::Match($text, '(?m)^(diff --git |--- .*\n\+\+\+ )')
-    if (-not $m.Success) { throw "$path has no file diff" }
+    # A patch with no file diff (a note, a retired patch) is a header on its own: the whole text is the header.
+    if (-not $m.Success) { return $text.TrimEnd("`n") }
     return $text.Substring(0, $m.Index).TrimEnd("`n")
 }
 # Tree after applying $files in order on $commit, in a temporary index (no file is touched); '' when one does not apply
@@ -86,7 +87,7 @@ function Get-AppliedTree([string]$commit, [string[]]$files) {
         $env:GIT_INDEX_FILE = $index
         $null = G $wt @('read-tree', $commit)
         foreach ($f in $files) {
-            $null = G $wt @('apply', '--cached', $f) -Allow
+            $null = G $wt @('apply', '--cached', '--allow-empty', $f) -Allow
             if ($script:gitRc -ne 0) { return '' }
         }
         return "$(G $wt @('write-tree'))".Trim()
@@ -112,7 +113,7 @@ if ($Action -eq 'start') {
         $env:GIT_AUTHOR_NAME = 'gow-native-pc patches'; $env:GIT_COMMITTER_NAME = $env:GIT_AUTHOR_NAME
         $env:GIT_AUTHOR_EMAIL = 'patches@gow-native-pc.invalid'; $env:GIT_COMMITTER_EMAIL = $env:GIT_AUTHOR_EMAIL
         foreach ($p in @(Get-RuntimePatches)) {
-            $null = G $wt @('apply', '--index', '--whitespace=nowarn', $p.FullName)
+            $null = G $wt @('apply', '--index', '--allow-empty', '--whitespace=nowarn', $p.FullName)
             $header = Get-PatchHeader $p.FullName
             [IO.File]::WriteAllText($msgFile, "$($p.Name)`n`n$header`n`nPatch: $($p.Name)`n", $utf8)
             $null = G $wt @('commit', '--quiet', '--no-verify', '--allow-empty', '--cleanup=verbatim', '-F', $msgFile)
@@ -134,7 +135,10 @@ if ($Action -eq 'start') {
         if (-not $target) { throw "$Onto is not a commit of the runtime repository" }
         $null = G $wt @('update-ref', $baseRef, $target)
         Write-Host "rebasing $(@(G $wt @('rev-list', "$runtimeCommit..$branch")).Count) patches onto $target"
-        $out = G $wt @('rebase', '--onto', $target, $runtimeCommit, $branch) -Allow
+        # The rebase rewrites the generated commits, so it needs a committer too: without a configured git identity
+        # it stopped after the first pick with the change staged and no commit. Authors are kept from the stack.
+        $committer = @('-c', 'user.name=gow-native-pc patches', '-c', 'user.email=patches@gow-native-pc.invalid')
+        $out = G $wt ($committer + @('rebase', '--onto', $target, $runtimeCommit, $branch)) -Allow
         $out | ForEach-Object { Write-Host $_ }
         if ($script:gitRc -ne 0) {
             Write-Host "`nconflict: resolve the files in $wt, git add them and run git rebase --continue there" -ForegroundColor Yellow

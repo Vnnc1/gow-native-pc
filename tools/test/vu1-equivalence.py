@@ -45,9 +45,14 @@ def main():
     for seed in args.seeds:
         env = {"GOW_FUZZ_SEED": str(seed)}
         reference = run(f"seed-{seed}-module", "module", env)
-        for mode, switch in [("x64", {}), ("x64-calls", {}),
+        for mode, switch in [("x64", {}), ("x64-inline-chain", {"GOW_VU1X_CHAIN_INLINE": "1"}), ("x64-calls", {}),
                              ("x64-sse", {"GOW_VU1X_AVX": "0"}),
-                             ("x64-no-spec", {"GOW_VU1X_SPECULATE": "0"})]:
+                             ("x64-no-spec", {"GOW_VU1X_SPECULATE": "0"}),
+                             ("x64-cold-chain", {"GOW_VU1_CHAIN_WARM": "0"}),
+                             ("x64-acc", {"GOW_VU1_ACC_REG": "1"}),
+                             ("x64-vf", {"GOW_VU1_VF_FWD": "1"}),
+                             ("x64-edges", {"GOW_VU1_BLOCKCODE": "1"}),
+                             ("x64-combined", {"GOW_VU1_ACC_REG": "1", "GOW_VU1_VF_FWD": "1", "GOW_VU1_BLOCKCODE": "1"})]:
             got = run(f"seed-{seed}-{mode}", "x64-calls" if mode == "x64-calls" else "x64", env | switch)
             if got[0] != reference[0]:
                 raise RuntimeError(f"seed {seed}: {mode} differs from generated code")
@@ -60,7 +65,7 @@ def main():
         env = {"GOW_FUZZ_SEED": "1", "GOW_FUZZ_SELFLOOP": "1", "GOW_FUZZ_CYCLES": str(cycles)}
         reference = run(f"loop-{cycles}-module", "module", env)
         for label, mode, switch in [("unchained", "module", {"GOW_VU1N_CHAIN": "0"}),
-                                    ("x64", "x64", {}), ("x64-calls", "x64-calls", {})]:
+                                    ("x64", "x64", {}), ("x64-inline-chain", "x64", {"GOW_VU1X_CHAIN_INLINE": "1"}), ("x64-calls", "x64-calls", {})]:
             if run(f"loop-{cycles}-{label}", mode, env | switch) != reference:
                 raise RuntimeError(f"Self-loop {cycles}: state or block-accounting mismatch ({label})")
     print(f"PASS: VU1 backend equivalence and self-loop budget/depth exits; logs: {work}")

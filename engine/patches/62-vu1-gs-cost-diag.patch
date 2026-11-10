@@ -1,0 +1,607 @@
+# 62-vu1-gs-cost-diag: measurement only. GOW_VU1_COST=1 / GOW_GS_COST=1 split the time of the two hot threads; both
+# off by default, and while off the cost is a static branch test per run / per block / per primitive (no rdtsc).
+#
+# VU1 (ps2_vu1_native.h, ps2_vu1_native.inl, ps2_vu1_core.cpp): [vu1-cost], every 5 s: run_ms (the same wall time
+# [gow-perf] reports as vu_ms), runs (one VU1 program run each), entries, blocks, pairs; the share of run_ms spent
+# inside the generated block functions (1/8 of the calls sampled, rdtsc overhead subtracted, scaled back), in the
+# native dispatch loop, in the per-run entry (flag import, commit of the exact engine's results) and exit
+# (syncInflight/exportFlags), and in the XGKICK tag walk (xgkicks, KB, and how much of that is submitGifPacket).
+#
+# GS (gs_hw_backend.cpp): [gs-cost] (submits/s, ns per primitive, the sameState comparison, state flushes, batches and
+# us per batch, and the per-batch split pre/uni/tex/vert/draw/post) and [gs-cost2] (the sub-parts pre_tgt, pre_fbo,
+# pre_state, tex_lookup, tex_bind, tex_scan, tex_resolve, tex_pack). Both lines print the thread they are reported from.
+#
+# Measured (i3-4170 + HD 4400, Asia disc, fast boot attract/replay demo, 70 s, 5 s windows, 0.5x internal, VU1 x64 fast):
+#   VU1  run_ms 4.32-4.63 s, 105k-124k runs, 31-37 M blocks, 246-287 M pairs -> 143-170 ns per block, 18.4-21.8 ns per
+#        pair. blockcode ~100 % of run_ms after the rdtsc correction (the raw line prints 112-124 %), dispatch 0.0 %,
+#        entry 1.3-1.7 %, exit 0.5-1.2 %: the VU1 wall time is the generated block bodies, there is no dispatch layer
+#        left to cut. xgkicks 211k-246k per 5 s (298-348 MB), xgkick_ms 432-601 (8-11 % of the block time, 26-45 %
+#        in the cutscene windows), and 96-98 % of that is submitGifPacket: the GS frontend runs on this worker thread.
+#   GS   submit 259-285 ns per primitive (253-500 ns in the cutscene windows, where draws go 4-8 M per 5 s), of which
+#        sameState is 39-44 ns; drawOne 90-98 us per batch over 13k-22k batches, split pre 21 % (pre_fbo 134-444 ms/5 s,
+#        pre_tgt 52-117 ms), uni 4-5 %, tex 42-47 % (tex_resolve 430-472 ms from ~850 real decodes at ~500 us each;
+#        tex_scan 3 ms, tex_pack 1 ms, tex_bind 68-118 ms), vert 8-10 %, draw 19-22 %, post 1 %.
+#
+# Measured and rejected while writing this patch (the notes in the code say why): the binary search over uploadLog
+# (tex_scan was already only 3 ms per 5 s), and handing PATH1 XGKICK packets to the GS worker job FIFO (the VU1 and the
+# GS frontend already share that worker thread, so the handoff never engaged and the numbers did not move: vu_ms
+# 4490-4649 with it, 4152-4659 without).
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+index a6f4c99..ac42a07 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -17,9 +17,57 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <immintrin.h>
++#if defined(_M_X64) || defined(__x86_64__)
++#include <intrin.h>
++#endif
+ 
+ class PS2Memory;
+ 
++// gow-native-pc (patch 62): GOW_VU1_COST=1 splits the VU1 worker's wall time into the native block callouts, the rest of
++// the native dispatch loop, the per-run entry/exit (flag import/export, pipeline sync) and the XGKICK packet walk. All
++// counters are zero-cost while the variable is unset (one branch per run / per block / per XGKICK, nothing else).
++namespace vu1cost
++{
++#if defined(_M_X64) || defined(__x86_64__)
++    inline uint64_t ticks() { return __rdtsc(); }
++#else
++    inline uint64_t ticks() { return 0u; }
++#endif
++
++    // cost of one empty ticks() pair, measured once: subtracted from every sample so the scaled estimate is not inflated
++    inline uint64_t rdtscOverhead()
++    {
++        static const uint64_t overhead = [] {
++            uint64_t best = 0xFFFFFFFFu;
++            for (int i = 0; i < 512; ++i)
++            {
++                const uint64_t a = ticks();
++                const uint64_t d = ticks() - a;
++                if (d < best)
++                    best = d;
++            }
++            return best;
++        }();
++        return overhead;
++    }
++
++    struct Counters
++    {
++        unsigned long long runs = 0, entries = 0, blocks = 0, pairs = 0, xgkicks = 0, xgkickBytes = 0;
++        unsigned long long runTicks = 0;        // whole VU1Interpreter::run() (this is what [gow-perf] vu_ms times)
++        unsigned long long nativeTicks = 0;     // inside VU1Interpreter::runNative() (entry + dispatch + exit)
++        unsigned long long entryTicks = 0;      // native entry: commit of the exact engine's results, flag import
++        unsigned long long exitTicks = 0;       // native exit: syncInflight + exportFlags
++        unsigned long long blockTicks = 0;      // sampled 1/8, already scaled: time inside the block functions
++        unsigned long long blockTicksRaw = 0;   // sampled 1/8, unscaled
++        unsigned long long dispatchTicks = 0;   // native loop minus the two above (slot lookup, lane checks, timing)
++        unsigned long long xgkickTicks = 0;     // XGKICK tag walk + finishXgkick (part of the block time)
++        unsigned long long xgkickSubmitTicks = 0; // the part of that spent handing the packet to the GS (submitGifPacket)
++        unsigned long long xgkickSamples = 0;
++    };
++    inline Counters counters;
++}
++
+ namespace vu1n
+ {
+     inline uint32_t macValRt(__m128 r, uint32_t m);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index f489893..1f1cd49 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -38,6 +38,9 @@ extern "C"
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
++#if defined(_M_X64) || defined(__x86_64__) // gow-native-pc (patch 62): GOW_GS_COST=1 timing
++#include <intrin.h>
++#endif
+ 
+ namespace
+ {
+@@ -684,6 +687,25 @@ struct GSHwBackend::Impl
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+ 
++    // gow-native-pc (patch 62): GOW_GS_COST=1 splits the GS worker's per-primitive (submit) and per-batch (drawOne) cost.
++    // Unset: one predictable branch per call, nothing else. `submit` runs on the GS worker (see the queue in gs_frontend).
++    struct Cost
++    {
++        bool on = std::getenv("GOW_GS_COST") != nullptr;
++        uint64_t submitTicks = 0, submits = 0;
++        uint64_t compareTicks = 0, compares = 0, stateFlushes = 0;
++        uint64_t flushTicks = 0, flushes = 0;
++        uint64_t pre = 0, uni = 0, tex = 0, vert = 0, draw = 0, post = 0, ones = 0, oneTicks = 0;
++        uint64_t preTgt = 0, preFbo = 0, preState = 0, texLookup = 0, texBind = 0; // patch 62: finer split
++        uint64_t texScan = 0, texResolve = 0, texPack = 0;                          // patch 62: inside texLookup
++        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
++    } cost;
++#if defined(_M_X64) || defined(__x86_64__)
++    static uint64_t costTicks() { return __rdtsc(); }
++#else
++    static uint64_t costTicks() { return 0u; }
++#endif
++
+     const Api &gl() const { return context.gl(); }
+ 
+     GLuint compile(GLenum type, const char *src) { return compile(type, {src}); }
+@@ -1643,6 +1665,8 @@ struct GSHwBackend::Impl
+ 
+     bool uploadedSinceDraw(const RenderTarget &t, uint32_t tbp) const
+     {
++        // gow-native-pc (patch 62): a binary search over uploadLog measured no gain (tex_scan was 3 ms per 5 s out of a
++        // 4096-record log, i.e. the walk was never the cost); the plain scan stays.
+         for (const UploadRecord &u : uploadLog)
+             if (u.seq > t.lastDrawSeq && u.lo <= tbp && tbp < u.hi)
+                 return true;
+@@ -2182,6 +2206,20 @@ struct GSHwBackend::Impl
+ 
+     void submit(const GSPrimitiveBatch &b)
+     {
++        // patch 62: whole per-primitive cost of this worker (all exit paths, including the skips)
++        const bool costOn = cost.on;
++        struct SubmitCost
++        {
++            Cost &c; bool on; uint64_t start;
++            ~SubmitCost()
++            {
++                if (on)
++                {
++                    c.submitTicks += costTicks() - start;
++                    ++c.submits;
++                }
++            }
++        } submitCost{cost, costOn, costOn ? costTicks() : 0u};
+         const GSDrawState &s = b.state;
+         const GSPrimType type = s.prim.type;
+         const bool tri = type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN;
+@@ -2213,8 +2251,22 @@ struct GSHwBackend::Impl
+                 dumpSkipped(s, b, "view");
+                 return;
+             }
+-        if (havePending && !sameState(pendingState, s))
+-            flushPending();
++        if (havePending)
++        {
++            const uint64_t compareStart = costOn ? costTicks() : 0u;
++            const bool same = sameState(pendingState, s);
++            if (costOn)
++            {
++                cost.compareTicks += costTicks() - compareStart;
++                ++cost.compares;
++            }
++            if (!same)
++            {
++                if (costOn)
++                    ++cost.stateFlushes;
++                flushPending();
++            }
++        }
+         if (!havePending)
+         {
+             pendingState = s;
+@@ -2375,6 +2427,20 @@ struct GSHwBackend::Impl
+ 
+     void flushPending()
+     {
++        // patch 62: batch end (includes the draw call below)
++        const bool costOn = cost.on;
++        struct FlushCost
++        {
++            Cost &c; bool on; uint64_t start;
++            ~FlushCost()
++            {
++                if (on)
++                {
++                    c.flushTicks += costTicks() - start;
++                    ++c.flushes;
++                }
++            }
++        } flushCost{cost, costOn, costOn ? costTicks() : 0u};
+         ++batchSerial; // the next sprite starts a new batch: no seam with the previous one
+         flushShuffle();
+         if (!havePending || pending.empty())
+@@ -2543,6 +2609,21 @@ struct GSHwBackend::Impl
+ 
+     void drawOne(const GSDrawState &s, const std::vector<HwVertex> &verts)
+     {
++        // patch 62: one batch, split into pre (target/viewport/blend state), uniforms, texture, vertex upload, draw, post
++        const bool costOn = cost.on;
++        const uint64_t costStart = costOn ? costTicks() : 0u;
++        struct OneCost
++        {
++            Cost &c; bool on; uint64_t start;
++            ~OneCost()
++            {
++                if (on)
++                {
++                    c.oneTicks += costTicks() - start;
++                    ++c.ones;
++                }
++            }
++        } oneCost{cost, costOn, costStart};
+         const Api &g = gl();
+         ++frameBatch;
+         if (onlyLo >= 0 && (frameBatch < onlyLo || frameBatch > onlyHi) && s.context.frame.fbp == 0 && s.context.frame.fbw == 8 && !(s.prim.tme && s.context.tex0.tbp0 == 0))
+@@ -2599,6 +2680,9 @@ struct GSHwBackend::Impl
+             rt.usedW = std::max<uint32_t>(rt.usedW, std::min<uint32_t>(bx, rt.pxW));
+             rt.usedH = std::max<uint32_t>(rt.usedH, std::min<uint32_t>(by, rt.pxH));
+         }
++        const uint64_t costTgt = costOn ? costTicks() : 0u;
++        if (costOn)
++            cost.preTgt += costTgt - costStart;
+         g.BindFramebuffer(kFramebuffer, rt.fbo);
+         g.Viewport(0, 0, rt.glW, rt.glH);
+         g.Enable(kScissorTest);
+@@ -2607,6 +2691,9 @@ struct GSHwBackend::Impl
+         g.Scissor(static_cast<GLint>(std::floor(sx0 * scale)), static_cast<GLint>(std::floor(sy0 * scale)),
+                   static_cast<GLsizei>(std::ceil(sw * scale)), static_cast<GLsizei>(std::ceil(sh * scale)));
+         g.Disable(kCullFace);
++        const uint64_t costFbo = costOn ? costTicks() : 0u;
++        if (costOn)
++            cost.preFbo += costFbo - costTgt;
+ 
+         // depth
+         // ZTE = 0 means no depth test on the GS (the movie player draws its picture sprite with TEST = 0): ALWAYS
+@@ -2704,6 +2791,12 @@ struct GSHwBackend::Impl
+         }
+         else
+             g.Disable(kBlend);
++        const uint64_t costPre = costOn ? costTicks() : 0u;
++        if (costOn)
++        {
++            cost.pre += costPre - costStart;
++            cost.preState += costPre - costFbo;
++        }
+ 
+         g.UseProgram(program);
+         {
+@@ -2734,6 +2827,10 @@ struct GSHwBackend::Impl
+         g.Uniform1i(locTfx, c.tex0.tfx);
+         g.Uniform1i(locTcc, c.tex0.tcc);
+         g.Uniform1f(locBlendScale, 1.0f / 128.0f);
++        const uint64_t costUni = costOn ? costTicks() : 0u;
++        if (costOn)
++            cost.uni += costUni - costPre;
++        uint64_t costLookup = costUni; // patch 62: unchanged when the batch is untextured
+         if (s.prim.tme)
+         {
+             // a texture that lives in a render target of the same format is sampled straight from it
+@@ -2762,7 +2859,15 @@ struct GSHwBackend::Impl
+                 g.TextureBarrier();
+             const bool uploaded = !(src || rsrc || zsrc) && vram != nullptr;
+             const bool indexedSource = uploaded && isIndexed(c.tex0.psm);
++            const uint64_t costScan = costOn ? costTicks() : 0u;
+             Texture &tex = (src || rsrc || zsrc) ? dummy : indexedSource ? indexTextureFor(s) : textureFor(s);
++            costLookup = costOn ? costTicks() : 0u;
++            if (costOn)
++            {
++                cost.texLookup += costLookup - costUni;
++                cost.texScan += costScan - costUni;
++                cost.texResolve += costLookup - costScan;
++            }
+             // gow-native-pc (patch 52): a texture-pack image replaces the game's texture, sampled as a direct-colour texture
+             // at its own resolution (the shader's scaled-texture path, as for render targets drawn at a larger scale)
+             if (!texPackOpened)
+@@ -2770,6 +2875,8 @@ struct GSHwBackend::Impl
+             if (pcsx2Names && uploaded)
+                 notePcsx2Name(s, tex);
+             const GLuint replacement = texPack.enabled() && uploaded ? replacementFor(s, tex) : 0u;
++            if (costOn)
++                cost.texPack += costTicks() - costLookup;
+             const bool indexed = indexedSource && replacement == 0u;
+             g.Uniform1i(locIndexed, indexed ? 1 : 0);
+             g.Uniform1i(locLinear, s.linearFilter ? 1 : 0);
+@@ -2823,7 +2930,16 @@ struct GSHwBackend::Impl
+             else
+                 g.Uniform2f(locTexSize, static_cast<float>(tex.width), static_cast<float>(tex.height));
+         }
++        const uint64_t costTexStart = costOn ? costTicks() : 0u;
++        if (costOn)
++        {
++            cost.tex += costTexStart - costUni;
++            cost.texBind += costTexStart - costLookup;
++        }
+         appendVertices(dverts);
++        const uint64_t costVert = costOn ? costTicks() : 0u;
++        if (costOn)
++            cost.vert += costVert - costTexStart;
+ 
+         const bool ate = (c.test & 1u) != 0u;
+         const uint32_t atst = static_cast<uint32_t>((c.test >> 1) & 7u), aref = static_cast<uint32_t>((c.test >> 4) & 0xFFu);
+@@ -2918,6 +3034,9 @@ struct GSHwBackend::Impl
+             else { g.DepthMask(kFalse); g.ColorMask(mr, mg, mb, kFalse); }
+             g.DrawArrays(kTriangles, 0, static_cast<GLsizei>(verts.size()));
+         }
++        const uint64_t costDraw = costOn ? costTicks() : 0u;
++        if (costOn)
++            cost.draw += costDraw - costVert;
+         ++stats.batches;
+         g.Disable(kScissorTest);
+         static const int rtDumpAt = std::getenv("GOW_GS_HW_RTDUMP") ? std::atoi(std::getenv("GOW_GS_HW_RTDUMP")) : -1;
+@@ -2963,6 +3082,8 @@ struct GSHwBackend::Impl
+         if (errorsShown < 8)
+             if (const GLenum err = g.GetError())
+                 std::fprintf(stderr, "[gs-hw] GL error 0x%x after batch %llu\n", err, (unsigned long long)stats.batches), ++errorsShown;
++        if (costOn)
++            cost.post += costTicks() - costDraw;
+     }
+ 
+     // GOW-Port: GOW_GS_TEXSRC=1 classifies every texture decode (and target readback) by where its data came from, every
+@@ -3010,8 +3131,60 @@ struct GSHwBackend::Impl
+         ++texSources[key];
+     }
+ 
++    // gow-native-pc (patch 62): GOW_GS_COST=1, every 5 s: per-primitive and per-batch cost of this worker. Ticks are the
++    // host TSC read on this thread; ms are derived from a one-time 10 ms calibration.
++    void reportCost()
++    {
++        if (!cost.on)
++            return;
++        const auto now = std::chrono::steady_clock::now();
++        if (now - cost.last < std::chrono::seconds(5))
++            return;
++        const double wall = std::chrono::duration<double>(now - cost.last).count();
++        cost.last = now;
++        static const double toMs = [] {
++            const auto t0 = std::chrono::steady_clock::now();
++            const uint64_t c0 = costTicks();
++            while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
++            const uint64_t c1 = costTicks();
++            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++            return ms > 0.0 ? 1.0 / (static_cast<double>(c1 - c0) / ms) : 0.0;
++        }();
++        static Cost prev;
++        const auto d = [](uint64_t a, uint64_t b) { return a - b; };
++        const auto ms = [](uint64_t t) { return static_cast<double>(t) * toMs; };
++        const uint64_t submits = d(cost.submits, prev.submits), compares = d(cost.compares, prev.compares);
++        const uint64_t ones = d(cost.ones, prev.ones);
++        const double submitMs = ms(d(cost.submitTicks, prev.submitTicks)), compareMs = ms(d(cost.compareTicks, prev.compareTicks));
++        const double oneMs = ms(d(cost.oneTicks, prev.oneTicks)), flushMs = ms(d(cost.flushTicks, prev.flushTicks));
++        const double secPre = ms(d(cost.pre, prev.pre)), secUni = ms(d(cost.uni, prev.uni)), secTex = ms(d(cost.tex, prev.tex)),
++                     secVert = ms(d(cost.vert, prev.vert)), secDraw = ms(d(cost.draw, prev.draw)), secPost = ms(d(cost.post, prev.post));
++        const auto pct = [oneMs](double v) { return oneMs > 0.0 ? v * 100.0 / oneMs : 0.0; };
++        std::fprintf(stderr,
++                     "[gs-cost] tid=%zu submits=%llu (%.0f/s) submit_ms=%.0f (%.0f ns/prim) compares=%llu compare_ms=%.0f (%.0f ns/cmp) "
++                     "stateFlushes=%llu flush_ms=%.0f (%llu/5s) | batches=%llu one_ms=%.0f (%.1f us/batch) | "
++                     "pre=%.0f%% uni=%.0f%% tex=%.0f%% vert=%.0f%% draw=%.0f%% post=%.0f%% | ms pre=%.0f uni=%.0f tex=%.0f vert=%.0f draw=%.0f post=%.0f\n",
++                     static_cast<size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFu),
++                     submits, submits / wall, submitMs, submits ? submitMs * 1e6 / static_cast<double>(submits) : 0.0, compares,
++                     compareMs, compares ? compareMs * 1e6 / static_cast<double>(compares) : 0.0,
++                     d(cost.stateFlushes, prev.stateFlushes), flushMs, d(cost.flushes, prev.flushes), ones, oneMs,
++                     ones ? oneMs * 1e3 / static_cast<double>(ones) : 0.0, pct(secPre), pct(secUni), pct(secTex),
++                     pct(secVert), pct(secDraw), pct(secPost), secPre, secUni, secTex, secVert, secDraw, secPost);
++        const double secTgt = ms(d(cost.preTgt, prev.preTgt)), secFbo = ms(d(cost.preFbo, prev.preFbo)),
++                     secPState = ms(d(cost.preState, prev.preState)), secLookup = ms(d(cost.texLookup, prev.texLookup)),
++                     secBind = ms(d(cost.texBind, prev.texBind));
++        const double secScan = ms(d(cost.texScan, prev.texScan)), secResolve = ms(d(cost.texResolve, prev.texResolve)),
++                     secPack = ms(d(cost.texPack, prev.texPack));
++        std::fprintf(stderr,
++                     "[gs-cost2] ms pre_tgt=%.0f pre_fbo=%.0f pre_state=%.0f tex_lookup=%.0f tex_bind=%.0f "
++                     "tex_scan=%.0f tex_resolve=%.0f tex_pack=%.0f\n",
++                     secTgt, secFbo, secPState, secLookup, secBind, secScan, secResolve, secPack);
++        prev = cost;
++    }
++
+     void reportStats()
+     {
++        reportCost(); // patch 62
+         if (texSrcDiag)
+         {
+             static auto last = std::chrono::steady_clock::now();
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 4a9eae8..2b60e16 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <algorithm>
+ #include <bit>
++#include <thread> // patch 62: the cost report names the thread it measures
+ #include <atomic>
+ #include <cfenv>
+ #include <cmath>
+@@ -1245,10 +1246,14 @@ void VU1Interpreter::finishXgkick(const uint8_t *packet)
+                          m_xgkick.totalBytes, kicks, noKicks);
+         }
+     }
++    static const bool costDiag = std::getenv("GOW_VU1_COST") != nullptr; // patch 62
++    const uint64_t costSubmit = costDiag ? vu1cost::ticks() : 0u;
+     if (m_activeMemory)
+         m_activeMemory->submitGifPacket(GifPathId::Path1, packet, m_xgkick.totalBytes);
+     else if (m_activeGs)
+         m_activeGs->processGIFPacket(packet, m_xgkick.totalBytes);
++    if (costDiag)
++        vu1cost::counters.xgkickSubmitTicks += vu1cost::ticks() - costSubmit;
+     m_xgkick.active = false;
+ }
+ 
+@@ -1964,6 +1969,57 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
+ #define VU1_DEBUG_FRAME
+ #endif
+ 
++// gow-native-pc (patch 62): GOW_VU1_COST=1, every 5 s: where the VU1 worker's time goes (all tick counts are wall time of
++// this thread; `blocks` is a 1/8 sample scaled back, everything else is exact). `other` is run() outside the native loop.
++static void vu1CostReport()
++{
++    using C = vu1cost::Counters;
++    static C prev;
++    static auto last = std::chrono::steady_clock::now();
++    const auto now = std::chrono::steady_clock::now();
++    if (now - last < std::chrono::seconds(5))
++        return;
++    const double wall = std::chrono::duration<double>(now - last).count();
++    last = now;
++    static const double toMs = [] {
++        const auto t0 = std::chrono::steady_clock::now();
++        const uint64_t c0 = vu1cost::ticks();
++        while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
++        const uint64_t c1 = vu1cost::ticks();
++        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++        return ms > 0.0 ? 1.0 / (static_cast<double>(c1 - c0) / ms) : 0.0;
++    }();
++    const C c = vu1cost::counters;
++    const auto d = [](unsigned long long a, unsigned long long b) { return a - b; };
++    const auto msOf = [](unsigned long long t) { return static_cast<double>(t) * toMs; };
++    const double runMs = msOf(d(c.runTicks, prev.runTicks));
++    const double nativeMs = msOf(d(c.nativeTicks, prev.nativeTicks));
++    const double entryMs = msOf(d(c.entryTicks, prev.entryTicks));
++    const double exitMs = msOf(d(c.exitTicks, prev.exitTicks));
++    const double blockMs = msOf(d(c.blockTicks, prev.blockTicks));
++    const double xgkickMs = msOf(d(c.xgkickTicks, prev.xgkickTicks));
++    const double xgkickSubmitMs = msOf(d(c.xgkickSubmitTicks, prev.xgkickSubmitTicks));
++    const double dispatchRaw = nativeMs - entryMs - exitMs - blockMs;
++    const double dispatchMs = dispatchRaw > 0.0 ? dispatchRaw : 0.0;
++    const double otherRaw = runMs - nativeMs;
++    const double otherMs = otherRaw > 0.0 ? otherRaw : 0.0;
++    const auto pct = [runMs](double v) { return runMs > 0.0 ? v * 100.0 / runMs : 0.0; };
++    const unsigned long long blocks = d(c.blocks, prev.blocks), pairs = d(c.pairs, prev.pairs);
++    const unsigned long long runs = d(c.runs, prev.runs), entries = d(c.entries, prev.entries);
++    std::fprintf(stderr,
++                 "[vu1-cost] tid=%zu run_ms=%.0f runs=%llu (%.0f/s) entries=%llu blocks=%llu (%.1fM/s) pairs=%llu | "
++                 "blockcode=%.1f%% dispatch=%.1f%% entry=%.1f%% exit=%.1f%% other=%.1f%% | "
++                 "block_ns=%.1f pair_ns=%.2f xgkicks=%llu (%llu KB) xgkick_ms=%.0f (%.1f%% of block time) submit_ms=%.0f (%.0f%%)\n",
++                 static_cast<size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFu),
++                 runMs, runs, runs / wall, entries, blocks,
++                 blocks / wall * 1e-6, pairs, pct(blockMs), pct(dispatchMs), pct(entryMs), pct(exitMs),
++                 pct(otherMs), blocks ? blockMs * 1e6 / static_cast<double>(blocks) : 0.0,
++                 pairs ? blockMs * 1e6 / static_cast<double>(pairs) : 0.0, d(c.xgkicks, prev.xgkicks),
++                 d(c.xgkickBytes, prev.xgkickBytes) / 1024u, xgkickMs, blockMs > 0.0 ? xgkickMs * 100.0 / blockMs : 0.0,
++                 xgkickSubmitMs, xgkickMs > 0.0 ? xgkickSubmitMs * 100.0 / xgkickMs : 0.0);
++    prev = c;
++}
++
+ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+@@ -1973,6 +2029,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     m_activeGs = &gs;
+     m_activeMemory = memory;
+ 
++    static const bool costDiag = std::getenv("GOW_VU1_COST") != nullptr; // patch 62
++    const uint64_t costStart = costDiag ? vu1cost::ticks() : 0u;
++
+     ps2_perf::Scope perf(ps2_perf::Bucket::Vu); // GOW-Port: VU0/VU1; las llamadas al GS se descuentan.
+     const uint64_t previousFpMode = vu_fpmode::get();
+     vu_fpmode::set((previousFpMode & ~vu_fpmode::kRoundMask) | vu_fpmode::kRoundZero); // VU float rounding
+@@ -2312,6 +2371,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             std::fprintf(stderr, "[vu1-endmac] ours runs=%u mac12=%u mac0=%u other=%u\n", endMacRuns, endMacCount[0], endMacCount[1], endMacCount[2]);
+     }
+     vu_fpmode::set(previousFpMode);
++    if (costDiag) // patch 62
++    {
++        vu1cost::counters.runTicks += vu1cost::ticks() - costStart;
++        ++vu1cost::counters.runs;
++        vu1CostReport();
++    }
+ }
+ 
+ // GOW-Port: GOW_VU1C_VERIFICAR. Antes de un bloque compilado se ejecutan sus pares con el interprete desde el
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+index 59d0e6f..7a717d6 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -174,6 +174,20 @@ void VU1NativeAccess::callUpper(VU1NativeCtx &n, uint32_t pc, uint32_t upper)
+ 
+ void VU1NativeAccess::xgkick(VU1NativeCtx &n, uint32_t qwordAddress)
+ {
++    // patch 62: the tag walk + finishXgkick, timed as a subset of the block time (scope guard: every exit path)
++    static const bool costDiag = std::getenv("GOW_VU1_COST") != nullptr;
++    struct CostScope
++    {
++        bool on; uint64_t start;
++        ~CostScope()
++        {
++            if (on)
++            {
++                vu1cost::counters.xgkickTicks += vu1cost::ticks() - start;
++                ++vu1cost::counters.xgkicks;
++            }
++        }
++    } costScope{costDiag, costDiag ? vu1cost::ticks() : 0u};
+     VU1Interpreter &vu = *n.vu;
+     if (vu.m_unit != VU1Interpreter::Unit::VU1 || !vu.m_activeVuData || vu.m_activeVuDataSize < 16u)
+         return;
+@@ -234,6 +248,8 @@ void VU1NativeAccess::xgkick(VU1NativeCtx &n, uint32_t qwordAddress)
+             {
+                 // the packet is contiguous in VU memory and is handed on before the next VU instruction: no copy here
+                 // (the GS stage queue copies it once, ~170 MB/s in gameplay)
++                if (costDiag)
++                    vu1cost::counters.xgkickBytes += total;
+                 vu.finishXgkick(vu.m_activeVuData + first);
+                 return;
+             }
+@@ -250,6 +266,8 @@ void VU1NativeAccess::xgkick(VU1NativeCtx &n, uint32_t qwordAddress)
+         }
+     }
+     vu.progressXgkick();
++    if (costDiag)
++        vu1cost::counters.xgkickBytes += vu.m_xgkick.totalBytes;
+ }
+ 
+ // Native entry (and after an exact callout inside a block): the exact engine's flag pipeline moves into the rings
+@@ -1046,6 +1064,9 @@ bool VU1Interpreter::runNative(StepContext &context)
+     if (m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot || m_stopRequested)
+         return false;
+ 
++    static const bool costDiag = std::getenv("GOW_VU1_COST") != nullptr; // patch 62
++    const uint64_t costStart = costDiag ? vu1cost::ticks() : 0u;
++
+     const uint64_t generation = context.memory ? context.memory->getVU1CodeGeneration() : 0u;
+     if (generation != ns.generation)
+     {
+@@ -1124,6 +1145,8 @@ bool VU1Interpreter::runNative(StepContext &context)
+             ++ns.nativeRuns;
+             vu_fpmode::set((savedFpMode & ~vu_fpmode::kRoundMask) | vu_fpmode::kRoundZero | vu_fpmode::kFlushZero);
+             armed = true;
++            if (costDiag) // patch 62: per-run prologue (commit of the exact engine's results, flag import)
++                vu1cost::counters.entryTicks += vu1cost::ticks() - costStart;
+         }
+         if (bisecting)
+         {
+@@ -1179,7 +1202,18 @@ bool VU1Interpreter::runNative(StepContext &context)
+         ctx.pc = pc;
+         ctx.cycId = cycId;
+         ctx.depth = 0u;
++        // patch 62: 1/8 of the calls are timed, the report scales them back (rdtsc pair per call would cost ~15 % here)
++        const bool costSample = costDiag && (((vu1cost::counters.blocks + static_cast<unsigned long long>(ctx.blocks)) & 7u) == 0u);
++        const uint64_t costBlock = costSample ? vu1cost::ticks() : 0u;
+         const uint32_t result = fn(ctx);
++        if (costSample)
++        {
++            const uint64_t raw = vu1cost::ticks() - costBlock;
++            const uint64_t overhead = vu1cost::rdtscOverhead();
++            const uint64_t dt = raw > overhead ? raw - overhead : 0u;
++            vu1cost::counters.blockTicksRaw += dt;
++            vu1cost::counters.blockTicks += dt * 8u;
++        }
+         if (result & kVu1nDone) // chained blocks: every block's exit bookkeeping is done, m_state.pc is the next pc
+             continue;
+         // the last block run (ctx: it may be a chained one) ended the program or bails: its exit here
+@@ -1206,11 +1240,22 @@ bool VU1Interpreter::runNative(StepContext &context)
+     m_state.cycles = m_cycle; // only read outside the blocks (diagnostics)
+     if (armed)
+     {
++        const uint64_t costExit = costDiag ? vu1cost::ticks() : 0u;
+         VU1NativeAccess::syncInflight(*this); // the exact engine continues: its readiness arrays become current
+         VU1NativeAccess::exportFlags(*this);
+         ns.exitCycle = m_cycle;
++        if (costDiag) // patch 62
++            vu1cost::counters.exitTicks += vu1cost::ticks() - costExit;
+     }
+     vu_fpmode::set(savedFpMode);
++    if (costDiag) // patch 62
++    {
++        auto &cc = vu1cost::counters;
++        cc.nativeTicks += vu1cost::ticks() - costStart;
++        cc.blocks += ctx.blocks;
++        cc.pairs += ctx.pairs;
++        ++cc.entries;
++    }
+     if (ns.diag)
+     {
+         static auto last = std::chrono::steady_clock::now();
+

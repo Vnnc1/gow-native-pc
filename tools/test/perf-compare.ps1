@@ -33,12 +33,10 @@ try {
         GOW_PAD_TEST='1'; GOW_FAST_BOOT='1'; GOW_SKIP_FMV='1'; GOW_AUDIO='0'; GOW_WINDOW_HIDDEN='1';
         GOW_PAD_GUION=$profile.optimize.pad_script; GOW_PAD_CAPTURAS='80';
         GOW_VU1_SIN_COMPILAR='1'; GOW_VU1_CAPTURE_MISSES='0'; PS2X_GS_HW='1'; PS2X_GS_WORKER='1';
-        GOW_GS_FINISH_ASINCRONO='1'; PS2X_GS_ESCALA="$Scale"; PS2X_GS_HW_SCALE="$Scale";
-        PS2X_GS_ESCALA_DINAMICA='0'; TOBIICHI_ANCHO='1280'; TOBIICHI_ALTO='720';
-        TOBIICHI_PANORAMICO='16:9'; TOBIICHI_FXAA='0'; TOBIICHI_VENTANA_FPS='120';
-        PS2X_GS_SHADER_CACHE_DIR=(Join-Path $data 'perf-shader-cache') }
+        GOW_GS_FINISH_ASINCRONO='1'; PS2X_GS_HW_SCALE="$Scale";
+        TOBIICHI_ANCHO='1280'; TOBIICHI_ALTO='720';
+        TOBIICHI_PANORAMICO='16:9'; TOBIICHI_FXAA='0'; TOBIICHI_VENTANA_FPS='120' }
     foreach ($key in $settings.Keys) { [Environment]::SetEnvironmentVariable($key, $settings[$key], 'Process') }
-    New-Item -ItemType Directory -Force $settings.PS2X_GS_SHADER_CACHE_DIR | Out-Null
     for ($round = 1; $round -le $Runs; ++$round) {
         $order = if ($round % 2) { @('lean', 'full') } else { @('full', 'lean') }
         foreach ($mode in $order) {

@@ -1,0 +1,51 @@
+Opt-in quiet-checkpoint folding for the GoW GS FINISH countdown.
+Only resume entries 0x17A328/0x17A32C are wrapped. Preserve the final decrement,
+GS polling and all non-quiet checkpoints in generated code; default stays off.
+GOW_FINISH_COUNTDOWN=1 selects the candidate, 0 retains the reference.
+Validation: 560 differential cases, full verify and hidden gameplay smoke pass.
+Scene-matched combat A/B was rejected for drift; no FPS/audio gain is claimed.
+Integration: fix-chore patch 68-ee-finish-countdown, regenerated on the PR 26 chain (same change, new context).
+
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+index 49b52cd..c893dbd 100644
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -2044,8 +2044,38 @@ namespace
+     }
+     // ---- end EE timer 2 ----
+ 
++    // Only the register-only countdown is folded. Keep its final decrement, GS flag
++    // load, guest calls and every non-quiet checkpoint in the generated reference.
++    void gowFinishCountdown(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        if (ctx->pc == 0x0017A328u)
++            SET_GPR_S32(ctx, 2, static_cast<int32_t>(GPR_U32(ctx, 2)));
++        while (GPR_U32(ctx, 2) > 1u)
++        {
++            const uint32_t count = GPR_U32(ctx, 2);
++            const uint64_t folded = runtime->eeScheduler().advanceQuietRepeated(32u, count - 1u);
++            SET_GPR_S32(ctx, 2, static_cast<int32_t>(count - (folded ? folded : 1u)));
++            ctx->pc = 0x0017A32Cu;
++            if (!folded && !runtime->eeCheckpointQuiet(32u) && runtime->eeCheckpointFull(32u))
++                return;
++        }
++        // Includes the zero/wraparound case, which deliberately keeps the reference.
++        sub_0017A2A0_0x17a2a0(rdram, ctx, runtime);
++    }
++
+     void applyGowOverrides(PS2Runtime &runtime)
+     {
++        const char *finishWait = std::getenv("GOW_FINISH_COUNTDOWN");
++        // Preserve the older, explicitly selected real-time sleep experiment.
++        const char *sleepWait = std::getenv("GOW_ESPERA_EE");
++        const bool foldFinishWait = finishWait && std::strcmp(finishWait, "1") == 0 &&
++                                    !(sleepWait && sleepWait[0] == '1');
++        std::fprintf(stderr, "[gow-finish-wait] countdown=%u\n", foldFinishWait ? 1u : 0u);
++        if (foldFinishWait)
++        {
++            runtime.replaceFunction(0x0017A328u, gowFinishCountdown);
++            runtime.replaceFunction(0x0017A32Cu, gowFinishCountdown);
++        }
+         // GOW-Port: GOW_THREAD_WATCH=<s> (debug): every <s> seconds a host thread prints the EE threads (status, wait,
+         // pc, ra) from the scheduler's snapshot, so a guest that blocks for good (no frames, no pad polls, where
+         // GOW_THREAD_DUMP never fires) still shows where each thread waits

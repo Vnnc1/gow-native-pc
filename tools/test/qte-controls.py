@@ -35,6 +35,7 @@ ApplicationWindow {
         property bool controlesDmc5: true
         property bool cancelarAnimaciones: true
         property bool escSalir: false
+        property bool qteAuto: false
         property bool qteHold: true
         property string qteHoldButtons: "circle"
         property int qteHoldRate: 10
@@ -86,6 +87,14 @@ ApplicationWindow {
                 textureToggle.checked = true
                 textureToggle.toggled()
                 check(settings.usarPacoteTexturas, "texture pack toggle did not persist")
+                var autoRow = find(accessibility, o => o.titulo === UI.Tema.t("qteAuto"))
+                check(autoRow !== null, "automatic QTE setting missing")
+                var autoToggle = find(autoRow, o => o.toggled !== undefined && o.checkable === true)
+                check(!settings.qteAuto, "automatic QTE must default off")
+                autoToggle.checked = true; autoToggle.toggled()
+                check(settings.qteAuto, "automatic QTE setting did not persist")
+                autoToggle.checked = false; autoToggle.toggled()
+                check(!settings.qteAuto, "automatic QTE setting did not disable")
                 var buttons = ["L1", "L2", "R1", "R2"]
                 for (var i = 0; i < buttons.length; ++i) {
                     var title = UI.Tema.t("qteHold") + " · " + buttons[i]

@@ -1,0 +1,19 @@
+Keep the host event loop alive while minimized.
+Raylib otherwise waits for restoration before surfacing a pending close event,
+while the independent guest and audio threads keep running. The collector then
+forces termination. FLAG_WINDOW_ALWAYS_RUN preserves host polling and close
+handling for normal, fullscreen and borderless windows without changing AF.
+Validation: docs/research/issue-31-stutter-2026-11-09.md (minimized-window follow-up).
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -407,7 +407,8 @@
+     // screen hides the window from them.
+     const bool borderless = !hidden && mode && std::strcmp(mode, "sin_bordes") == 0;
+     g_sinBordes = borderless;
+-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | (envFlag("TOBIICHI_VSYNC", false) ? FLAG_VSYNC_HINT : 0u) |
++    // Keep host events running while minimized; the guest/audio threads continue independently.
++    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN | (envFlag("TOBIICHI_VSYNC", false) ? FLAG_VSYNC_HINT : 0u) |
+                    (hidden ? FLAG_WINDOW_HIDDEN : 0u));
+     const char *customTitle = std::getenv("TOBIICHI_TITULO");
+     InitWindow(width, height, customTitle && *customTitle ? customTitle : title);

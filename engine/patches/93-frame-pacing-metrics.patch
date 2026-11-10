@@ -1,0 +1,197 @@
+Frame pacing metrics: percentiles, jitter, stutter ratio, the longest run of slow frames, and who was busy
+inside each spike
+
+`[gow-frame]` printed a mean and four thresholds. A hitch report needs the shape of the distribution, not its centre.
+`FrameWindow::analyze()` now returns p50/p95/p99/p99.9, max, jitter (standard deviation of the stored intervals), the
+count and ratio of frames above 1.5 x p50, the count of frames above max(2 x p50, 100 ms), the longest run of
+consecutive frames above 2 x p50, and over_200/over_300. The work runs once per report window on a copy of the stored
+intervals; `add()` only gained the two counters, so the per-frame path is unchanged.
+
+`recordGuestFrame()` also differences `ps2_perf`'s exclusive per-thread buckets between two frame entries, so every
+frame above the fan-out threshold (max(2 x the previous window's p50, 100 ms)) prints
+`[gow-frame-spike] t=.. ms=.. ee=.. vu=.. gs=.. iop=.. gwait=.. upload=.. hwait=..`. The threshold uses the previous
+window's p50, so the attribution adds no second pass. `attr=on|off` in the window line says whether those buckets are
+being charged at all (they are only when GOW_PERF_DIAG is set).
+
+Measured, ship deck, Asia disc, 0.5x, Intel HD Graphics 4400, 70 s, GOW_PERF_DIAG=1 GOW_FRAME_DIAG=1. Cold start
+reports as its own window: t=6.569, 2 frames, max 4000.06 ms, and that frame is ee 311.5 / iop 190.1 / guest_wait
+3498.3 / host_wait 3874.1 ms (a load stall, not a frame). Steady state, t=46.7..66.8 s, 80..89 frames per window:
+p50 52.1..59.6 ms, p95 76.6..119.0 ms, p99 130.8..169.2 ms, p99.9 130.8..169.2 ms, jitter 14.3..24.9 ms, stutter
+4.5..11.2 %, 1..5 spikes, longest run 1..4, over_200=over_300=0. Every steady-state spike is VU1-attributed:
+t=52.392 ms=169.21 vu=159.6 gs=87.4 ee=78.2; t=57.396 ms=156.37 vu=152.4 gs=23.2 ee=52.3; t=65.060 ms=127.31
+vu=121.5 gs=36.9. `[gs-gpu]` in the same run measures 4.6..11.7 ms per presented frame, and vu_ms is 4597..4685 of
+each 5000 ms window, so the frame interval is the VU1 thread's time, not the chip's. This patch only measures: mean
+frame rate is unchanged (guest_flip_hz 16.6..18.4 -> 14.8..18.4, scene drift; p50/p95 within the +/-10 % run band).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
+index f239544..e5508fc 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
+@@ -7,25 +7,62 @@
+ 
+ // Owned by the guest thread. Fixed storage, one clock read per frame, no hot-path allocation.
+ // Intervals describe entry to the configured guest frame function, not GPU/display presentation.
++//
++// gow-native-pc (patch 93): the mean alone hides frame pacing. This window now also answers the two
++// questions a hitch report has to answer: how many frames are noticeably slower than the typical one
++// (stutter ratio), and how long the worst uninterrupted stretch of slow frames is (longest run). The
++// percentile/streak work happens once per report window on a copy, never per frame.
+ namespace gow_diagnostics {
+ struct FrameWindow {
++    struct Analysis {
++        double mean = 0, p50 = 0, p95 = 0, p99 = 0, p999 = 0, max = 0, jitter = 0;
++        size_t samples = 0;
++        uint64_t stutterFrames = 0, spikeFrames = 0, longestRun = 0;
++        double stutterRatio = 0;
++    };
+     std::array<double, 4096> intervals{};
+-    uint64_t count = 0, overBudget = 0, over33 = 0, over50 = 0, over100 = 0;
++    uint64_t count = 0, overBudget = 0, over33 = 0, over50 = 0, over100 = 0, over200 = 0, over300 = 0;
+     double total = 0, maximum = 0;
+     void add(double ms) {
+         if (!std::isfinite(ms) || ms < 0) return;
+         intervals[count % intervals.size()] = ms;
+         ++count; total += ms; maximum = std::max(maximum, ms);
+         overBudget += ms > 1000.0 / 60.0; over33 += ms > 1000.0 / 30.0;
+-        over50 += ms > 50.0; over100 += ms > 100.0;
++        over50 += ms > 50.0; over100 += ms > 100.0; over200 += ms > 200.0; over300 += ms > 300.0;
+     }
+     size_t samples() const { return static_cast<size_t>(std::min<uint64_t>(count, intervals.size())); }
+-    void sort() { std::sort(intervals.begin(), intervals.begin() + samples()); }
+-    double percentile(unsigned percent) const {
++    // One pass over the stored order (ring order above 4096 samples) plus one sort of a copy.
++    Analysis analyze() const {
++        Analysis a;
+         const size_t n = samples();
+-        if (!n) return 0;
+-        const size_t rank = std::max<size_t>(1, (n * std::min(100u, percent) + 99) / 100);
+-        return intervals[rank - 1];
++        a.samples = n;
++        if (!n) return a;
++        std::array<double, 4096> sorted{};
++        std::copy(intervals.begin(), intervals.begin() + n, sorted.begin());
++        std::sort(sorted.begin(), sorted.begin() + n);
++        const auto at = [&](unsigned permille) { // permille: 500 = p50, 950 = p95, 999 = p99.9
++            const size_t rank = std::max<size_t>(1, (n * permille + 999) / 1000);
++            return sorted[rank - 1];
++        };
++        a.mean = total / static_cast<double>(count);
++        a.p50 = at(500); a.p95 = at(950); a.p99 = at(990); a.p999 = at(999); a.max = maximum;
++        double squares = 0;
++        for (size_t i = 0; i < n; ++i) {
++            const double d = sorted[i] - a.mean;
++            squares += d * d;
++        }
++        a.jitter = std::sqrt(squares / static_cast<double>(n));
++        const double stutter = 1.5 * a.p50, spike = std::max(2.0 * a.p50, 100.0);
++        uint64_t run = 0;
++        for (size_t i = 0; i < n; ++i) {
++            const double ms = intervals[i];
++            if (ms > stutter) ++a.stutterFrames;
++            if (ms > spike) ++a.spikeFrames;
++            run = ms > 2.0 * a.p50 ? run + 1 : 0;
++            a.longestRun = std::max(a.longestRun, run);
++        }
++        a.stutterRatio = static_cast<double>(a.stutterFrames) / static_cast<double>(n);
++        return a;
+     }
+ };
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+index b335cff..4c9a147 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -17,6 +17,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "raylib.h"
+ #include "runtime/gow_frame_metrics.h"
++#include "runtime/ps2_perf.h"
+ #include "runtime/gow_ajustes_vivo.h"
+ #include "runtime/gow_mod_patches.h"
+ #include <chrono>
+@@ -138,24 +139,50 @@ namespace
+     bool g_frameDiagnostics = false;
+     uint32_t g_framePc = kFuncionCuadro;
+ 
++    // gow-native-pc (patch 93): the interval alone does not say who was busy inside it. `ps2_perf` bucket
++    // counters are global and charge exclusive thread time, so their difference across two frame entries
++    // is that frame's split (still intrusive only when GOW_PERF_DIAG is set; zeros otherwise).
+     void recordGuestFrame()
+     {
+         using Clock = std::chrono::steady_clock;
+         const auto now = Clock::now();
+         static auto first = now, last = now, start = now;
+         static gow_diagnostics::FrameWindow window;
++        static std::array<uint64_t, ps2_perf::bucketCount> buckets{};
++        static double previousP50 = 0.0;
+         if (now == last) return;
+-        window.add(std::chrono::duration<double, std::milli>(now - last).count());
++        const double ms = std::chrono::duration<double, std::milli>(now - last).count();
++        window.add(ms);
++        std::array<double, ps2_perf::bucketCount> used{};
++        for (size_t i = 0; i < ps2_perf::bucketCount; ++i)
++        {
++            const uint64_t total = ps2_perf::nanos[i].load(std::memory_order_relaxed);
++            used[i] = static_cast<double>(total - buckets[i]) * 1e-6;
++            buckets[i] = total;
++        }
++        // Same rule as FrameWindow::analyze(): a hitch is a frame above max(2 x typical, 100 ms). The typical
++        // value comes from the previous window so the report itself stays a single pass.
++        const double hitch = previousP50 > 0.0 ? std::max(2.0 * previousP50, 100.0) : 100.0;
++        if (ms >= hitch)
++            std::fprintf(stderr,
++                "[gow-frame-spike] t=%.3f ms=%.2f ee=%.1f vu=%.1f gs=%.1f iop=%.1f gwait=%.1f upload=%.1f hwait=%.1f\n",
++                std::chrono::duration<double>(now - first).count(), ms,
++                used[0], used[1], used[2], used[3], used[4], used[5], used[6]);
+         last = now;
+         const double seconds = std::chrono::duration<double>(now - start).count();
+         if (seconds < 5.0) return;
+-        window.sort();
+-        std::fprintf(stderr, "[gow-frame] t=%.3f window=%.3f intervals=%llu samples=%zu mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f over_16_67=%llu over_33_33=%llu over_50=%llu over_100=%llu\n",
++        const auto a = window.analyze();
++        std::fprintf(stderr,
++            "[gow-frame] t=%.3f window=%.3f intervals=%llu samples=%zu mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f p99_9_ms=%.3f max_ms=%.3f jitter_ms=%.3f stutter=%llu (%.1f%%) spike=%llu longest_run=%llu over_16_67=%llu over_33_33=%llu over_50=%llu over_100=%llu over_200=%llu over_300=%llu attr=%s\n",
+             std::chrono::duration<double>(now - first).count(), seconds,
+-            static_cast<unsigned long long>(window.count), window.samples(), window.total / window.count,
+-            window.percentile(50), window.percentile(95), window.percentile(99), window.maximum,
++            static_cast<unsigned long long>(window.count), a.samples, a.mean, a.p50, a.p95, a.p99, a.p999,
++            a.max, a.jitter, static_cast<unsigned long long>(a.stutterFrames), a.stutterRatio * 100.0,
++            static_cast<unsigned long long>(a.spikeFrames), static_cast<unsigned long long>(a.longestRun),
+             static_cast<unsigned long long>(window.overBudget), static_cast<unsigned long long>(window.over33),
+-            static_cast<unsigned long long>(window.over50), static_cast<unsigned long long>(window.over100));
++            static_cast<unsigned long long>(window.over50), static_cast<unsigned long long>(window.over100),
++            static_cast<unsigned long long>(window.over200), static_cast<unsigned long long>(window.over300),
++            ps2_perf::enabled() ? "on" : "off");
++        previousP50 = a.p50;
+         window = {}; start = now;
+     }
+ 
+@@ -443,10 +476,26 @@ void gowIntegracionInstalar(PS2Runtime &runtime, const std::string &elfPath)
+     g_frameDiagnostics = envFlag("GOW_FRAME_DIAG", false);
+     if (g_frameDiagnostics)
+     {
++        // gow-native-pc: solo una direccion explicita e invalida apaga el diagnostico. Sin GOW_PERF_FRAME_PC se usa
++        // el valor del perfil (kFuncionCuadro, 0x1837B8) y el codigo anterior lo apagaba entero: poner solo
++        // GOW_FRAME_DIAG=1 no producia ninguna linea [gow-frame].
+         const char *pc = std::getenv("GOW_PERF_FRAME_PC");
+         const uint32_t configured = pc ? static_cast<uint32_t>(std::strtoul(pc, nullptr, 0)) : 0u;
+-        if (configured && runtime.hasFunction(configured)) g_framePc = configured;
+-        else { g_frameDiagnostics = false; std::fprintf(stderr, "[gow-frame] unavailable: valid profile frame PC required\n"); }
++        if (configured)
++        {
++            if (runtime.hasFunction(configured))
++                g_framePc = configured;
++            else
++            {
++                g_frameDiagnostics = false;
++                std::fprintf(stderr, "[gow-frame] unavailable: 0x%x is not a function of this build\n", configured);
++            }
++        }
++        else if (!runtime.hasFunction(g_framePc))
++        {
++            g_frameDiagnostics = false;
++            std::fprintf(stderr, "[gow-frame] unavailable: valid profile frame PC required\n");
++        }
+     }
+     // gow-native-pc (patch 39): the counter can be turned on from the in-game menu, so the frame function is always
+     // wrapped (one counter increment per guest frame); before, only with the overlay or diagnostics on.

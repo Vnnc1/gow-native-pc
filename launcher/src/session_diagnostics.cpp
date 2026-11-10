@@ -126,13 +126,15 @@ public:
         append(events, QJsonDocument(entry).toJson(QJsonDocument::Compact) + '\n', 1024 * 1024);
         events.flush();
     }
-    void persist()
+    bool persist()
     {
         meta["last_heartbeat_utc"] = utc(); meta["elapsed_ms"] = clock.elapsed();
         meta["warning_candidate_lines"] = static_cast<qint64>(warningLines);
         meta["log_rotations"] = static_cast<qint64>(rotations);
         meta["write_failure"] = writeFailure;
-        if (!saveJson(dir + "/session.json", meta)) writeFailure = true;
+        if (saveJson(dir + "/session.json", meta)) return true;
+        writeFailure = true;
+        return false;
     }
     void line(const QByteArray &bytes)
     {
@@ -159,7 +161,7 @@ public:
             ++warningLines;
             if (warningLines <= 1000) event({{"type", "runtime_warning_candidate"}, {"text", text.left(2048)}});
         }
-        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-queue|gow-sync|gow-sync-config|gs-cache|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
+        static const QRegularExpression tag(R"(^\[(gow-perf|gow-frame|gow-present|gow-queue|gow-sync|gow-sync-config|gs-cache|audio-stats|iop-drift|vu1n|vu1x|gow-audio[^\]]*|gow-iop[^\]]*|gow-vu1[^\]]*|gow-snd[^\]]*)\])");
         const auto match = tag.match(text);
         if (match.hasMatch()) {
             QJsonObject sample{{"type", "runtime"}, {"tag", match.captured(1)}, {"elapsed_ms", lastOutput}};
@@ -283,7 +285,14 @@ public:
         meta["state"] = state.isEmpty() ? (status == QProcess::CrashExit ? "crashed" : code == 0 ? "completed" : "nonzero_exit") : state;
         meta["exit_code"] = code; meta["exit_code_hex"] = QString::number(quint32(code), 16);
         meta["stop_requested"] = stopping; meta["ended_utc"] = utc();
-        event({{"type", "process_exit"}, {"code", code}, {"state", meta["state"]}}); persist();
+        event({{"type", "process_exit"}, {"code", code}, {"state", meta["state"]}});
+        // Windows readers can briefly deny QSaveFile's atomic replacement. Never truncate the old evidence.
+        bool saved = persist();
+        for (int attempt = 0; !saved && attempt < 20; ++attempt) {
+            QThread::msleep(50);
+            saved = persist();
+        }
+        if (!saved) event({{"type", "metadata_persist_failed"}});
         SessionDiagnostics::writeSummary(dir);
         result = status == QProcess::NormalExit && code == 0 && state.isEmpty() ? 0 : 1;
         QCoreApplication::exit(result);
@@ -300,8 +309,17 @@ QString SessionDiagnostics::create(const QString &base, const QVariantMap &setti
     // Explicit settings allowlist excludes ISO/save paths, key bindings and other personal fields.
     for (const QString &key : {"diagnostics", "framePc", "gpu", "modoPantalla", "ancho", "alto", "escala",
                                "aspecto", "fxaa", "vsync", "fpsLimite", "filtro", "anisotropico",
+                               "fxSinSombras", "fxSinAditivos", "fxSinFiltrado",
                                "jitInline", "finAnticipado", "vuRapida", "usarPacoteTexturas", "idioma", "saltarVideos", "arranqueRapido",
-                               "qteHold", "qteHoldButtons", "qteHoldRate"})
+                               "qteHold", "qteHoldButtons", "qteHoldRate", "qteAuto", "audioVolume", "audioMute",
+                               // Picture / texture / renderer switches: a report must be able to prove the
+                               // switch reached the runner before a "no effect" report can be interpreted.
+                               "presentacion", "progresivo", "presentacionDirecta", "glMenor", "texPresupuestoMb",
+                               "texEstadisticas", "texNombres", "texVolcado",
+                               "gsCacheEstado", "gsReusoTexturas", "gsAnilloVertices", "gsProfundidadZbp",
+                               "gsAgruparPrimitivas", "gsRunRapido", "gsColaCompacta", "gsHiloWorker",
+                               "gsHiloPipeline", "gsFinishAsincrono", "gsEnvioAsincrono", "gsBloquesCola",
+                               "gsEstadisticas", "gsPerfilGpu"})
         if (settings.contains(key)) selected[key] = QJsonValue::fromVariant(settings.value(key));
     if (!saveJson(dir + "/session.json", {{"schema", 1}, {"id", id}, {"created_utc", utc()}, {"state", "prepared"}, {"settings", selected}})) return {};
     if (!saveJson(base + "/latest.json", {{"id", id}})) return {};
@@ -337,7 +355,8 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
 {
     const auto fail = [&](const QString &message) { if (error) *error = message; return QString(); };
     if (!validSession(session)) return fail("No recorded session is available.");
-    if (!writeSummary(session)) return fail("Cannot create diagnostic summary.");
+    const auto snapshot = sessionMetadata(session);
+    if (!writeSummary(session, snapshot)) return fail("Cannot create diagnostic summary.");
     const QString out = QFileInfo(session).absolutePath() + "/report-" + QFileInfo(session).fileName() + '-' + QUuid::createUuid().toString(QUuid::Id128).left(8) + ".zip";
     QSaveFile zip(out);
     if (!zip.open(QIODevice::WriteOnly)) return fail(zip.errorString());
@@ -358,7 +377,8 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
         QFile file(session + '/' + name);
         if (!file.exists()) continue;
         if (QFileInfo(file).isSymLink() || !file.open(QIODevice::ReadOnly) || file.size() > logLimit) return fail("Invalid or oversized report file: " + name);
-        if (!entry(name.toUtf8(), file.read(logLimit))) return fail(zip.errorString());
+        const auto data = name == "session.json" ? QJsonDocument(snapshot).toJson() : file.read(logLimit);
+        if (!entry(name.toUtf8(), data)) return fail(zip.errorString());
     }
     const QByteArray readme = "Local diagnostic snapshot. No automatic upload. Review before sharing: redaction is best effort.\n"
         "Attach this ZIP to a project bug report with the area/save point, steps, expected/observed behavior and approximate marker time.\n"
@@ -366,6 +386,7 @@ QString SessionDiagnostics::exportZip(const QString &session, QString *error)
         "Runtime metrics are five-second windows; guest frame intervals are not display presentation latency.\n"
         "CPU percent uses one core = 100%; silence alone is not a hang. Warning candidates are not confirmed errors.\n"
         "A running state is a live snapshot or an interrupted monitor; check last_heartbeat_utc. Missing counters mean unavailable, not zero.\n"
+        "final_metadata_incomplete means the exported final state was recovered from a recorded exit event; original local metadata is preserved.\n"
         "Rotated logs retain the newest 12 MiB plus startup; capped metrics/events can be truncated (see session.json).\n";
     if (!entry("README.txt", readme)) return fail(zip.errorString());
     const quint32 start = quint32(zip.pos());
@@ -416,11 +437,22 @@ int SessionDiagnostics::run(const QStringList &args)
     for (const auto &file : patchDir.entryInfoList({"*.patch"}, QDir::Files, QDir::Name)) patches[file.fileName()] = sha(file.filePath());
     r.meta["source_patch_sha256"] = patches;
     r.meta["source_snapshot_note"] = "Source/configuration at launch; runner_sha256 identifies the actual executable. Local edits may not be built.";
+    // Picture/effect settings are part of the evidence: without them a session report cannot tell whether a
+    // "no effect" report means the switch never reached the runner or the game simply draws that effect rarely.
     QJsonObject env;
     for (const char *name : {"GOW_PERF_DIAG", "GOW_FRAME_DIAG", "GOW_PERF_FRAME_PC", "GOW_AUDIO", "GOW_AUDIO_STATS", "GOW_IOP_DRIFT",
          "GOW_VU1N_DIAG", "GOW_VU1N_X64", "GOW_VU1X_INLINE", "GOW_DISPATCH_FULL", "GOW_GS_FINISH_ASINCRONO",
-         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "GOW_GS_HW_STATS", "GOW_GS_STAGE_SPIN_US", "PS2X_GS_QUEUE_CHUNKS", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
-         "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ"})
+         "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "GOW_GS_STAGE_SPIN_US", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
+         "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "PS2X_GS_RENDERER", "GOW_SCALER", "GOW_SHARPEN",
+         "TOBIICHI_FXAA", "GOW_ANISO", "GOW_FX_NO_SHADOWS", "GOW_FX_NO_ADDITIVE3D", "GOW_FX_NO_TEXTURE_FILTER",
+         "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ", "GOW_QTE_AUTO", "GOW_AUDIO_VOLUME", "GOW_AUDIO_MUTE",
+         // Texture, presentation and renderer switches (path-valued GOW_TEX_PCSX2_NAMES is deliberately
+         // excluded: reports must not carry a player's own directory names).
+         "GOW_TEXTURE_PACK_MB", "GOW_TEXTURE_PACK_STATS", "GOW_GS_HW_TEXDUMP",
+         "GOW_PROGRESIVO", "TOBIICHI_ASPECTO", "PS2X_GS_DIRECT_PRESENT", "GOW_GL_MAX_MINOR",
+         "GOW_GS_STATE_CACHE", "GOW_GS_TEXREUSE", "GOW_GS_HW_RING", "GOW_GS_DEPTH_PER_ZBP",
+         "PS2X_GS_RUN", "PS2X_GS_RUN_STATE_FAST", "PS2X_GS_COMPACT_QUEUE", "PS2X_GS_QUEUE_CHUNKS",
+         "GOW_GS_ASYNC_SUBMIT", "GOW_GS_HW_STATS", "GOW_GS_GPU_PROFILE"})
         if (qEnvironmentVariableIsSet(name)) env[name] = redact(qEnvironmentVariable(name).left(128), r.paths);
     r.meta["runtime_environment"] = env;
 #ifdef Q_OS_WIN

@@ -1,0 +1,120 @@
+# zzz-302-gs-wrap-blend-grouping: wrapping-blend batches (COLCLAMP=0 shader blend) draw non-overlapping triangles together.
+#
+# gs_hw_backend.cpp drew every triangle of such a batch with its own glDrawArrays(..., 3) and a glTextureBarrier in between,
+# because the shader reads the destination (docs/research/gpu-saturation-2026-11-03.md: N triangles -> N draws and N-1
+# barriers). Consecutive triangles whose padded GL pixel rectangles are disjoint now share one draw: ARB_texture_barrier
+# defines a feedback draw when each texel is written once and read only by the fragment writing it, and the shader reads
+# only texelFetch(uDest, gl_FragCoord). A barrier is issued only before a triangle that touches the current group (at
+# most 64 rectangles per group), so the blended result is the same as one draw per triangle. Non-finite extents stay
+# alone between barriers. GOW_GS_WRAP_GROUP=0 restores one draw per triangle (A/B and fallback).
+# GOW_GS_HW_STATS=1 adds "[gs-hw-wrap] group=<0|1> batches= tris= draws=" every 5 s (draws == tris without grouping).
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 3f9b657..5a5443b 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -748,9 +748,13 @@ struct GSHwBackend::Impl
+         // how many blocks the image spans. Low means a partial re-decode would pay; ~equal means it would not.
+         uint64_t redecodeDirty = 0, redecodeSpan = 0, redecodeSamples = 0;
+         uint64_t redecodeBoxPct = 0; // sum of (dirty block rectangle area / image area) in percent, over the samples
++        // zzz-302: wrapping-blend (COLCLAMP=0 shader blend) batches, their triangles and the draws actually issued
++        uint64_t wrapBatches = 0, wrapTris = 0, wrapDraws = 0;
+         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
++    // zzz-302: group non-overlapping triangles of a wrapping-blend batch into one draw (default on; "0" = one per triangle)
++    bool wrapGroupOn = [] { const char *v = std::getenv("GOW_GS_WRAP_GROUP"); return !(v && v[0] == '0'); }();
+ 
+     // GPU-side frame timing (GOW_GS_GPU_PROFILE=1). `gs_ms` is thread busy time: it cannot tell CPU submission
+     // apart from the GPU still drawing. Two GL_TIMESTAMP counters per frame do; the queue reads them four frames
+@@ -3357,13 +3361,76 @@ struct GSHwBackend::Impl
+         {
+             // wrapping blend (COLCLAMP=0, only the shadow-volume passes): the shader reads the destination, so draw one
+             // triangle at a time with a barrier in between; overlapping triangles of one draw then see each other's results
+-            // like on the GS (the volumes count overlaps this way)
+-            for (size_t i = 0; i + 3 <= verts.size(); i += 3)
++            // like on the GS (the volumes count overlaps this way).
++            // zzz-302: consecutive triangles whose covered pixels cannot meet share one draw. ARB_texture_barrier defines a
++            // draw that reads and writes the same texels when each texel is written once and read only by the fragment
++            // that writes it; the shader reads only texelFetch(uDest, gl_FragCoord). Disjoint, conservatively padded GL
++            // pixel rectangles guarantee that, so the result equals one draw per triangle. A barrier is issued only
++            // before a triangle that touches the current group. GOW_GS_WRAP_GROUP=0 keeps one draw per triangle.
++            const size_t tris = verts.size() / 3u;
++            size_t issued = 0;
++            if (!wrapGroupOn)
+             {
+-                if (i != 0)
+-                    g.TextureBarrier();
+-                g.DrawArrays(kTriangles, static_cast<GLint>(i), 3);
++                for (size_t i = 0; i + 3 <= verts.size(); i += 3)
++                {
++                    if (i != 0)
++                        g.TextureBarrier();
++                    g.DrawArrays(kTriangles, static_cast<GLint>(i), 3);
++                }
++                issued = tris;
++            }
++            else
++            {
++                const float sx = rt.pxW ? static_cast<float>(rt.glW) / static_cast<float>(rt.pxW) : scale;
++                const float sy = rt.pxH ? static_cast<float>(rt.glH) / static_cast<float>(rt.pxH) : scale;
++                constexpr size_t kMaxGroup = 64; // bounds the overlap scan; a full group just starts a new one
++                int rects[kMaxGroup][4];
++                size_t groupStart = 0, groupSize = 0;
++                for (size_t t = 0; t < tris; ++t)
++                {
++                    const HwVertex *v = &dverts[t * 3u];
++                    float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
++                    for (int k = 1; k < 3; ++k)
++                        x0 = std::min(x0, v[k].x), x1 = std::max(x1, v[k].x), y0 = std::min(y0, v[k].y), y1 = std::max(y1, v[k].y);
++                    // two GL pixels of padding on every side: covers rounding, the centre adjustment and any fill rule
++                    bool finite = std::isfinite(x0) && std::isfinite(x1) && std::isfinite(y0) && std::isfinite(y1);
++                    const int r0 = finite ? static_cast<int>(std::floor(std::max(-1.0e6f, x0 * sx))) - 2 : 0;
++                    const int r1 = finite ? static_cast<int>(std::ceil(std::min(1.0e6f, x1 * sx))) + 2 : 0;
++                    const int r2 = finite ? static_cast<int>(std::floor(std::max(-1.0e6f, y0 * sy))) - 2 : 0;
++                    const int r3 = finite ? static_cast<int>(std::ceil(std::min(1.0e6f, y1 * sy))) + 2 : 0;
++                    bool touches = !finite || groupSize == kMaxGroup;
++                    for (size_t j = 0; j < groupSize && !touches; ++j)
++                        touches = r0 <= rects[j][1] && rects[j][0] <= r1 && r2 <= rects[j][3] && rects[j][2] <= r3;
++                    if (touches && groupSize != 0)
++                    {
++                        g.DrawArrays(kTriangles, static_cast<GLint>(groupStart * 3u), static_cast<GLsizei>(groupSize * 3u));
++                        ++issued;
++                        g.TextureBarrier();
++                        groupStart = t;
++                        groupSize = 0;
++                    }
++                    if (!finite)
++                    {
++                        // unknown extent: alone between barriers, exactly as before
++                        g.DrawArrays(kTriangles, static_cast<GLint>(t * 3u), 3);
++                        ++issued;
++                        if (t + 1 < tris)
++                            g.TextureBarrier();
++                        groupStart = t + 1;
++                        continue;
++                    }
++                    rects[groupSize][0] = r0, rects[groupSize][1] = r1, rects[groupSize][2] = r2, rects[groupSize][3] = r3;
++                    ++groupSize;
++                }
++                if (groupSize != 0)
++                {
++                    g.DrawArrays(kTriangles, static_cast<GLint>(groupStart * 3u), static_cast<GLsizei>(groupSize * 3u));
++                    ++issued;
++                }
+             }
++            ++stats.wrapBatches;
++            stats.wrapTris += tris;
++            stats.wrapDraws += issued;
+         }
+         else
+             g.DrawArrays(kTriangles, 0, static_cast<GLsizei>(verts.size()));
+@@ -3578,6 +3645,9 @@ struct GSHwBackend::Impl
+             stats.oversizedBatches = stats.zbpChanges = stats.zbpFallback = stats.depthTextures = 0;
+         stats.directDecodes = stats.indexDecodes = stats.directTexels = stats.indexTexels = 0;
+         stats.redecodeDirty = stats.redecodeSpan = stats.redecodeSamples = stats.redecodeBoxPct = 0;
++        std::fprintf(stderr, "[gs-hw-wrap] group=%d batches=%llu tris=%llu draws=%llu\n", wrapGroupOn ? 1 : 0,
++                     (unsigned long long)stats.wrapBatches, (unsigned long long)stats.wrapTris, (unsigned long long)stats.wrapDraws);
++        stats.wrapBatches = stats.wrapTris = stats.wrapDraws = 0;
+     }
+ 
+     RenderTarget *findTarget(uint32_t fbp)

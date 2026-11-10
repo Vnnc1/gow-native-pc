@@ -1,0 +1,32 @@
+#include "runtime/gow_save_backup.h"
+#include <algorithm>
+#include <cassert>
+#include <cstring>
+struct Color { unsigned char r,g,b,a; };
+struct Rectangle { float x,y,width,height; };
+struct Font {};
+struct Fonts { Font normal; };
+double clockNow=0;
+int language=0, draws=0;
+std::string shown;
+double GetTime() { return clockNow; }
+int GetScreenWidth() { return 640; }
+const Fonts &fuentes() { static Fonts f; return f; }
+int idiomaMenu() { return language; }
+float ancho(const Font &,const char *s,float size) { return std::strlen(s)*size*0.45f; }
+void DrawRectangleRec(Rectangle r,Color) { assert(r.x>=0 && r.x+r.width<=640 && r.y>=0); }
+void texto(const Font &,const char *s,float,float,float,Color) { shown=s; ++draws; }
+@NOTIFICATION@
+int main() {
+    for(language=0;language<4;++language) {
+        gow_saves::notification=1; drawNotification();
+        assert(!shown.empty() && gow_saves::notification==0);
+        if(language==3) assert(shown.find("histórico do launcher")!=std::string::npos);
+        auto count=draws; clockNow+=6; drawNotification(); assert(draws==count+1);
+        clockNow+=2; count=draws; drawNotification(); assert(draws==count);
+        gow_saves::notification=-1; drawNotification(); assert(draws==count+1);
+        if(language==3) assert(shown.find("Falha no backup")!=std::string::npos);
+        clockNow+=8;
+    }
+    std::puts("PASS: host notification, all four languages, success/failure, bounded duration and 640px layout");
+}

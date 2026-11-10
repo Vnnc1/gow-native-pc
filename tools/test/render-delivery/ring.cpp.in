@@ -1,0 +1,112 @@
+// Mock only GL completion. waitRingSegment/ringAppend are extracted from the runtime (zzz-300 segment fences).
+// Invariant: no byte of the mapped ring is rewritten while a draw that read it may still be in flight.
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <vector>
+using GLsync = void *;
+using GLenum = unsigned;
+using GLsizeiptr = intptr_t;
+constexpr unsigned kTimeoutExpired = 1, kAlreadySignaled = 2, kConditionSatisfied = 3;
+constexpr unsigned kSyncFlushCommandsBit = 1, kSyncGpuCommandsComplete = 2, kArrayBuffer = 3;
+// Draw ids are 1-based; the fake GPU completes draws in order and only when the CPU waits on a fence or calls Finish.
+unsigned submitted = 0, completed = 0, fences = 0, deletes = 0, finishes = 0, waits = 0, liveFences = 0;
+unsigned waitResult = kConditionSatisfied;
+bool nullFence = false;
+struct Api {
+    GLsync FenceSync(unsigned, unsigned) const {
+        ++fences;
+        if (nullFence)
+            return nullptr;
+        ++liveFences;
+        return reinterpret_cast<void *>(uintptr_t(submitted) + 1u); // value - 1 = draws covered by this fence
+    }
+    unsigned ClientWaitSync(GLsync fence, unsigned, uint64_t) const {
+        ++waits;
+        if (waitResult == kAlreadySignaled || waitResult == kConditionSatisfied) {
+            const unsigned covered = static_cast<unsigned>(reinterpret_cast<uintptr_t>(fence)) - 1u;
+            if (covered > completed)
+                completed = covered;
+        }
+        return waitResult;
+    }
+    void DeleteSync(GLsync fence) const { assert(fence); ++deletes; --liveFences; }
+    void Finish() const { completed = submitted; ++finishes; }
+    void BindBuffer(unsigned, unsigned) const {}
+    void BufferSubData(unsigned, unsigned, GLsizeiptr, const void *) const {}
+};
+const Api &gl() { static Api api; return api; }
+struct Ring {
+    static constexpr uint32_t kVertexRingBytes = 1024;
+    static constexpr uint32_t kRingSegments = 4;
+    static constexpr uint32_t kRingSegmentBytes = kVertexRingBytes / kRingSegments;
+    static constexpr uint32_t kRingOverflow = 0xFFFFFFFFu;
+    uint32_t vertexRingOffset = 0, vertexRingSegment = 0, vbo = 1;
+    uint8_t storage[kVertexRingBytes]{};
+    uint8_t *vertexRingMap = storage;
+    GLsync vertexSegmentFence[kRingSegments] = {};
+    struct { unsigned oversizedBatches = 0, ringStalls = 0, ringWraps = 0; } stats;
+@IMPLEMENTATION@
+};
+int main(int argc, char **argv) {
+    assert(argc == 2);
+    const std::string mode = argv[1];
+    if (mode == "timeout") waitResult = kTimeoutExpired;
+    if (mode == "failed") waitResult = 99;
+    if (mode == "null") nullFence = true;
+    if (mode == "already") waitResult = kAlreadySignaled;
+    Ring ring;
+    if (mode == "subdata") ring.vertexRingMap = nullptr;
+    std::vector<unsigned> reader(Ring::kVertexRingBytes / 64, 0); // last draw that read each 64-byte slot
+    uint8_t bytes[200]{};
+    const auto append = [&](size_t size) {
+        const uint32_t at = ring.ringAppend(bytes, size);
+        if (at == Ring::kRingOverflow)
+            return at;
+        assert(at % 64 == 0 && at + size <= Ring::kVertexRingBytes && "chunk outside the ring");
+        assert(at / Ring::kRingSegmentBytes == (at + size - 1) / Ring::kRingSegmentBytes && "chunk straddles two segments");
+        const uint32_t need = static_cast<uint32_t>((size + 63) & ~size_t(63));
+        ++submitted; // the caller draws before the next append
+        for (uint32_t slot = at / 64; slot < (at + need) / 64; ++slot) {
+            // Only the persistent map can race the GPU; BufferSubData is ordered by the driver.
+            if (ring.vertexRingMap)
+                assert(completed >= reader[slot] && "mapped range overwritten before GPU completion");
+            reader[slot] = submitted;
+        }
+        return at;
+    };
+    // A chunk larger than one segment goes to the caller's own buffer and leaves the ring untouched.
+    assert(append(Ring::kRingSegmentBytes + 1) == Ring::kRingOverflow && ring.stats.oversizedBatches == 1);
+    assert(ring.vertexRingOffset == 0 && fences == 0);
+    assert(append(128) == 0 && append(128) == 128);
+    assert(fences == 0 && finishes == 0 && waits == 0);
+    if (mode == "nowrap") {
+        std::cout << "PASS: no synchronization inside one segment\n";
+        return 0;
+    }
+    // 200-byte chunks (256 after alignment... 200 -> 256) and 100-byte chunks (128) mixed over many laps.
+    for (unsigned i = 0; i < 64; ++i)
+        append(i % 3 == 0 ? 200 : 100);
+    assert(ring.stats.ringWraps >= 4);
+    if (mode == "subdata") {
+        assert(fences == 0 && finishes == 0 && waits == 0);
+        std::cout << "PASS: BufferSubData ring wraps without fences\n";
+        return 0;
+    }
+    if (mode == "normal" || mode == "already") {
+        // The fence for a segment is three segments old when it is waited on: no stall and never a full Finish.
+        assert(finishes == 0 && ring.stats.ringStalls == 0);
+        assert(completed < submitted && "a wrap drained the whole GPU queue");
+    }
+    if (mode == "timeout" || mode == "failed")
+        assert(finishes > 0 && "an unconfirmed fence must not authorize the overwrite");
+    if (mode == "timeout")
+        assert(ring.stats.ringStalls > 0);
+    if (mode == "null")
+        assert(finishes > 0 && deletes == 0);
+    assert(liveFences <= Ring::kRingSegments && "fences leak");
+    std::cout << "PASS: " << ring.stats.ringWraps << " wraps, no in-flight range rewritten, mode=" << mode
+              << " finishes=" << finishes << " stalls=" << ring.stats.ringStalls << '\n';
+}

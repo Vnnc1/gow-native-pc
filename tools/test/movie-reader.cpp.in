@@ -1,0 +1,59 @@
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+struct R5900Context { uint32_t pc = 0; std::array<uint64_t,32> lo{}, hi{}; };
+#define GPR_U32(ctx, i) static_cast<uint32_t>((ctx)->lo[i])
+void require(bool okay) { if (!okay) { std::fputs("FAIL movie reader EOF\n", stderr); std::exit(1); } }
+uint32_t readGuest32(const uint8_t *ram, uint32_t address) {
+    uint32_t value; std::memcpy(&value, ram + address, sizeof(value)); return value;
+}
+void writeGuest32(uint8_t *ram, uint32_t address, uint32_t value) {
+    std::memcpy(ram + address, &value, sizeof(value));
+}
+void padReturn(R5900Context *ctx, uint32_t value) {
+    ctx->lo[2] = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(value)));
+    ctx->pc = GPR_U32(ctx, 31);
+}
+struct PS2Runtime { unsigned calls = 0; R5900Context before; uint8_t *ram = nullptr; };
+void sub_00188848_0x188848(uint8_t *ram, R5900Context *ctx, PS2Runtime *rt) {
+    require(ram == rt->ram && ctx->pc == rt->before.pc && ctx->lo == rt->before.lo && ctx->hi == rt->before.hi);
+    ++rt->calls;
+    ctx->pc = 0x188944; // A checkpoint inside the original must remain resumable.
+    ctx->lo[2] = 0x4000;
+}
+@WRAPPER@
+int main() {
+    std::vector<uint8_t> ram(0x310000);
+    constexpr uint32_t stream = 0x2fde10;
+    unsigned cases = 0;
+    for (uint32_t pc : {0x188848u, 0x18887cu, 0x188944u, 0x188a44u})
+    for (uint32_t caller : {0x18ac70u, 0x18ad34u, 0x188c88u, 0u})
+    for (uint32_t state : {0u, 1u, 2u, 3u})
+    for (uint32_t queued : {0u, 1u, 16u})
+    for (uint32_t request : {0u, 0x4000u, 0xffffffffu})
+    for (uint32_t cancelled : {0u, 1u}) {
+        writeGuest32(ram.data(), stream + 0x28, state);
+        writeGuest32(ram.data(), stream + 0x24, queued);
+        writeGuest32(ram.data(), 0x29c848, cancelled);
+        R5900Context ctx;
+        for (unsigned i=0; i<32; ++i) { ctx.lo[i]=0x1234567800000000ULL+i; ctx.hi[i]=0x8765432100000000ULL+i; }
+        ctx.pc=pc; ctx.lo[31]=caller; ctx.lo[5]=request;
+        PS2Runtime rt{0,ctx,ram.data()};
+        const bool eof = pc == 0x188848 && (caller == 0x18ac70 || caller == 0x18ad34) &&
+                         state == 3 && queued == 0 && static_cast<int32_t>(request) > 0 && cancelled == 0;
+        gowMovieRead(ram.data(), &ctx, &rt);
+        require(rt.calls == (eof ? 0u : 1u));
+        require(ctx.pc == (eof ? caller : 0x188944));
+        require(ctx.lo[2] == (eof ? UINT64_MAX : 0x4000));
+        auto expected = rt.before.lo; expected[2]=ctx.lo[2];
+        require(ctx.lo == expected && ctx.hi == rt.before.hi);
+        require(readGuest32(ram.data(), stream + 0x28) == state &&
+                readGuest32(ram.data(), stream + 0x24) == queued &&
+                readGuest32(ram.data(), 0x29c848) == cancelled);
+        ++cases;
+    }
+    std::printf("PASS: movie reader EOF, buffered tail, temporary empty, cancellation and resume gates (%u cases)\n", cases);
+}

@@ -8,17 +8,57 @@
 #include <QStringList>
 #include <algorithm>
 #include <QMap>
+#include <QDateTime>
 #include <vector>
 
 namespace SessionDiagnostics {
+inline QJsonObject sessionMetadata(const QString &dir)
+{
+    auto read = [&](const QString &name) {
+        QFile file(dir + '/' + name);
+        return !QFileInfo(file).isSymLink() && file.open(QIODevice::ReadOnly) && file.size() <= 1024 * 1024
+            ? file.readAll() : QByteArray();
+    };
+    auto meta = QJsonDocument::fromJson(read("session.json")).object();
+    const auto state = meta.value("state").toString();
+    if (meta.value("schema").toInt() != 1 || (state != "running" && state != "starting" && state != "prepared")) return meta;
+    QJsonObject terminal;
+    bool stopped = false;
+    for (const auto &line : read("events.jsonl").split('\n')) {
+        const auto event = QJsonDocument::fromJson(line).object();
+        const auto type = event.value("type").toString();
+        if (type == "process_started") { terminal = {}; stopped = false; }
+        if (type == "stop_requested") stopped = true;
+        if (type != "process_exit") continue;
+        terminal = {};
+        const auto code = event.value("code");
+        const auto finalState = event.value("state").toString();
+        if (!code.isDouble() || code.toDouble() != code.toInt() ||
+            !QDateTime::fromString(event.value("utc").toString(), Qt::ISODateWithMs).isValid() ||
+            !event.value("elapsed_ms").isDouble() || event.value("elapsed_ms").toDouble() < 0) continue;
+        if ((finalState == "completed" && code.toInt() == 0) ||
+            (finalState == "nonzero_exit" && code.toInt() != 0) || finalState == "crashed" ||
+            (finalState == "failed_to_start" && code.toInt() == -1)) terminal = event;
+    }
+    if (terminal.isEmpty()) return meta; // Silence or a stale heartbeat does not prove an exit.
+    meta["state"] = terminal["state"];
+    meta["exit_code"] = terminal["code"];
+    meta["exit_code_hex"] = QString::number(static_cast<quint32>(terminal["code"].toInt()), 16);
+    meta["ended_utc"] = terminal["utc"];
+    meta["elapsed_ms"] = terminal["elapsed_ms"];
+    meta["stop_requested"] = stopped;
+    meta["final_metadata_incomplete"] = true;
+    return meta;
+}
+
 // Summarize bounded, already-redacted collector output; never inspect game files.
-inline bool writeSummary(const QString &dir)
+inline bool writeSummary(const QString &dir, const QJsonObject &snapshot = {})
 {
     auto read = [&](const QString &name, qint64 limit) {
         QFile f(dir + '/' + name);
         return !QFileInfo(f).isSymLink() && f.open(QIODevice::ReadOnly) && f.size() <= limit ? f.readAll() : QByteArray();
     };
-    const auto meta = QJsonDocument::fromJson(read("session.json", 1024 * 1024)).object();
+    const auto meta = snapshot.isEmpty() ? sessionMetadata(dir) : snapshot;
     if (meta.value("schema").toInt() != 1) return false;
     const bool detailed = meta.value("runtime_environment").toObject().value("GOW_PERF_DIAG").toString() == "1";
     double duration = 0, fpsSum = 0, minFps = 1e9, cpu = 0, freeRam = 1e30, privatePeak = 0;
@@ -72,6 +112,7 @@ inline bool writeSummary(const QString &dir)
     if (lastFrame > lastPerf + 15000) flags << "fps_reporting_gap";
     if (meta.value("collection_truncated").toBool() || invalid || data.isEmpty()) flags << "incomplete_collection";
     if (meta.value("write_failure").toBool()) flags << "collection_write_failure";
+    if (meta.value("final_metadata_incomplete").toBool()) flags << "final_metadata_incomplete";
     if (meta.value("state").toString() != "completed") flags << "session_not_completed";
     if (batterySamples) flags << "battery_power_observed";
     if (freeRam < 1024.0 * 1024 * 1024) flags << "low_available_ram_observed";
@@ -83,6 +124,8 @@ inline bool writeSummary(const QString &dir)
     QJsonObject out{{"schema", 1}, {"warmup_seconds", 30}, {"detailed_timing", detailed}, {"fps_windows", windows},
         {"measured_seconds", duration}, {"flags", QJsonArray::fromStringList(flags)}, {"queues_whole_session", queues},
         {"scoped_ms_after_warmup", scopes}, {"battery_samples", batterySamples}};
+    out["state"] = meta.value("state");
+    if (meta.contains("exit_code")) out["exit_code"] = meta.value("exit_code");
     if(nativeSeen) out["native_miss_blocks"]=missBlocks;
     if(jitSeen) out["jit_unsupported_max_counter"]=unsupported;
     if(audioSeen) out["audio_missing_frames"]=audioMissing;
@@ -97,6 +140,7 @@ inline bool writeSummary(const QString &dir)
         {"fps_reporting_gap","O contador de FPS parou enquanto outros quadros eram registrados."},
         {"incomplete_collection","Coleta ausente, truncada ou com linhas inválidas."},
         {"collection_write_failure","Falha ao gravar o relatório."},
+        {"final_metadata_incomplete","Metadados finais incompletos; estado recuperado do evento de saída."},
         {"session_not_completed","Sessão ainda aberta ou encerrada com erro; confira session.json."},
         {"battery_power_observed","Uso na bateria detectado."},
         {"low_available_ram_observed","Menos de 1 GiB de RAM disponível em alguma amostra."},

@@ -1,0 +1,134 @@
+Replace USA goMiniGameCircle model submissions with mapped host button prompts.
+Recognize the resource at the final render calls; retain guest creation, animation and QTE state.
+Validated with production-hook tests and a synthetic in-game keyboard capture; real QTE acceptance is manual.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -437,6 +437,7 @@
+         float x, y;
+         float escala;
+         float r, g, b, a;
++        bool worldSpace = false;
+     };
+     std::mutex g_mutex;
+ 
+@@ -446,9 +447,95 @@
+     {
+ 
+         for (const Icono &o : g_construyendo)
+-            if (o.boton == icono.boton && std::fabs(o.x - icono.x) < 4.0f && std::fabs(o.y - icono.y) < 4.0f)
++            if (o.worldSpace == icono.worldSpace && o.boton == icono.boton && std::fabs(o.x - icono.x) < 4.0f && std::fabs(o.y - icono.y) < 4.0f)
+                 return;
+         if (g_construyendo.size() < 128) g_construyendo.push_back(icono);
++    }
++
++    // USA model submission, after animation/visibility selection in 0x157A60.
++    // The submitted matrix is view-space; the preceding stack matrix is world-space.
++    bool worldCircleIcon(const uint8_t *ram, uint32_t node, uint32_t mesh,
++                         uint32_t worldMatrix, uint32_t meshIndex, Icono &icon)
++    {
++        if (!valida(node, 0xE8) || !valida(mesh, 0x54) || !valida(worldMatrix, 64)) return false;
++        if ((leer32(ram, node) & 0xFFFFu) != 15u) return false;
++        const uint32_t model = leer32(ram, node + 0x18);
++        if (!valida(model, 0x20) || (leer32(ram, model) & 0xFFFFu) != 1u) return false;
++        const uint32_t resource = leer32(ram, model + 0x1C);
++        constexpr char name[] = "gominigamecircle";
++        if (!valida(resource, 12 + sizeof(name)) ||
++            std::memcmp(ram + resource + 12, name, sizeof(name)) != 0) return false;
++        const uint32_t count = leer32(ram, node + 0xE0);
++        if (count == 0 || count > 64 || meshIndex >= count) return false;
++        uint32_t bounds;
++        if (leer32(ram, mesh + 0x20) & 0x10u) {
++            const uint32_t groups = leer32(ram, mesh + 8);
++            if (groups > 4096) return false;
++            bounds = mesh + 0x50 + 4 * groups;
++        } else bounds = node + 0x124 + 20 * meshIndex;
++        const uint32_t camera = leer32(ram, 0x35FA98);
++        if (!valida(bounds, 20) || !valida(camera, 0x80)) return false;
++        float world[16], viewProjection[16], center[3];
++        for (unsigned i = 0; i < 16; ++i) {
++            world[i] = leerF(ram, worldMatrix + 4 * i);
++            viewProjection[i] = leerF(ram, camera + 0x40 + 4 * i);
++            if (!std::isfinite(world[i]) || !std::isfinite(viewProjection[i])) return false;
++        }
++        const float radius = leerF(ram, bounds + 4);
++        if (!std::isfinite(radius) || radius <= 0 || radius > 4096) return false;
++        for (unsigned i = 0; i < 3; ++i) {
++            const float value = leerF(ram, bounds + 8 + 4 * i);
++            if (!std::isfinite(value)) return false;
++            center[i] = value;
++        }
++        float position[3];
++        for (unsigned i = 0; i < 3; ++i)
++            position[i] = center[0] * world[i] + center[1] * world[4+i] +
++                          center[2] * world[8+i] + world[12+i];
++        float clip[4];
++        for (unsigned i = 0; i < 4; ++i) {
++            clip[i] = position[0] * viewProjection[i] + position[1] * viewProjection[4+i] +
++                      position[2] * viewProjection[8+i] + viewProjection[12+i];
++            if (!std::isfinite(clip[i])) return false;
++        }
++        if (clip[3] <= 1.0f || std::fabs(clip[0]) > clip[3] || std::fabs(clip[1]) > clip[3]) return false;
++        const float scale = std::hypot(world[0], world[1], world[2]);
++        const float projectionScale = std::hypot(viewProjection[1], viewProjection[5], viewProjection[9]);
++        const float diameter = 480.0f * radius * scale * projectionScale / clip[3];
++        if (!std::isfinite(diameter) || diameter <= 0) return false;
++        // The bound includes the original flares; keep the mapped button readable without covering combat.
++        icon = Icono{BCirculo, VNormal, 320.0f * (1.0f + clip[0]/clip[3]),
++                     240.0f * (1.0f + clip[1]/clip[3]), std::clamp(diameter * 0.5f, 24.0f, 96.0f),
++                     1, 1, 1, 1, true};
++        return true;
++    }
++
++    PS2Runtime::RecompiledFunction g_worldDirect = nullptr, g_worldClipped = nullptr;
++    void drawWorldCircle(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime,
++                         uint32_t entry, PS2Runtime::RecompiledFunction original)
++    {
++        const uint32_t caller = GPR_U32(ctx, 31), matrix = GPR_U32(ctx, 7);
++        const bool knownCaller = entry == 0x158020 ? caller == 0x157EF0 :
++            (caller == 0x157F0C || caller == 0x157FD0);
++        Icono icon;
++        if (g_activo && ctx->pc == entry && knownCaller && matrix >= 64 && matrix - 64 == GPR_U32(ctx, 29) &&
++            g_construyendo.size() < 128 &&
++            worldCircleIcon(ram, GPR_U32(ctx, 5), GPR_U32(ctx, 6), matrix - 64, GPR_U32(ctx, 20), icon)) {
++            anotar(icon);
++            if (g_replacementsReady.load(std::memory_order_relaxed)) {
++                ctx->pc = caller;
++                return;
++            }
++        }
++        original(ram, ctx, runtime);
++    }
++    void drawWorldDirect(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        drawWorldCircle(ram, ctx, runtime, 0x158020, g_worldDirect);
++    }
++    void drawWorldClipped(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        drawWorldCircle(ram, ctx, runtime, 0x158B40, g_worldClipped);
+     }
+ 
+     void leerCxform(const uint8_t *rdram, uint32_t cx, float &r, float &g, float &b, float &a)
+@@ -1029,7 +1116,7 @@
+ 
+         const float r = i.escala * 0.5f * ajuste;
+         const float alto = 2.0f * r / 480.0f * dh, ancho = alto * t.aspecto;
+-        const float y = 240.0f + (i.y - 240.0f) * g_estiramientoVertical.load(std::memory_order_relaxed);
++        const float y = i.worldSpace ? i.y : 240.0f + (i.y - 240.0f) * g_estiramientoVertical.load(std::memory_order_relaxed);
+         const float cx = dx + i.x / 640.0f * dw, cy = dy + y / 480.0f * dh;
+         const Rectangle origen{0.0f, 0.0f, float(t.rt.texture.width), -float(t.rt.texture.height)};
+         const Color tinte{static_cast<unsigned char>(255.0f * i.r), static_cast<unsigned char>(255.0f * i.g),
+@@ -1049,6 +1136,12 @@
+     g_diag = d && d[0] == '1';
+     g_dibujarForma = runtime.lookupFunction(kDibujarForma);
+     runtime.replaceFunction(kDibujarForma, &dibujarForma);
++    if (runtime.hasFunction(0x158020) && runtime.hasFunction(0x158B40)) {
++        g_worldDirect = runtime.lookupFunction(0x158020);
++        g_worldClipped = runtime.lookupFunction(0x158B40);
++        runtime.replaceFunction(0x158020, &drawWorldDirect);
++        runtime.replaceFunction(0x158B40, &drawWorldClipped);
++    }
+     if (g_activo)
+         std::cerr << "[gow-prompts] Flash prompts enabled" << std::endl;
+ }

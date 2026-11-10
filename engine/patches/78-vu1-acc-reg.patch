@@ -1,0 +1,581 @@
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h
+@@ -51,6 +51,30 @@
+         return overhead;
+     }
+ 
++    // Sampling cadence of the per-block / per-chain rdtsc pairs. One sample every kBlockSampleStride blocks, one
++    // every kChainSampleStride chain calls; the reported tick totals are scaled by the stride. Part of the counter
++    // contract: changing a stride changes the estimate's granularity, not its meaning.
++    constexpr uint32_t kBlockSampleStride = 8;
++    constexpr uint32_t kChainSampleStride = 16;
++
++    // Counter contract (GOW_VU1_COST=1). All tick counters are raw rdtsc ticks with the empty-pair overhead already
++    // subtracted; the [vu1-cost] line scales them to ms over the 5 s reporting window. Keep this table in sync with
++    // the printer in ps2_vu1_core.cpp: the reported names below are the only agreed meanings.
++    //   runs / blocks / pairs / entries[*]  counts per window (pairs = decoded VU pairs executed natively).
++    //   runTicks       whole VU1Interpreter::run() (same wall time as [gow-perf] vu_ms).
++    //   nativeTicks    runNative only: entry + dispatch loop + exit.
++    //   entryTicks     native entry (commit exact-engine results, flag import).
++    //   exitTicks      native exit (syncInflight + exportFlags).
++    //   blockTicks     sampled 1/kBlockSampleStride, scaled: time inside the block functions (includes xgkickTicks).
++    //   blockTicksRaw  the same samples unscaled (kept so the sampling error can be audited).
++    //   dispatchTicks  nativeTicks - entryTicks - exitTicks - blockTicks (slot lookup, lane checks, timing).
++    //   xgkickTicks    XGKICK tag walk + finishXgkick, inside blockTicks; xgkickSubmitTicks the GS hand-off part.
++    //   chainTicks     sampled 1/kChainSampleStride, scaled: VU1NativeAccess::chain bookkeeping per chain call.
++    //   chainCalls     chain calls in the window (the sampling denominator).
++    //   chainFinishTicks  of chainTicks, the block-timing part up to the next block's entry.
++    //   chainFlagReads / chainTails / chainSelf / chainScalar  *chain calls* whose next block is, respectively, an
++    //                  entry-flag reader / has a tail record / branches to itself / starts an FDIV or EFU op.
++    //   btMemo / btIdle / btCache / btSim  how blockTiming resolved entry timing (memo / idle / cached / simulated).
+     struct Counters
+     {
+         unsigned long long runs = 0, entries = 0, blocks = 0, pairs = 0, xgkicks = 0, xgkickBytes = 0;
+@@ -547,6 +571,18 @@
+ 
+     // lane masks: DEST field order (x = 8) -> SSE blend/movemask order (x = 1).
+     constexpr int kRev4[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
++    // Bit patterns of the VU float model, shared by the operand normalisation, MAC flags, clamp and clip helpers.
++    // 0x7F800000 = exponent field (255 means Inf/NaN), 0x7FFFFFFF = sign-cleared magnitude.
++    constexpr uint32_t kSignMask = 0x80000000u;
++    constexpr uint32_t kAbsMask = 0x7FFFFFFFu;
++    constexpr uint32_t kExpMask = 0x7F800000u;
++    constexpr uint32_t kFloatMaxBits = 0x7F7FFFFFu;
++    constexpr uint32_t kFloatMaxMinus1 = 0x7F7FFFFEu;
++    // FTOI saturation: cvttps gives INT_MIN out of range, so lanes at/over 2^31 become INT_MAX.
++    constexpr int32_t kIntMax = 0x7FFFFFFF;
++    constexpr float kIntOverflowFloat = 2147483648.0f;
++    // One 24-bit clip chain: four 6-bit results (oldest first), see CLIP.
++    constexpr uint32_t kClipHistory = 0xFFFFFFu;
+ 
+     VU1N_INLINE __m128 ld(const VU1State &s, int r) { return _mm_loadu_ps(s.vf[r]); }
+     // Operand view of a register: Inf/NaN (exponent 255) act as +-FLT_MAX, as in the exact engine's normalizeOperand. The register
+@@ -556,8 +592,8 @@
+     VU1N_INLINE __m128 nrm(__m128 v)
+     {
+         const __m128i b = _mm_castps_si128(v);
+-        const __m128i mag = _mm_min_epu32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F7FFFFF));
+-        return _mm_castsi128_ps(_mm_or_si128(mag, _mm_and_si128(b, _mm_set1_epi32(static_cast<int>(0x80000000u)))));
++        const __m128i mag = _mm_min_epu32(_mm_and_si128(b, _mm_set1_epi32(static_cast<int>(kAbsMask))), _mm_set1_epi32(static_cast<int>(kFloatMaxBits)));
++        return _mm_castsi128_ps(_mm_or_si128(mag, _mm_and_si128(b, _mm_set1_epi32(static_cast<int>(kSignMask)))));
+     }
+     VU1N_INLINE __m128 ldn(const VU1State &s, int r) { return nrm(_mm_loadu_ps(s.vf[r])); }
+     // gow-native-pc: true when none of the VF lanes in need (bit r*4 + lane, see VU1NativeLanes) has exponent 255
+@@ -588,22 +624,41 @@
+         else if constexpr (M != 0)
+             _mm_storeu_ps(p, _mm_blend_ps(_mm_loadu_ps(p), v, M));
+     }
++    // patch 78: ACC kept in a block-local register (vu1n_gen.py GOW_VU1_ACC_REG): the DEST-masked write is a lane merge
++    // into the resident value (same blend as stf<M>), and the block boundaries store the whole register.
++    template <int M>
++    VU1N_INLINE void accw(__m128 &a, __m128 v)
++    {
++        if constexpr (M == 15)
++            a = v;
++        else if constexpr (M != 0)
++            a = _mm_blend_ps(a, v, M);
++    }
++    VU1N_INLINE void stAcc(VU1State &s, __m128 v) { _mm_storeu_ps(s.acc, v); }
+     template <int C>
+     VU1N_INLINE __m128 bc(__m128 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(C, C, C, C)); }
+     VU1N_INLINE __m128 clampv(__m128 r)
+     {
+         return _mm_min_ps(_mm_max_ps(r, _mm_set1_ps(-FLT_MAX)), _mm_set1_ps(FLT_MAX));
+     }
+-    // MAC register after an FMAC: per-lane zero / sign / overflow (underflow is not tracked); lanes outside DEST are 0.
++    // MAC flag register of an FMAC result, for the DEST lanes m (SSE order): per-lane zero / sign / overflow
++    // (round-toward-zero turns an overflow into FLT_MAX, so that counts as overflow too; underflow is not tracked).
++    // Lanes outside m are 0. The same computation feeds the block-local flags (macFlags), a writer read after its
++    // block ended (macValRt) and the generated blocks' static mask (macVal).
++    VU1N_INLINE uint32_t macBits(__m128 r, uint32_t m)
++    {
++        const __m128i b = _mm_castps_si128(r);
++        const __m128i abs = _mm_and_si128(b, _mm_set1_epi32(static_cast<int>(kAbsMask)));
++        const int z = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(abs, _mm_setzero_si128()))) & m;
++        const int sg = _mm_movemask_ps(r) & m;
++        const __m128i big = _mm_cmpeq_epi32(abs, _mm_set1_epi32(static_cast<int>(kFloatMaxBits)));
++        const int o = _mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(static_cast<int>(kExpMask))), _mm_set1_epi32(static_cast<int>(kExpMask))), big))) & m;
++        return static_cast<uint32_t>(kRev4[z] | (kRev4[sg] << 4) | (kRev4[o] << 12));
++    }
+     template <int M>
+     VU1N_INLINE void macFlags(VU1State &s, __m128 r)
+     {
+-        const __m128i b = _mm_castps_si128(r);
+-        const __m128i expMask = _mm_set1_epi32(0x7F800000);
+-        const int z = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_setzero_si128()))) & M;
+-        const int sg = _mm_movemask_ps(r) & M;
+-        const int o = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(b, expMask), expMask))) & M;
+-        s.mac = static_cast<uint32_t>(kRev4[z] | (kRev4[sg] << 4) | (kRev4[o] << 12));
++        s.mac = macBits(r, static_cast<uint32_t>(M));
+     }
+     // acc +/- a*b. The exact engine evaluates it unrounded, so a product that overflows float can still cancel against ACC:
+     // when the float result is not finite the lanes are redone in double (out of line: rare, and keeping it out lets the
+@@ -630,9 +685,9 @@
+         __m128 r = Sub ? _mm_sub_ps(acc, p) : _mm_add_ps(acc, p);
+         // round-toward-zero saturates an overflowing product to FLT_MAX instead of infinity: any lane at/over FLT_MAX in the product
+         // or the sum needs the wide evaluation
+-        const __m128i lim = _mm_set1_epi32(0x7F7FFFFE);
+-        const __m128i hot = _mm_or_si128(_mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(p), _mm_set1_epi32(0x7FFFFFFF)), lim),
+-                                         _mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x7FFFFFFF)), lim));
++        const __m128i lim = _mm_set1_epi32(static_cast<int>(kFloatMaxMinus1));
++        const __m128i hot = _mm_or_si128(_mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(p), _mm_set1_epi32(static_cast<int>(kAbsMask))), lim),
++                                         _mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(static_cast<int>(kAbsMask))), lim));
+         if (_mm_movemask_epi8(hot) == 0)
+             return r;
+         return maddWide<Sub>(acc, a, b);
+@@ -645,9 +700,9 @@
+     {
+         const __m128 p = _mm_mul_ps(a, b);
+         __m128 r = Sub ? _mm_sub_ps(acc, p) : _mm_add_ps(acc, p);
+-        const __m128i lim = _mm_set1_epi32(0x7F7FFFFE);
+-        const __m128i hot = _mm_or_si128(_mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(p), _mm_set1_epi32(0x7FFFFFFF)), lim),
+-                                         _mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x7FFFFFFF)), lim));
++        const __m128i lim = _mm_set1_epi32(static_cast<int>(kFloatMaxMinus1));
++        const __m128i hot = _mm_or_si128(_mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(p), _mm_set1_epi32(static_cast<int>(kAbsMask))), lim),
++                                         _mm_cmpgt_epi32(_mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(static_cast<int>(kAbsMask))), lim));
+         if (_mm_movemask_epi8(hot) == 0) [[likely]]
+             return r;
+         return clampv(maddWide<Sub>(acc, a, b));
+@@ -670,34 +725,12 @@
+         VU1N_INLINE __m128 maddc(__m128 acc, __m128 a, __m128 b) { return madd<Sub>(acc, a, b); }
+     }
+     // macVal with the DEST mask (SSE order) at run time: flags of a MAC writer read after its block ended
+-    inline uint32_t macValRt(__m128 r, uint32_t m)
+-    {
+-        const __m128i b = _mm_castps_si128(r);
+-        const __m128i expMask = _mm_set1_epi32(0x7F800000);
+-        const int z = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_setzero_si128()))) & m;
+-        const int sg = _mm_movemask_ps(r) & m;
+-        const __m128i big = _mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F7FFFFF));
+-        const int o = _mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmpeq_epi32(_mm_and_si128(b, expMask), expMask), big))) & m;
+-        return static_cast<uint32_t>(kRev4[z] | (kRev4[sg] << 4) | (kRev4[o] << 12));
+-    }
++    inline uint32_t macValRt(__m128 r, uint32_t m) { return macBits(r, m); }
+     template <int M>
+-    VU1N_INLINE uint32_t macVal(__m128 r)
+-    {
+-        const __m128i b = _mm_castps_si128(r);
+-        const __m128i expMask = _mm_set1_epi32(0x7F800000);
+-        const int z = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_setzero_si128()))) & M;
+-        const int sg = _mm_movemask_ps(r) & M;
+-        // round-toward-zero turns an overflow into the largest finite value, so that counts as overflow too
+-        const __m128i big = _mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F7FFFFF));
+-        const int o = _mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmpeq_epi32(_mm_and_si128(b, expMask), expMask), big))) & M;
+-        return static_cast<uint32_t>(kRev4[z] | (kRev4[sg] << 4) | (kRev4[o] << 12));
+-    }
+-    VU1N_INLINE uint32_t clipVal(const VU1State &s, int fs, int ft, uint32_t prev)
+-    {
+-        alignas(16) float v[4], t[4];
+-        _mm_store_ps(v, ldn(s, fs));
+-        _mm_store_ps(t, ldn(s, ft));
+-        const float w = std::fabs(t[3]);
++    VU1N_INLINE uint32_t macVal(__m128 r) { return macBits(r, static_cast<uint32_t>(M)); }
++    // Clip bits of one CLIP: x/y/z of v against +-|w|, shifted over the previous 24-bit chain.
++    VU1N_INLINE uint32_t clipBits(const float *v, float w, uint32_t prev)
++    {
+         uint32_t f = 0;
+         if (v[0] > w) f |= 0x01u;
+         if (v[0] < -w) f |= 0x02u;
+@@ -705,7 +738,14 @@
+         if (v[1] < -w) f |= 0x08u;
+         if (v[2] > w) f |= 0x10u;
+         if (v[2] < -w) f |= 0x20u;
+-        return ((prev << 6) | f) & 0xFFFFFFu;
++        return ((prev << 6) | f) & kClipHistory;
++    }
++    VU1N_INLINE uint32_t clipVal(const VU1State &s, int fs, int ft, uint32_t prev)
++    {
++        alignas(16) float v[4], t[4];
++        _mm_store_ps(v, ldn(s, fs));
++        _mm_store_ps(t, ldn(s, ft));
++        return clipBits(v, std::fabs(t[3]), prev);
+     }
+     VU1N_INLINE float qOperand(const VU1State &s) { return s.q; }
+ 
+@@ -758,51 +798,37 @@
+         constexpr float scale = Shift == 0 ? 1.0f : Shift == 4 ? 16.0f : Shift == 12 ? 4096.0f : 32768.0f;
+         v = _mm_mul_ps(clampv(v), _mm_set1_ps(scale));
+         // saturate like floatToInt: >= 2^31 -> INT_MAX (cvtt gives INT_MIN for out of range)
+-        const __m128 big = _mm_cmpge_ps(v, _mm_set1_ps(2147483648.0f));
++        const __m128 big = _mm_cmpge_ps(v, _mm_set1_ps(kIntOverflowFloat));
+         __m128i i = _mm_cvttps_epi32(v);
+-        i = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(i), _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)), big));
++        i = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(i), _mm_castsi128_ps(_mm_set1_epi32(kIntMax)), big));
+         stf<M>(s.vf[ft], _mm_castsi128_ps(i));
+     }
+     template <int M>
+     VU1N_INLINE void absOp(VU1State &s, int fs, int ft)
+     {
+-        stf<M>(s.vf[ft], _mm_and_ps(ldn(s, fs), _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))));
++        stf<M>(s.vf[ft], _mm_and_ps(ldn(s, fs), _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(kAbsMask)))));
+     }
+     VU1N_INLINE void clipOp(VU1State &s, int fs, int ft)
+     {
+-        const float *v = s.vf[fs];
+-        const float w = std::fabs(s.vf[ft][3]);
+-        uint32_t f = 0;
+-        if (v[0] > w) f |= 0x01u;
+-        if (v[0] < -w) f |= 0x02u;
+-        if (v[1] > w) f |= 0x04u;
+-        if (v[1] < -w) f |= 0x08u;
+-        if (v[2] > w) f |= 0x10u;
+-        if (v[2] < -w) f |= 0x20u;
+-        s.clip = ((s.clip << 6) | f) & 0xFFFFFFu;
++        // CLIP works on the raw register bits (no Inf/NaN normalisation): see clipBits.
++        s.clip = clipBits(s.vf[fs], std::fabs(s.vf[ft][3]), s.clip);
+     }
+ 
+     // --- Q unit --------------------------------------------------------------------------------------------------
+-    VU1N_INLINE float qnorm(float x)
++    // Q result before it is stored: subnormal inputs flush to +-0 and Inf/NaN saturate to +-FLT_MAX (the exact engine's
++    // normalizeOperand). Used both for operands (qnorm) and for the final result (qfinish).
++    VU1N_INLINE float qSanitize(float x)
+     {
+         uint32_t b;
+         std::memcpy(&b, &x, 4);
+         const uint32_t e = (b >> 23) & 0xFFu;
+-        if (e == 0u) b &= 0x80000000u;
+-        else if (e == 255u) b = (b & 0x80000000u) | 0x7F7FFFFFu;
++        if (e == 0u) b &= kSignMask;
++        else if (e == 255u) b = (b & kSignMask) | kFloatMaxBits;
+         std::memcpy(&x, &b, 4);
+         return x;
+     }
+-    VU1N_INLINE float qfinish(float x)
+-    {
+-        uint32_t b;
+-        std::memcpy(&b, &x, 4);
+-        const uint32_t e = (b >> 23) & 0xFFu;
+-        if (e == 0u) b &= 0x80000000u;
+-        else if (e == 255u) b = (b & 0x80000000u) | 0x7F7FFFFFu;
+-        std::memcpy(&x, &b, 4);
+-        return x;
+-    }
++    VU1N_INLINE float qnorm(float x) { return qSanitize(x); }
++    VU1N_INLINE float qfinish(float x) { return qSanitize(x); }
+     VU1N_INLINE void divOp(VU1State &s, int fs, int fsf, int ft, int ftf)
+     {
+         const float num = qnorm(s.vf[fs][fsf]), den = qnorm(s.vf[ft][ftf]);
+@@ -872,25 +898,17 @@
+     {
+         constexpr float scale = Shift == 0 ? 1.0f : Shift == 4 ? 16.0f : Shift == 12 ? 4096.0f : 32768.0f;
+         const __m128 v = _mm_mul_ps(clampv(normalized), _mm_set1_ps(scale));
+-        const __m128 big = _mm_cmpge_ps(v, _mm_set1_ps(2147483648.0f));
++        const __m128 big = _mm_cmpge_ps(v, _mm_set1_ps(kIntOverflowFloat));
+         const __m128i i = _mm_cvttps_epi32(v);
+-        return _mm_blendv_ps(_mm_castsi128_ps(i), _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)), big);
+-    }
+-    inline __m128 absv(__m128 normalized) { return _mm_and_ps(normalized, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); }
++        return _mm_blendv_ps(_mm_castsi128_ps(i), _mm_castsi128_ps(_mm_set1_epi32(kIntMax)), big);
++    }
++    inline __m128 absv(__m128 normalized) { return _mm_and_ps(normalized, _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(kAbsMask)))); }
+     inline uint32_t clipValv(__m128 vn, __m128 tn, uint32_t prev)
+     {
+         alignas(16) float v[4], t[4];
+         _mm_store_ps(v, vn);
+         _mm_store_ps(t, tn);
+-        const float w = std::fabs(t[3]);
+-        uint32_t f = 0;
+-        if (v[0] > w) f |= 0x01u;
+-        if (v[0] < -w) f |= 0x02u;
+-        if (v[1] > w) f |= 0x04u;
+-        if (v[1] < -w) f |= 0x08u;
+-        if (v[2] > w) f |= 0x10u;
+-        if (v[2] < -w) f |= 0x20u;
+-        return ((prev << 6) | f) & 0xFFFFFFu;
++        return clipBits(v, std::fabs(t[3]), prev);
+     }
+     inline float divv(float fsRaw, float ftRaw)
+     {
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -1366,7 +1401,7 @@
+                   std::bit_cast<uint32_t>(1.0f / 32768.0f) == 0x38000000u && std::bit_cast<uint32_t>(16.0f) == 0x41800000u &&
+                   std::bit_cast<uint32_t>(4096.0f) == 0x45800000u && std::bit_cast<uint32_t>(32768.0f) == 0x47000000u &&
+                   std::bit_cast<uint32_t>(2147483648.0f) == 0x4F000000u, "vu1x constant table");
+-    constexpr int XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5, XMM15 = 15;
++    constexpr int XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5, XMM14 = 14, XMM15 = 15;
+     constexpr uint8_t CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF, CC_E = 0x4, CC_NE = 0x5, CC_P = 0xA;
+ 
+     // a memory operand: [base + disp32] or [base + index * scale + disp32]
+@@ -1686,7 +1745,7 @@
+     {
+         if (fastMode())
+         {
+-            cx.e.movupsL(x, vfM(r));
++            emitVfRead(cx, x, r);
+             return;
+         }
+         loadNorm(cx, x, r);
+@@ -1739,14 +1798,14 @@
+         if (k.aNorm)                            // a = ld / ldn (vf[fs])
+             emitLoad(cx, XMM1, k.fs);
+         else
+-            e.movupsL(XMM1, vfM(k.fs));
++            emitVfRead(cx, XMM1, k.fs);
+         switch (k.src)
+         {
+         case S_BC:
+             if (k.bNorm)
+                 emitLoad(cx, XMM2, k.ft);
+             else
+-                e.movupsL(XMM2, vfM(k.ft));
++                emitVfRead(cx, XMM2, k.ft);
+             e.shufps(XMM2, XMM2, static_cast<uint8_t>(k.bc * 0x55u));
+             break;
+         case S_Q:
+@@ -1763,7 +1822,7 @@
+             if (k.bNorm)
+                 emitLoad(cx, XMM2, k.ft);
+             else
+-                e.movupsL(XMM2, vfM(k.ft));
++                emitVfRead(cx, XMM2, k.ft);
+             break;
+         }
+         bool slow = false;
+@@ -1850,14 +1914,14 @@
+             e.cvtdq2ps(XMM1, XMM1);
+             if (k.shift)
+                 e.psM(0x59, XMM1, cM(k.shift == 4 ? C_ITOF4 : k.shift == 12 ? C_ITOF12 : C_ITOF15));
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return;
+         }
+         emitLoad(cx, XMM1, k.fs);
+         if (kind == IN_ABS)
+         {
+             e.psM(0x54, XMM1, cM(C_ABS));
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return;
+         }
+         e.psM(0x5F, XMM1, cM(C_NFMAX));                               // clampv
+@@ -1872,7 +1936,7 @@
+         }
+         e.cvttps2dq(XMM2, XMM1);
+         e.blendvpsM(XMM2, cM(C_ABS));                                 // -> INT_MAX
+-        emitStf(e, vfM(k.ft), XMM2, k.m);
++        emitVfStore(cx, vfM(k.ft), XMM2, k.m, k.ft);
+     }
+ 
+     // c{i} = clipVal(s, fs, ft, prev) (vu1n::clipVal)
+@@ -2031,7 +2095,7 @@
+         case 0x31: // MR32
+             e.movupsL(XMM1, vfM(k.fs));
+             e.shufps(XMM1, XMM1, 0x39);
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return true;
+         case 0x36: // LQD
+             if (k.fs)
+@@ -2041,7 +2105,7 @@
+                 e.movzx16(RAX, viM(k.fs));
+                 emitQaddr(e);
+                 e.movupsL(XMM1, {RAX, 0});
+-                emitStf(e, vfM(k.ft), XMM1, k.m);
++                emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             }
+             return true;
+         case 0x37: // SQD
+@@ -2063,7 +2127,7 @@
+             e.movsx16(RAX, viM(k.fs));
+             e.movdToX(XMM1, RAX);
+             e.shufps(XMM1, XMM1, 0x00);
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return true;
+         case 0x3E: // ILWR
+             e.movzx16(RAX, viM(k.fs));
+@@ -2082,7 +2146,7 @@
+         case 0x64: // MFP
+             e.movssL(XMM1, stM(offsetof(VU1State, p)));
+             e.shufps(XMM1, XMM1, 0x00);
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return true;
+         case 0x68: case 0x69: // XTOP / XITOP
+             e.ld32(RAX, stM(k.op == 0x68 ? offsetof(VU1State, top) : offsetof(VU1State, itop)));
+@@ -2201,14 +2265,14 @@
+             return emitFmac(cx, k);
+         case IN_MOVE: // stf<m>(vf[ft], ld(vf[fs]))
+             e.movupsL(XMM1, vfM(k.fs));
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return true;
+         case IN_LQ: // vf[ft] <- data[(vi[fs] + imm) * 16 & mask]
+             e.ld32(RAX, viM(k.fs));
+             e.alu32i(0, RAX, k.imm);
+             emitQaddr(e);
+             e.movupsL(XMM1, {RAX, 0});
+-            emitStf(e, vfM(k.ft), XMM1, k.m);
++            emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             return true;
+         case IN_SQ: // data[(vi[ft] + imm) * 16 & mask] <- vf[fs]
+             e.ld32(RAX, viM(k.ft));
+@@ -2223,7 +2287,7 @@
+                 e.movzx16(RAX, viM(k.fs));
+                 emitQaddr(e);
+                 e.movupsL(XMM1, {RAX, 0});
+-                emitStf(e, vfM(k.ft), XMM1, k.m);
++                emitVfStore(cx, vfM(k.ft), XMM1, k.m, k.ft);
+             }
+             if (k.fs)
+                 emitViStep(e, k.fs, 1);
+--- a/tools/vu1/vu1n_gen.py
++++ b/tools/vu1/vu1n_gen.py
+@@ -25,6 +25,12 @@
+ BRANCH_OPS = {0x20, 0x21, 0x24, 0x25, 0x28, 0x29, 0x2C, 0x2D, 0x2E, 0x2F}
+ REV4 = [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15]
+ CODE_SIZE = 16384
++# patch 78: ACC (the accumulator) stays in a block-local __m128 across the block instead of being read from / written to
++# VU1State.acc by every FMAC (ACC read 47-48% of the pairs, ACC destination 29.7-30.8%, patch 65). Same semantics as the
++# x64 JIT's xmm15 residency (ps2_vu1_x64.inl, GOW_VU1_ACC_REG): DEST-masked writes merge lanes into the resident value, an
++# exact-engine call-out stores it before and reloads after, and every block exit stores it. Generation-time switch: a build
++# without the variable generates exactly the previous code.
++ACC_REG = os.environ.get('GOW_VU1_ACC_REG') == '1'
+ 
+ 
+ def fnv_block(pc, words):
+@@ -276,7 +282,7 @@
+         hit = cache.get(r)
+         if hit and (hit[1] or clean):
+             return hit[0]
+-        var = f"v{r}_{idx}"
++        var = f"v{r}_{idx}_{len(pre)}"  # the second read of one register in a pair may need the other view: keep the names apart
+         pre.append(f"const __m128 {var} = vu1n::{'ld' if clean else 'ldn'}(s, {r});")
+         cache[r] = (var, not clean)
+         return var
+@@ -289,7 +295,10 @@
+         b = "_mm_set1_ps(s.i)"
+     else:
+         b = opnd(ft, m)
+-    acc = cache['acc'][0] if cache is not None and 'acc' in cache else "vu1n::ldAcc(s)"
++    if ACC_REG:   # patch 78: the resident accumulator of the block (gen_block declares accv)
++        acc = "accv"
++    else:
++        acc = cache['acc'][0] if cache is not None and 'acc' in cache else "vu1n::ldAcc(s)"
+     if kind == 'add':
+         r = f"_mm_add_ps({a}, {b})"
+     elif kind == 'sub':
+@@ -316,9 +325,12 @@
+     if kind not in ('max', 'min', 'mini') and not finite:
+         out.append(f"r{idx} = vu1n::clampv(r{idx});")
+     if toacc or fd:
+-        out.append(f"vu1n::stf<{m}>({target}, r{idx});")
++        if toacc and ACC_REG:   # patch 78: DEST-masked merge into the resident accumulator, stored at the block exits
++            out.append(f"vu1n::accw<{m}>(accv, r{idx});")
++        else:
++            out.append(f"vu1n::stf<{m}>({target}, r{idx});")
+         # a whole register written by a clamped result: that local is its value (clean, so also its normalised view)
+-        if cache is not None and m == 15 and kind not in ('max', 'min', 'mini'):
++        if cache is not None and m == 15 and kind not in ('max', 'min', 'mini') and not (toacc and ACC_REG):
+             cache['next'] = ('acc' if toacc else fd, (f"r{idx}", True))
+     return pre + out
+ 
+@@ -653,6 +665,35 @@
+     # gow-native-pc (patch 43): VF operands (normalised once) and ACC kept in locals until written; every write still goes
+     # to the state, so the code after the block, call-outs and the exact engine see the same registers
+     cache = {}
++    # patch 78 (ACC_REG): the accumulator lives in a local for the whole block (declared in front of the body, so a self-loop
++    # block keeps it across iterations). acc_dirty is compile-time: the generator knows which pairs write ACC.
++    body_pre = ["__m128 accv = vu1n::ldAcc(s);"] if ACC_REG else []
++    acc_dirty = [False]
++
++    def acc_wrap(code):
++        # An exact-engine call-out commits the interpreter's register file back to `s` (callLower / callUpper ->
++        # commitValuesKeepTiming -> commitEverythingNow), so the accumulator must be authoritative there: store it before
++        # the call and reload it after (the call itself can also write ACC, e.g. OPMULA through callUpper). The store is
++        # unconditional, exactly like the x64 JIT's helper-call bracket: a statically clean ACC can still be stale
++        # across a self-loop iteration that skipped the exit store, and the call would then commit that stale value back
++        # into state.acc (the random-program test finds this at 0x0cf0: pair 7 writes ACC, the branch continues, and the
++        # next iteration's callLower used the previous block entry value).
++        if not ACC_REG:
++            return code
++        out = []
++        dirty = acc_dirty[0]
++        for ln in code:
++            if "callUpper" in ln or "callLower" in ln:
++                out.append("vu1n::stAcc(s, accv);")
++                out.append(ln)
++                out.append("accv = vu1n::ldAcc(s);")
++                dirty = False
++                continue
++            out.append(ln)
++            if "accw<" in ln:
++                dirty = True
++        acc_dirty[0] = dirty
++        return out
+ 
+     def after_pair(code, li, uw, upper):
+         nxt = cache.pop('next', None)
+@@ -732,7 +773,7 @@
+                 lines.append(f"uint32_t target = {tgt}u;")
+             # upper still executes in the branch pair
+             up = emit_upper(u, pc, i, f"m{i}" if i in mac_w else None, f"c{i}", clip_prev(i), st_i, from_entry, used, cache)
+-            lines.extend(up)
++            lines.extend(acc_wrap(up))
+             after_pair(up, li, uw, u)
+             st = apply_pair(st, effect)
+             from_entry &= ~(effect[0] | effect[1] | effect[2])
+@@ -742,31 +783,30 @@
+         lo = [] if iBit else emit_lower(l, pc, u, None, mac_src(i), clip_src(i), f"c{i}", uw)
+         after_pair(up + lo, li, uw, u)
+         if iBit:
+-            lines.extend(up)
+-            lines.append(f"s.i = vu1n::qnorm(*(const float *)&(const uint32_t &)(0x{l:08x}u)); // I register")
+-            # (the line above is replaced below to avoid UB)
+-            lines[-1] = f"{{ const uint32_t bits = 0x{l:08x}u; float imm; std::memcpy(&imm, &bits, 4); s.i = vu1n::qnorm(imm); }}"
++            body = up + [f"{{ const uint32_t bits = 0x{l:08x}u; float imm; std::memcpy(&imm, &bits, 4); s.i = vu1n::qnorm(imm); }}"]
+         elif lower_first:
+-            lines.extend(lo)
+-            lines.extend(up)
++            body = lo + up
+         else:
+-            lines.extend(up)
+-            lines.extend(lo)
++            body = up + lo
++        lines.extend(acc_wrap(body))
+         st = apply_pair(st, effect)
+         from_entry &= ~(effect[0] | effect[1] | effect[2])
+         # D/T halt bits
++        acc_out = "vu1n::stAcc(s, accv); " if (ACC_REG and acc_dirty[0]) else ""
+         if (u >> 28) & 1:
+-            lines.append("if (s.dBitEnabled) { " + " ".join(flush(i)) + f" s.stoppedByD = true; return kVu1nEnded | {(pc + 8) & 0x3FFF}u; }}")
++            lines.append("if (s.dBitEnabled) { " + acc_out + " ".join(flush(i)) + f" s.stoppedByD = true; return kVu1nEnded | {(pc + 8) & 0x3FFF}u; }}")
+         if (u >> 27) & 1:
+-            lines.append("if (s.tBitEnabled) { " + " ".join(flush(i)) + f" s.stoppedByT = true; return kVu1nEnded | {(pc + 8) & 0x3FFF}u; }}")
++            lines.append("if (s.tBitEnabled) { " + acc_out + " ".join(flush(i)) + f" s.stoppedByT = true; return kVu1nEnded | {(pc + 8) & 0x3FFF}u; }}")
+     end_pc = (pc0 + 8 * n) & 0x3FFF
+     ebit = any((u >> 30) & 1 for (l, u) in pairs)
+     if req_out is not None:
+         req_out.append(used[0] & ~VF0_LANES)
+     lines.extend(flush_final(n - 1))
+     if ebit:
++        if ACC_REG and acc_dirty[0]:
++            lines.append("vu1n::stAcc(s, accv);")
+         lines.append(f"return kVu1nEnded | {end_pc}u;")
+-        return lines
++        return body_pre + lines
+     # gow-native-pc (patch 13/35): a self-loop block loops in place inside for (;;) so the compiler keeps VF/VI pointers
+     # and SSE constants in registers across iterations instead of making an indirect tail call on every vertex.
+     is_self_loop = False
+@@ -783,14 +823,18 @@
+         lines.append(f"if (next == 0x{pc0:x}u)")
+         lines.append("{")
+         lines.append(f"    if (VU1NativeAccess::chainSelf(n, 0x{pc0:x}u)) continue;")
++        if ACC_REG and acc_dirty[0]:
++            lines.append("    vu1n::stAcc(s, accv);")
+         lines.append("    return next | kVu1nDone;")
+         lines.append("}")
++    if ACC_REG and acc_dirty[0]:
++        lines.append("vu1n::stAcc(s, accv);")
+     lines.append("if (auto *sl = VU1NativeAccess::chain(n, next))")
+     lines.append("    VU1N_MUSTTAIL return sl->fn(n);")
+     lines.append("return next | kVu1nDone;")
+     if is_self_loop:
+         lines = ["for (;;)", "{"] + ["    " + ln for ln in lines] + ["}"]
+-    return lines
++    return body_pre + lines
+ 
+ 
+ # gow-native-pc: the VU1NativeAccess functions generated blocks call (see emit_upper / emit_lower / gen_block) that are not

@@ -4,28 +4,106 @@ import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // gow-native-pc: "Saves" tab. A save is a copy of the memory card (Mcd001.ps2) as the game last wrote it at a save
-// altar: F1 > Saves in game makes one, and so does "Save a copy" here. "Use" puts a copy back as the card with the game
+// altar: supported runners back it up automatically; F1 and "Save a copy" also make manual copies. "Use" restores with the game
 // closed (the current card is kept first as a "backup" copy), so a test can start again from an area reached earlier.
 ScrollView {
     id: raiz
     required property string carpeta
     property string elf
     signal aviso(string texto)
+    signal iniciarSlot()
     property var lista: []
+    property var slots: []
+    function tr(pt, en) { return Tema.idioma === "pt" ? pt : en }
     contentWidth: availableWidth
     clip: true
 
-    function refrescar() { lista = carpeta ? lanzador.partidas(carpeta) : [] }
+    function refrescar() {
+        var current = carpeta ? lanzador.partidas(carpeta) : []
+        if (JSON.stringify(current) !== JSON.stringify(lista)) lista = current
+        var individual = typeof lanzador.partidasIndividuales === "function" && elf ? lanzador.partidasIndividuales(elf) : []
+        if (JSON.stringify(individual) !== JSON.stringify(slots)) slots = individual
+    }
     onCarpetaChanged: refrescar()
+    onElfChanged: refrescar()
     Component.onCompleted: refrescar()
+    onVisibleChanged: if (visible) refrescar()
+    Timer {
+        interval: 2000
+        repeat: true
+        running: raiz.visible && lanzador.jugando
+        onTriggered: raiz.refrescar()
+    }
     Connections {
         target: lanzador
-        function onJugandoCambiado() { raiz.refrescar() } // copies made with F1 while playing show up afterwards
+        function onJugandoCambiado() { raiz.refrescar() }
     }
 
     ColumnLayout {
         width: raiz.availableWidth
         spacing: 0
+
+        Text {
+            Layout.fillWidth: true
+            Layout.bottomMargin: 12
+            text: raiz.tr("Saves do jogo", "Game saves")
+            color: Tema.texto
+            font.pixelSize: 22
+            font.bold: true
+        }
+        Repeater {
+            model: raiz.slots
+            delegate: Rectangle {
+                required property var modelData
+                Layout.fillWidth: true
+                Layout.bottomMargin: 10
+                implicitHeight: 108
+                color: Tema.campo
+                radius: 6
+                border.color: Tema.borde
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 16
+                    Image {
+                        source: modelData.imagen
+                        Layout.preferredWidth: 128
+                        Layout.preferredHeight: 80
+                        fillMode: Image.PreserveAspectFit
+                        smooth: false
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Text { Layout.fillWidth: true; text: modelData.nombre; color: Tema.texto; font.pixelSize: 17; elide: Text.ElideRight }
+                        Text { text: "Slot " + (modelData.slot + 1) + " · " + modelData.fecha; color: Tema.textoSuave; font.pixelSize: 12 }
+                        Text {
+                            text: raiz.tr("Tempo de jogo: ", "Play time: ") + Math.floor(modelData.segundos / 3600) + "h " + Math.floor(modelData.segundos / 60) % 60 + "m"
+                            color: Tema.textoTenue; font.pixelSize: 12
+                        }
+                    }
+                    BotonSecundario {
+                        text: raiz.tr("Carregar", "Load")
+                        Accessible.name: text + " " + modelData.nombre
+                        onClicked: { carregarSlot.slot = modelData.slot; carregarSlot.open() }
+                    }
+                }
+            }
+        }
+        Text {
+            Layout.fillWidth: true
+            Layout.bottomMargin: 20
+            visible: raiz.slots.length === 0
+            text: raiz.tr("Nenhum slot compatível disponível neste cartão.", "No compatible slots available on this card.")
+            color: Tema.textoSuave
+            wrapMode: Text.WordWrap
+        }
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: 12
+            Layout.bottomMargin: 12
+            text: raiz.tr("Histórico de backups do cartão", "Card backup history")
+            color: Tema.texto; font.pixelSize: 20
+        }
 
         Text {
             Layout.fillWidth: true
@@ -176,6 +254,31 @@ ScrollView {
                     }
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: carregarSlot
+        property int slot: -1
+        anchors.centerIn: parent
+        width: Math.min(460, raiz.width - 24)
+        height: 220
+        modal: true
+        title: raiz.tr("Carregar save?", "Load save?")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentHeight: loadMessage.implicitHeight
+        contentItem: Text {
+            id: loadMessage
+            width: carregarSlot.availableWidth
+            text: raiz.tr("O progresso desde o último altar será perdido. O jogo carregará o slot escolhido.", "Progress since the last altar will be lost. The game will load the selected slot.")
+            wrapMode: Text.WordWrap
+            color: Tema.texto
+        }
+        background: Rectangle { color: Tema.fondoAlto; border.color: Tema.oro; radius: 6 }
+        onAccepted: {
+            if (lanzador.seleccionarPartida(raiz.elf, slot)) {
+                if (!lanzador.jugando) raiz.iniciarSlot()
+            } else raiz.aviso(raiz.tr("Não foi possível carregar este slot agora.", "This slot cannot be loaded now."))
         }
     }
 

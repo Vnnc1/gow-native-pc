@@ -5,12 +5,106 @@ data/
 launcher/build/
 launcher/build-clang/
 # never commit game files
+# Never commit game files, disc-derived data or third-party binaries.
+# This repository ships source, patches and docs only: the runtime is fetched
+# (build.cmd -Stages fetch) and every game file comes from the user's own disc.
+
+# --- Game discs and disc images ---
 *.iso
 *.ISO
 *.bin
+*.img
+*.IMG
+*.mdf
+*.MDF
+*.cue
+*.chd
+*.CHD
+
+# --- PlayStation executables, firmware modules, disc metadata ---
+SCUS_*
+SLUS_*
+SLES_*
+SLPM_*
+SCAJ_*
+SCPS_*
+SLPS_*
+SCED_*
+*.irx
+*.IRX
+*.IRX.bin
+SYSTEM.CNF
+GODOFWAR.TOC
+*.TOC
+
+# --- Extracted game resources ---
+*.PAK
+*.WAD
+*.VPK
+*.VU
+*.VAG
+*.SFD
+*.PSS
+*.PSW
+*.IPU
+*.MIG
+*.TEX
+*.PMF
+
+# --- Saves and memory cards ---
+mc0/
+mc1/
 *.ps2
-__pycache__/
-# shortcut made by the launcher stage
+*.PS2
+*.mcd
+*.mc2
+
+# --- Downloaded runtime checkout (built by the fetch stage, not part of the repo) ---
+engine/runtime/
+
+# --- Generated data, local state and user files (see README: data/ is git-ignored) ---
+data/
+games/*/pgo/
+
+# --- Build outputs and portable toolchain ---
+build/
+build-*/
+out/
+output/
+generado/
+*.exe
+*.EXE
+*.dll
+*.DLL
+*.lib
+*.LIB
+*.pdb
+*.obj
+*.o
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
 *.lnk
 # profile-guided data packaged into a release (tools/pipeline: package), never committed
 games/*/pgo/
+
+# --- Logs, caches, screenshots, local config ---
+*.log
+*.ppm
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+.workbuddy/
+_compliance-quarantine*/
+
+# --- Local/private configuration ---
+.env
+.env.*
+regional-builds.json

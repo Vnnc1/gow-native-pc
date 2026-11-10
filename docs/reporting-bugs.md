@@ -24,6 +24,13 @@ in `metrics.jsonl` and records `GOW_GS_HW_STATS` when explicitly set.
 
 ## Contents and interpretation
 
+Final metadata writes are retried briefly if atomic replacement fails. If the
+local `session.json` still contains an active state but a valid exit event was
+recorded, the launcher, summary and ZIP export recover that outcome and mark
+`final_metadata_incomplete`. The export includes reconciled metadata; original
+local files remain untouched. This warning does not imply a game crash. Without
+valid exit evidence the state is not inferred from silence or an old heartbeat.
+
 | Evidence | Meaning |
 |---|---|
 | `session.json` | Session ID, UTC times/status, actual executable and ELF hashes, OS/CPU/RAM, display adapters/drivers, settings, source patch hashes and selected build options |
@@ -39,6 +46,20 @@ counts above 16.67, 33.33, 50 and 100 ms. Guest intervals include pauses and loa
 or measured GPU time**. Host loop frequency is not proof of distinct displayed game frames. Percentiles use nearest
 rank over at most 4,096 intervals per window; `intervals` and `samples` expose any overflow, while totals/maxima count
 all intervals. No window is emitted while the guest frame function stops; use the host heartbeat and last output time.
+
+Runners with patch `zzz-307` also emit `[gow-present]` in the shared-texture path under the same diagnostics.
+`fresh` counts acquisitions of a new publication sequence; `repeated` counts reuse, `unavailable` failed acquisition,
+and `blank` blank output. Their sum is `polls`. `skipped` counts publication sequences skipped between valid
+acquisitions, not lost guest frames. `acquire_hz` is fresh acquisitions divided by the reporting window.
+`max_hold_ms` measures the oldest retained acquisition observed, including the interval before its replacement
+and holds spanning report windows. These are not changed-pixel counts, scanout, GPU time or input latency.
+The RAM presentation path and older runners omit this tag; absence is not zero. A blocked host cannot emit
+a window until it resumes: inspect the last output time alongside guest/audio/process activity.
+
+Before patch `zzz-308`, minimizing the game could stop host reporting while guest/audio
+continued, and closing it while minimized could end in the collector's forced termination.
+Include whether the window was minimized/restored when reporting this signature. A missing
+host window alone cannot distinguish that condition from another host/driver stall.
 
 Detailed mode also enables exclusive elapsed-time buckets (EE/VU/GS/IOP and waits), VU1/JIT counters, audio requested,
 missing/dropped frames, playback-rate ceiling/buffer range and IOP cycle drift. These measure elapsed time or runtime
@@ -127,6 +148,40 @@ overlap other scoped times and must not be added to VU/GS buckets as frame time.
 Detailed runs diagnose bottlenecks; compare FPS separately with diagnostics off.
 The collector retains these records and the explicit stage-spin/chunk-limit values
 without changing the report file allowlist.
+
+# Developer audio trace
+
+For developer-only audio transition diagnosis, patch 78 enables `GOW_AUDIO_TRACE=1`
+(`session-game-smoke.py --audio-trace`). It stores up to 512 events per sound engine
+and emits `[gow-audio-trace]` records after audio shutdown. Normal playback does not
+enable it. `kind=0` is a reset (available frames discarded), `kind=1` a partial/empty
+drain, and `kind=2` an acquisition or drain lasting at least 1 ms. Reset/publication
+counters and `total_published` are lifetime totals for that engine.
+For drain events, `available` is the queue after latency trimming; `total_published`
+also includes samples later discarded by queue limits or reset.
+
+Use each event's `t_us`, relative to its `begin=1` marker, for event timing: the
+collector's `elapsed_ms` on dumped events is their late emission time. Acquisition
+`wait_us` includes thread scheduling as well as mutex acquisition; `drain_us` includes
+existing audio-stat logging when enabled. Neither is pure CPU execution time.
+`producer_age_us` is valid only when `producer_known=1`. Require matching begin/end
+markers, zero overflow and complete event counts; forced termination can lose the
+trace. These diagnostics do not establish clean FPS or audible quality.
+
+Patch 79 adds `grant_cycles`, `sound_base`, `total_cycles`, `run_grant` and
+`pending_iop`: the producer's last service snapshot before the recorded publication,
+not scheduler values at callback time. Context is invalid after reset until the
+next publication (`producer_known=1`). `reason` identifies that publication:
+0 batch, 1 explicit flush, 2 other register read, 3 register write, 4 sample RAM,
+5 stream change, 6 stream position, 7 stream-half check, 8 envelope read,
+9 other parameter read. `frames_*` are cumulative published stereo frames by reason,
+not call counts or CPU timings. Their sum equals `total_published`, including frames
+later discarded. Default audio timing and buffering are unchanged.
+`pending_iop` is normally zero because the scheduling batch clears it before
+running the IOP; zero does not exclude a lack of upstream EE progress. Disabled
+tracing still adds a call/null check and reason arguments, but no trace clocks,
+allocation or logging.
+
 # Private diagnostic kit
 
 `gow-diagnostics` is a separate Windows frontend for a precompiled test runner.

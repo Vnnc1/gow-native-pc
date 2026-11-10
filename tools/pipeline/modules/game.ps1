@@ -21,6 +21,31 @@ function Get-ElfTextHash([string]$elf) {
     }
     throw "no .text section in $elf"
 }
+# Effective unity batch, the same expression for the instrumented and the final build. Pinned in the profile identity:
+# a different batch merges different generated TUs into each object, so a profile trained with another batch is not a
+# profile of this build (the counters themselves are per function, so the merge stays valid).
+function Get-UnityBatch { if ($prof.build -and $prof.build.unity_batch -and $ramGb -ge 14) { [int]$prof.build.unity_batch } else { 8 } }
+# Hash of the runtime sources the runner is built from. The patch hashes cover the exported stack, but a local edit to
+# engine\runtime that was never exported as a patch would leave an old profile silently in use: this closes that hole.
+function Get-RuntimeSourceHash {
+    # Hand-written runtime code only: src\runner holds the recompiled game (thousands of generated files, already
+    # identified by the ELF .text hash in `code`). Paths are relative to the runtime checkout, so the identity, and
+    # therefore a profile trained here, holds on every installation.
+    $parts = [Text.StringBuilder]::new()
+    $files = @(
+        Get-ChildItem (Join-Path $rec 'ps2xRuntime\src\lib') -Recurse -File -ErrorAction SilentlyContinue
+        Get-ChildItem (Join-Path $rec 'ps2xRuntime\include') -Recurse -File -ErrorAction SilentlyContinue
+        Get-ChildItem (Join-Path $rec 'ps2xRecomp\src') -Recurse -File -ErrorAction SilentlyContinue
+    ) | Where-Object { $_.Extension -in '.cpp', '.c', '.h', '.hpp', '.inl', '.inc' }
+    if (-not $files) { return '' }
+    $map = [ordered]@{}
+    foreach ($f in $files) { $map[$f.FullName.Substring($rec.Length + 1)] = $f.FullName }
+    [string[]]$paths = @($map.Keys)
+    [Array]::Sort($paths, [StringComparer]::Ordinal)
+    foreach ($p in $paths) { [void]$parts.Append($p).Append(':').Append((Get-FileHash $map[$p] -Algorithm SHA256).Hash).Append(';') }
+    $bytes = [Text.Encoding]::UTF8.GetBytes($parts.ToString())
+    return [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
+}
 function Get-ProfileIdentity {
     $sha = { param($text) [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($text))).Replace('-', '') }
     # ordinal order on every host (Sort-Object follows the system culture: another Windows language would hash differently)
@@ -35,20 +60,36 @@ function Get-ProfileIdentity {
         patches = & $sha $patches
         game = & $sha $profileFiles
         code = Get-ElfTextHash (Languages).recompile_elf
+        src = Get-RuntimeSourceHash
+        unity = Get-UnityBatch
     }
 }
 # $true when the manifest's identity is this installation's (no prepared disc yet: $false)
 function Test-ProfileManifest([string]$manifest) {
     if (-not (Test-Path $manifest)) { return $false }
-    try { $id = Get-ProfileIdentity } catch { return $false }
-    $m = Get-Content $manifest -Raw | ConvertFrom-Json
-    return ($m.runtime -eq $id.runtime) -and ($m.patches -eq $id.patches) -and ($m.game -eq $id.game) -and ($m.code -eq $id.code)
+    # A manifest that cannot be read or parsed is not the same as one that does not fit this installation: the
+    # difference was swallowed, so a corrupted file was taken for "no profile" and the build went on without it.
+    try { $id = Get-ProfileIdentity } catch { Write-Host "profile manifest unreadable ($manifest): $($_.Exception.Message)"; return $false }
+    try { $m = Get-Content $manifest -Raw | ConvertFrom-Json } catch { Write-Host "profile manifest corrupted ($manifest): $($_.Exception.Message)"; return $false }
+    return ($m.runtime -eq $id.runtime) -and ($m.patches -eq $id.patches) -and ($m.game -eq $id.game) -and
+        ($m.code -eq $id.code) -and ($m.src -eq $id.src) -and ($m.unity -eq $id.unity)
 }
 function Write-ProfileManifest([string]$source) {
     $m = Get-ProfileIdentity
     $m.source = $source
     $m.created_utc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     [IO.File]::WriteAllText("$pgoProfile.json", ($m | ConvertTo-Json))
+}
+# Prints what the merged profile covers and refuses an empty one: clang accepts a profile with no function counts and
+# simply optimizes nothing, which looks exactly like "PGO gave nothing", so fail loudly at the merge instead.
+function Show-ProfileCoverage {
+    $show = & (Join-Path $script:llvmBin 'llvm-profdata.exe') show $pgoProfile 2>&1 | Out-String
+    $m = [regex]::Match($show, 'Total functions:\s*(\d+)')
+    if (-not $m.Success) { throw "llvm-profdata show did not report a summary:`n$show" }
+    $functions = [long]$m.Groups[1].Value
+    if ($functions -le 0) { throw "the profile has no function counts ($pgoProfile)" }
+    $c = [regex]::Match($show, 'Total count:\s*(\d+)')
+    Write-Host ("profile coverage: {0:N0} functions, total count {1}" -f $functions, $(if ($c.Success) { $c.Groups[1].Value } else { '?' }))
 }
 # $true when the local profile fits this installation, after taking the release's one if the local one did not
 function Use-ReleaseProfile {
@@ -69,9 +110,18 @@ function Use-ReleaseProfile {
 # glob (recorded microcode, runtime and IOP native sources) changes. The only configure-time input outside those is whether
 # vu1n_heads.txt exists (the VU1 generator rule depends on it only then). The explicit configure stage always runs.
 function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip) {
+    $script:configuredGameProfile = $null
     Use-Toolchain
     Need (Join-Path $rec 'CMakeLists.txt') 'runtime (run the fetch stage)'
-    if ($dir -eq $bld -and $pgo -eq 'auto') { [void](Use-ReleaseProfile) }
+    $profileReady = $false
+    if ($pgo -eq 'auto') {
+        $profileReady = if ($dir -eq $bld) { Use-ReleaseProfile } else {
+            (Test-Path $pgoProfile) -and (Test-ProfileManifest "$pgoProfile.json")
+        }
+        if (-not $profileReady -and (Test-Path $pgoProfile)) {
+            Write-Host '@@status local PGO profile has no matching manifest; building without it (profile preserved)'
+        }
+    }
     $ltcgValue = if ($Ltcg) { 'ON' } else { 'OFF' }
     $pdbValue = if ($Pdb) { 'ON' } else { 'OFF' }
     $extra = @()
@@ -112,11 +162,13 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
         # Keep the configuration's -O3 here. A -O1 training build (2.2x faster to compile) gave a profile whose final
         # build was measured slower: 45.0 vs 49.7 FPS mean on the save route, 3 of 3 alternating pairs (2026-10-30).
     }
-    elseif ($pgo -eq 'auto' -and (Test-Path $pgoProfile)) {
+    elseif ($profileReady) {
         $profileHash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash
         Write-Host "profile-guided: $pgoProfile ($profileHash)"
         # The digest changes Ninja commands and cache keys when the same profile path gets new contents.
-        $flags += " -fprofile-instr-use=`"$(Barra $pgoProfile)`" -DGOW_PGO_REVISION=$profileHash -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+        # -Wno-profile-instr-unprofiled is expected (new generated code is legitimately unprofiled); -out-of-date is
+        # not: it means the source CFG changed under the profile, so the build must stop instead of silently using it.
+        $flags += " -fprofile-instr-use=`"$(Barra $pgoProfile)`" -DGOW_PGO_REVISION=$profileHash -Wno-profile-instr-unprofiled -Werror=profile-instr-out-of-date"
     }
     # Always explicit: a value once passed stays in CMakeCache.txt, so an omitted one would silently keep it.
     $extra += @('-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG', '-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG')
@@ -136,23 +188,30 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
             $extra += "-DFETCHCONTENT_SOURCE_DIR_$($src.Name.Substring(0, $src.Name.Length - 4).ToUpper())=$(Barra $src.FullName)"
         }
     }
+    $brand = if ($prof.runtime.branding_image) { Barra (Join-Path $prof._dir $prof.runtime.branding_image) } else { '' }
+    $extra += "-DGOW_BRAND_IMAGE=$brand"
     $cmakeArgs = @('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
+        '-DPS2X_ENABLE_FFMPEG=OFF',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_SHOW_WINDOWS_CONSOLE=OFF',
-        "-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=$(if ($prof.build -and $prof.build.unity_batch -and $ramGb -ge 14) { $prof.build.unity_batch } else { 8 })") + $extra
+        "-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=$(Get-UnityBatch)") + $extra
     $sigFile = Join-Path $dir 'gow-configure.sig'
     $sigText = ($cmakeArgs -join "`n") + "`nheads=$(Test-Path (Join-Path $data 'vu1n_heads.txt'))`nrec=$(Barra $rec)"
     $sha = [Security.Cryptography.SHA256]::Create()
     $sig = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sigText))) -replace '-', '').ToLower()
     $sha.Dispose()
+    $configuredProfile = [ordered]@{buildRoot=$dir; mode=$(if ($pgo -eq 'generate') { 'generate' } elseif ($profileReady) { 'use' } else { 'off' });
+        pgoApplied=[bool]$profileReady; appliedPgoHash=$(if ($profileReady) { $profileHash } else { $null })}
     if ($MaySkip -and (Test-Path (Join-Path $dir 'build.ninja')) -and (Test-Path (Join-Path $dir 'CMakeCache.txt')) -and
         (Test-Path $sigFile) -and ((Get-Content $sigFile -Raw).Trim() -eq $sig)) {
         Write-Host 'cmake configure: inputs unchanged, skipped (Ninja re-runs CMake itself when CMake files or globbed sources change)'
+        $script:configuredGameProfile = $configuredProfile
         return
     }
     Remove-Item $sigFile -ErrorAction SilentlyContinue # a failed configure must not leave the old signature behind
     Native 'cmake' $cmakeArgs 'cmake configure'
     [IO.File]::WriteAllText($sigFile, $sig)
+    $script:configuredGameProfile = $configuredProfile
 }
 if ($Stages -contains 'configure') { Step "configure ($Config, $bld)"; Configure }
 
@@ -172,6 +231,7 @@ if ($Stages -contains 'recomp') {
 if ($Stages -contains 'sync') {
     Step 'generated code into the runner'
     Native $python @('-I', (Join-Path $root 'tools/pipeline/recompile.py'), 'sync', '--root', $root, '--game', $Game) 'generated code synchronization'
+    Native $python @('-I', (Join-Path $root 'tools/disc/save_slots.py'), '--prepare-data', (Join-Path $root "data/$Game"), '--game', $Game) 'native save previews'
 }
 
 # --- build ----------------------------------------------------------------------------------------------------------
@@ -181,6 +241,7 @@ function Build-Game([string]$dir = $bld) {
     Need (Join-Path $dir 'CMakeCache.txt') 'configured build folder (run the configure stage)'
     $profileMode = if ($dir -eq "$bld-pgogen") { 'generate' } else { 'auto' }
     Configure $dir $profileMode -MaySkip
+    $buildProfile = $script:configuredGameProfile
     $log = Join-Path $logs 'build.log'
     Write-Host "$jobs compilers in parallel"
     $ErrorActionPreference = 'Continue'
@@ -204,6 +265,7 @@ function Build-Game([string]$dir = $bld) {
     $ErrorActionPreference = 'Stop'
     if ($profileMode -ne 'generate') { Write-CompilerCacheStats 'game' }
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
+    if ($null -ne $buildProfile) { $script:gameBuildProfiles.Add($buildProfile) }
     if ($dir -eq $bld) {
         [IO.File]::WriteAllText($toolchainFile, 'clang')
         [IO.File]::WriteAllText($buildRootFile, $BuildRoot)

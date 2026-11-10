@@ -1,5 +1,7 @@
 $script:stepTimings = [Collections.Generic.List[object]]::new()
 $script:currentStep = $null
+$script:gameBuildProfiles = [Collections.Generic.List[object]]::new()
+$script:configuredGameProfile = $null
 function End-Step {
     if ($script:currentStep) {
         $script:stepTimings.Add([ordered]@{step=$script:currentStep; seconds=[math]::Round($script:stepWatch.Elapsed.TotalSeconds, 3)})
@@ -20,7 +22,15 @@ function Write-PipelineMetrics {
         thinLto=[bool]$Ltcg; debugSymbols=[bool]$Pdb;
         runtimeCommit=$runtimeCommit; totalSeconds=[math]::Round($pipelineWatch.Elapsed.TotalSeconds,3); steps=@($script:stepTimings.ToArray())}
     if ($portable) { $result.compilerPackage = $portable['clang'].dir; $result.cachePackage = $portable['sccache'].dir }
-    if ($pgoProfile -and (Test-Path $pgoProfile)) { $result.pgoHash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash }
+    # Legacy pgoHash describes an available file, never evidence that a build used it.
+    $result.pgoHashMeaning = 'available-profile-not-application'
+    if ($pgoProfile -and (Test-Path $pgoProfile)) {
+        $result.availablePgoHash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash
+        $result.pgoHash = $result.availablePgoHash
+    }
+    $result.gameBuildProfiles = @($script:gameBuildProfiles.ToArray())
+    $result.pgoAppliedScope = 'last-successful-game-build'
+    $result.pgoApplied = if ($script:gameBuildProfiles.Count) { $script:gameBuildProfiles[-1].pgoApplied } else { $null }
     $result.patches = @(Get-RuntimePatches | ForEach-Object {
         [ordered]@{name=$_.Name; sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash}
     })

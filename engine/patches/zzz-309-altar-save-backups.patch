@@ -1,0 +1,278 @@
+Automatic altar-save history after the USA final index write completes successfully.
+Preserve original async/resume behavior and reject pending, failed, short and other-slot writes.
+Publish card copies only after data and metadata close successfully; share the writer with F1.
+Host-thread notification and launcher history use existing paths. No savestates or game-data edits.
+Validated with production-wrapper/filesystem tests and private-card altar save/reload (see docs).
+
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -3,6 +3,7 @@
+ #include "runtime/ps2_perf.h"
+ #include "runtime/gow_test_time.h"
+ #include "runtime/gow_logic_present.h"
++#include "runtime/gow_save_backup.h"
+ extern std::atomic<uint64_t> g_gowAudioFramesPlayed, g_gowAudioFramesMissing;
+ #include "game_overrides.h"
+ #include "ps2_runtime.h"
+@@ -22,6 +23,7 @@
+ void sub_00147520_0x147520(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+ void sub_0023B6A0_0x23b6a0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+ void sub_00149340_0x149340(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++void sub_0022E800_0x22e800(uint8_t *, R5900Context *, PS2Runtime *);
+ void gowDumpBranchRing(const char *why);
+ #include <map>
+ #include <unordered_map>
+@@ -47,6 +49,19 @@
+     uint32_t readGuest32(const uint8_t *rdram, uint32_t addr);
+     void writeGuest32(uint8_t *rdram, uint32_t addr, uint32_t value);
+     void gowDiagPrimPoll(uint8_t *rdram, double seconds);
++
++    // USA altar transaction: the second write commits the slot index after the payload.
++    // Keep the original async operation and resume behavior; never snapshot a pending/error result.
++    void gowAltarSaveWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        const bool finalWrite = ctx->pc == 0x0022E800u && GPR_U32(ctx, 31) == 0x002306C0u &&
++                                GPR_U32(ctx, 4) == 0u && GPR_U32(ctx, 7) == 0x44u;
++        sub_0022E800_0x22e800(rdram, ctx, runtime);
++        if (finalWrite && ctx->pc == 0x002306C0u && GPR_U32(ctx, 2) == 1u &&
++            readGuest32(rdram, 0x002A1284u) == 0u && readGuest32(rdram, 0x002A128Cu) == 0x44u)
++            gow_saves::automaticBackup();
++    }
++
+     // libpad2 uses socket handles and an 18-byte payload, unlike libpad's
+     // port/slot API and 32-byte status packet. God of War expects state 1 and
+     // a button profile beginning with 0xff to identify a DualShock 2.
+@@ -2363,6 +2378,7 @@
+         runtime.replaceFunction(0x00294A30u, gowDelayThread);     // EE timer 2: native DelayThread
+         runtime.replaceFunction(0x002998C0u, gowTimerSystemNoop); // InitTimer
+         runtime.replaceFunction(0x00299A20u, gowTimerSystemNoop); // StartTimerSystemTime
++        runtime.replaceFunction(0x0022E800u, gowAltarSaveWrite);
+         runtime.replaceFunction(0x0027B7E8u, gowPad2Init);
+         runtime.replaceFunction(0x0027B828u, gowPad2Init);
+         runtime.replaceFunction(0x0027B890u, gowPad2CreateSocket);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+@@ -1,5 +1,6 @@
+ #include "ps2_debug_panel.h"
+ #include "runtime/gow_ajustes_vivo.h"
++#include "runtime/gow_save_backup.h"
+ #include "ps2_runtime.h"
+ #include "ps2_runtime_macros.h"
+ #include "ps2_log.h"
+@@ -2254,58 +2255,9 @@
+                   [](const SaveEntry &a, const SaveEntry &b) { return a.folder > b.folder; });
+     }
+ 
+-    // Reads the card file; a read that overlaps a game save (size or write time changed) is retried.
+-    bool readCard(const std::filesystem::path &card, std::vector<char> &bytes)
+-    {
+-        for (int attempt = 0; attempt < 5; ++attempt)
+-        {
+-            std::error_code error;
+-            const auto before = std::filesystem::last_write_time(card, error);
+-            if (error)
+-                return false;
+-            std::ifstream in(card, std::ios::binary);
+-            bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+-            const auto after = std::filesystem::last_write_time(card, error);
+-            if (!error && before == after && !bytes.empty())
+-                return true;
+-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+-        }
+-        return false;
+-    }
+-
+     std::string snapshotCard(const std::string &label)
+     {
+-        const std::string card = envPath("GOW_MC0");
+-        const std::string root = envPath("GOW_SAVES_DIR");
+-        if (card.empty() || root.empty())
+-            return "Start the game from the launcher to use saves (GOW_MC0 / GOW_SAVES_DIR not set).";
+-        std::vector<char> bytes;
+-        if (!readCard(card, bytes))
+-            return "No memory card yet: save at an altar in the game first.";
+-        const std::time_t now = std::time(nullptr);
+-        char stamp[32];
+-        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
+-        char shown[32];
+-        std::strftime(shown, sizeof(shown), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+-        std::filesystem::path folder = std::filesystem::path(root) / stamp;
+-        std::error_code error;
+-        for (int n = 2; std::filesystem::exists(folder, error); ++n)
+-            folder = std::filesystem::path(root) / (std::string(stamp) + "-" + std::to_string(n));
+-        std::filesystem::create_directories(folder, error);
+-        if (error)
+-            return "Could not create " + folder.string();
+-        {
+-            std::ofstream out(folder / "Mcd001.ps2.tmp", std::ios::binary);
+-            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+-            if (!out)
+-                return "Could not write " + (folder / "Mcd001.ps2").string();
+-        }
+-        std::filesystem::rename(folder / "Mcd001.ps2.tmp", folder / "Mcd001.ps2", error);
+-        std::ofstream info(folder / "save.json");
+-        info << "{\n  \"label\": \"" << label << "\",\n  \"time\": \"" << shown << "\",\n  \"source\": \"F1\",\n"
+-             << "  \"card\": \"Mcd001.ps2\",\n  \"bytes\": " << bytes.size() << "\n}\n";
+-        std::fprintf(stderr, "[gow-saves] saved %s (%zu bytes)\n", folder.string().c_str(), bytes.size());
+-        return "Saved: " + folder.filename().string() + (label.empty() ? std::string() : " (" + label + ")");
++        return gow_saves::snapshot(label, "F1").message;
+     }
+ 
+     void drawSavesTab()
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -22,6 +22,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "raylib.h"
+ #include "runtime/gow_ajustes_vivo.h"
++#include "runtime/gow_save_backup.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -962,6 +963,35 @@
+ // Hilo principal, dentro de BeginDrawing.
+ void gowTrucosMenuDibujar()
+ {
++    static int backupNotice = 0;
++    static double backupNoticeUntil = 0;
++    if (const int notice = gow_saves::notification.exchange(0, std::memory_order_acquire))
++    {
++        backupNotice = notice;
++        backupNoticeUntil = GetTime() + 7.0;
++    }
++    if (backupNotice && GetTime() < backupNoticeUntil)
++    {
++        static const char *const saved[] = {
++            "Kayıt, başlatıcı geçmişine de yedeklendi.",
++            "Save also backed up in the launcher's history.",
++            "Partida también guardada en el historial del launcher.",
++            "Save também salvo no histórico do launcher."};
++        static const char *const failed[] = {
++            "Başlatıcı yedeği oluşturulamadı. Oyun kaydınız değişmedi.",
++            "Launcher backup failed. Your game save was not changed.",
++            "Falló la copia del launcher. Tu partida no se modificó.",
++            "Falha no backup do launcher. O save do jogo não foi alterado."};
++        const auto &font = fuentes().normal;
++        const char *message = (backupNotice > 0 ? saved : failed)[idiomaMenu()];
++        const float size = std::max(12.0f, std::min(20.0f, GetScreenWidth() / 38.0f));
++        const float width = ancho(font, message, size) + 32.0f;
++        const float x = (GetScreenWidth() - width) / 2.0f;
++        DrawRectangleRec(Rectangle{x, 18.0f, width, size + 24.0f}, Color{20, 12, 9, 240});
++        texto(font, message, x + 16.0f, 30.0f, size,
++              backupNotice > 0 ? Color{255, 226, 165, 255} : Color{255, 160, 150, 255});
++    }
++
+     if (!g_menuAbierto.load(std::memory_order_relaxed))
+         return;
+     const Fuentes &f = fuentes();
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_save_backup.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_save_backup.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_save_backup.h
+@@ -0,0 +1,103 @@
++#pragma once
++
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace gow_saves
++{
++    struct Result { bool ok = false; std::string message; };
++    inline std::mutex backupMutex;
++    // Published by the EE save completion; consumed only by the host drawing thread.
++    inline std::atomic<int> notification{0};
++
++    inline Result snapshot(const std::string &label, const char *source)
++    {
++        std::lock_guard<std::mutex> lock(backupMutex);
++        const char *cardValue = std::getenv("GOW_MC0"), *rootValue = std::getenv("GOW_SAVES_DIR");
++        if (!cardValue || !*cardValue || !rootValue || !*rootValue)
++            return {false, "Start the game from the launcher to use save backups."};
++        namespace fs = std::filesystem;
++        fs::path folder;
++        try
++        {
++            const auto card = fs::u8path(cardValue), root = fs::u8path(rootValue);
++            std::error_code error;
++            const auto size = fs::file_size(card, error);
++            // The runtime uses an 8 MiB PS2 card, with or without spare/ECC bytes.
++            if (error || (size != 0x800000u && size != 0x840000u))
++                return {false, "No valid memory card yet: save at an altar first."};
++            const auto before = fs::last_write_time(card);
++            std::vector<char> bytes(static_cast<size_t>(size));
++            std::ifstream in(card, std::ios::binary);
++            in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
++            if (!in || in.peek() != std::char_traits<char>::eof() || fs::last_write_time(card) != before)
++                return {false, "The memory card changed during backup; try again after saving."};
++            in.close();
++            fs::create_directories(root);
++            const std::time_t now = std::time(nullptr);
++            std::tm local{};
++#ifdef _WIN32
++            if (localtime_s(&local, &now) != 0) throw std::runtime_error("invalid backup time");
++#else
++            if (!localtime_r(&now, &local)) throw std::runtime_error("invalid backup time");
++#endif
++            char stamp[32], shown[32];
++            std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
++            std::strftime(shown, sizeof(shown), "%Y-%m-%d %H:%M:%S", &local);
++            // Atomic reservation also protects against a simultaneous launcher backup.
++            for (unsigned n = 0; n < 10000; ++n)
++            {
++                const auto candidate = root / (std::string(stamp) + (n ? "-" + std::to_string(n + 1) : ""));
++                if (fs::create_directory(candidate)) { folder = candidate; break; }
++            }
++            if (folder.empty()) return {false, "Could not reserve a backup folder."};
++            std::string safeLabel;
++            for (unsigned char ch : label)
++                if (ch >= 32 && ch != '"' && ch != '\\') safeLabel += static_cast<char>(ch);
++            {
++                std::ofstream out(folder / "Mcd001.ps2.tmp", std::ios::binary);
++                out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
++                out.close();
++                if (!out) throw std::runtime_error("card write failed");
++                std::ofstream info(folder / "save.json", std::ios::binary);
++                info << "{\n  \"label\": \"" << safeLabel << "\",\n  \"time\": \"" << shown
++                     << "\",\n  \"source\": \"" << source << "\",\n  \"card\": \"Mcd001.ps2\",\n  \"bytes\": " << size << "\n}\n";
++                info.close();
++                if (!info) throw std::runtime_error("metadata write failed");
++            }
++            // Readers require this final name: no partially written backup becomes visible.
++            fs::rename(folder / "Mcd001.ps2.tmp", folder / "Mcd001.ps2");
++            std::fprintf(stderr, "[gow-saves] source=%s saved=%s bytes=%zu\n", source,
++                         folder.filename().string().c_str(), bytes.size());
++            return {true, "Saved: " + folder.filename().string()};
++        }
++        catch (const std::exception &)
++        {
++            // Only files created in this call's exclusively reserved directory are removed.
++            if (!folder.empty())
++            {
++                std::error_code ignored;
++                fs::remove(folder / "Mcd001.ps2.tmp", ignored);
++                fs::remove(folder / "save.json", ignored);
++                fs::remove(folder, ignored);
++            }
++            std::fprintf(stderr, "[gow-saves] source=%s backup failed\n", source);
++            return {false, "Could not write the launcher backup. The game's memory card was not changed."};
++        }
++    }
++
++    inline void automaticBackup()
++    {
++        const auto result = snapshot("", "auto");
++        notification.store(result.ok ? 1 : -1, std::memory_order_release);
++    }
++}

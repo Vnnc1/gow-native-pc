@@ -1,0 +1,14 @@
+Analyze slow-frame streaks in chronological ring order after wrapping.
+
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_frame_metrics.h
+@@ -55,7 +55,8 @@
+         const double stutter = 1.5 * a.p50, spike = std::max(2.0 * a.p50, 100.0);
+         uint64_t run = 0;
+         for (size_t i = 0; i < n; ++i) {
+-            const double ms = intervals[i];
++            const size_t oldest = count > intervals.size() ? count % intervals.size() : 0;
++            const double ms = intervals[(oldest + i) % intervals.size()];
+             if (ms > stutter) ++a.stutterFrames;
+             if (ms > spike) ++a.spikeFrames;
+             run = ms > 2.0 * a.p50 ? run + 1 : 0;

@@ -1,0 +1,280 @@
+GS diagnostics and queue-record guards: one TSC-to-ns calibration, a non-underflowing `[gs-fe] other`, and
+rejection of truncated records before they are read
+
+`gs_frontend.cpp` and `gs_threaded_backend.cpp` each calibrated their own `nsPerTick` (a third copy lives in the
+`[gs-pub]` reporter), so two counters printed in the same 5 s window were not necessarily comparable. The new
+`gs_diag_clock.h` owns the calibration and the 5 s report window; both reporters use it and keep their one-shot sample
+in a function-local static, so the per-vertex path pays no extra cost.
+
+`[gs-fe] other` was `all - build - submit` on unsigned ticks: nested sampling (or a counter reset mid-window) made it
+underflow to a huge value. It is now clamped to 0, with the counter contract written where the counters are added.
+The two `Op::Run` drop modes are stated at `reportRunAnomaly`.
+
+`GSThreadedBackend::Execute` read a full `LoadClut`/`Submit`/`WriteVram`/`Sync`/`Present` struct from a record whose
+length field could be shorter than the struct, consuming the following record's bytes. A per-op `minimumPayload` table
+now checks the framed length before any read; a short record is reported, counted in `run_drops` and skipped while the
+rest of the chunk stays framed. `Op::Run` keeps its own n-dependent check; its `length < 4u` + `break` became
+`continue`, which only makes the existing control flow explicit.
+
+Measured with patch 90 in the same binary: A/B, Asia disc, ship deck, 0.5x, 63 s, base/final alternating (four runs),
+t=50-60 s: `vu_ms` 4634.96 -> 4651.29 (+0.35 %, inside the +/-1 % band), `gs_ms` 2504.9 -> 2323.7, `anomalies=0`,
+`run_drops=0 run_overflows=0`, `levelReady=1`.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_diag_clock.h b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_diag_clock.h
+new file mode 100644
+index 0000000..b1ab92e
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_diag_clock.h
+@@ -0,0 +1,51 @@
++#pragma once
++// gow-native-pc (patch 89): single TSC-to-nanosecond conversion for every [gs-*] diagnostic.
++//
++// Contract:
++//  * cycles() reads the CPU time-stamp counter of the calling thread; on x86/x86-64 Windows it is the
++//    invariant, synchronized counter, so one nsPerTick value is valid on the producer (VU1 worker) and
++//    on the render worker.
++//  * The calibration is a one-shot 10 ms steady_clock sample cached in a function-local static. Every
++//    diagnostic site must use this helper instead of calibrating its own copy, otherwise two counters
++//    reported in the same window are not comparable.
++//  * On a non-x86 build cycles() returns 0 and nsPerTick() returns 1.0 so the printed arithmetic stays
++//    finite (the diagnostic then reads cycles, not nanoseconds).
++#include <chrono>
++#include <cstdint>
++#if defined(_MSC_VER)
++#include <intrin.h>
++#elif defined(__x86_64__) || defined(__i386__)
++#include <x86intrin.h>
++#endif
++
++namespace gsdiag
++{
++constexpr double kReportSeconds = 5.0;   // every [gs-*] line is printed once per this window
++constexpr double kCalibrationMs = 10.0;  // steady_clock sample length used to derive ns per TSC tick
++
++inline uint64_t cycles()
++{
++#if defined(_MSC_VER) || defined(__x86_64__) || defined(__i386__)
++    return static_cast<uint64_t>(__rdtsc());
++#else
++    return 0u;
++#endif
++}
++
++inline double nsPerTick()
++{
++    static const double value = []
++    {
++        const auto t0 = std::chrono::steady_clock::now();
++        const uint64_t c0 = cycles();
++        while (std::chrono::steady_clock::now() - t0 <
++               std::chrono::milliseconds(static_cast<int>(kCalibrationMs)))
++        {
++        }
++        const uint64_t c1 = cycles();
++        const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
++        return (ns > 0.0 && c1 > c0) ? ns / static_cast<double>(c1 - c0) : 1.0;
++    }();
++    return value;
++}
++} // namespace gsdiag
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index f0032ff..98a15fa 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -3,6 +3,7 @@
+ // GOW-Port: CPU de referencia por defecto; OpenGL/cola seleccionables.
+ #include "runtime/gs/gs_threaded_backend.h"
+ #include "runtime/gs/gs_shared_present.h"
++#include "gs_diag_clock.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_perf.h"
+ #include "runtime/ps2_memory.h"
+@@ -488,15 +489,7 @@ void GS::flushRun()
+             m_runDiagPrims += prims;
+             // gow-native-pc (patch 66): [gs-run] every 5 s: run coalescing and its cost (compare per primitive,
+             // flush per run incl. the producer enqueue and any wait for the render worker).
+-            static const double nsPerTick = []
+-            {
+-                const auto t0 = std::chrono::steady_clock::now();
+-                const uint64_t c0 = __rdtsc();
+-                while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
+-                const uint64_t c1 = __rdtsc();
+-                const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+-                return ns > 0.0 ? ns / static_cast<double>(c1 - c0) : 1.0;
+-            }();
++            static const double nsPerTick = gsdiag::nsPerTick();
+             static auto lastReport = std::chrono::steady_clock::now();
+             static uint64_t cmpTicks = 0u, cmpCount = 0u;
+             cmpTicks += m_runDiagCompareTicks;
+@@ -505,7 +498,7 @@ void GS::flushRun()
+             m_runDiagCompares = 0u;
+             const auto now = std::chrono::steady_clock::now();
+             const double wall = std::chrono::duration<double>(now - lastReport).count();
+-            if (wall >= 5.0)
++            if (wall >= gsdiag::kReportSeconds)
+             {
+                 const double flushN = 1.0 / static_cast<double>(m_runDiagFlushes ? m_runDiagFlushes : 1u);
+                 // gow-native-pc (patch 66): pkt/s and pkt_ms cover the whole processGIFPacket, early returns included.
+@@ -2138,17 +2131,15 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+ 
+ // gow-native-pc (patch 64): GOW_GS_COST=1, every 5 s: per-vertex cost of the GFIFO path that runs on the VU1 worker
+ // thread inside XGKICK. `other` covers updatePreferredDisplaySourceForDraw + gowFogDiagDraw.
++// gow-native-pc (patch 89): counter contract, so the numbers can be compared across windows:
++//   build  = vertexKick transform/strip assembly, measured per vertex
++//   submit = backend Submit of that vertex, measured per vertex (includes any producer-side queue wait)
++//   all    = whole vertexKick call, measured per vertex; other is its remainder
++// build/submit are sampled inside all, so all >= build + submit must hold; a negative remainder means the
++// sampling was nested (or a counter was reset mid-window), which is reported as 0 instead of a huge bogus value.
+ static void gsFeDiagAdd(uint64_t buildTicks, uint64_t submitTicks, uint64_t allTicks)
+ {
+-    static const double nsPerTick = []
+-    {
+-        const auto t0 = std::chrono::steady_clock::now();
+-        const uint64_t c0 = __rdtsc();
+-        while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
+-        const uint64_t c1 = __rdtsc();
+-        const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+-        return ns > 0.0 ? ns / static_cast<double>(c1 - c0) : 1.0;
+-    }();
++    static const double nsPerTick = gsdiag::nsPerTick();
+     static uint64_t build = 0u, submit = 0u, all = 0u, count = 0u;
+     static auto last = std::chrono::steady_clock::now();
+     build += buildTicks;
+@@ -2157,12 +2148,13 @@ static void gsFeDiagAdd(uint64_t buildTicks, uint64_t submitTicks, uint64_t allT
+     ++count;
+     const auto now = std::chrono::steady_clock::now();
+     const double wall = std::chrono::duration<double>(now - last).count();
+-    if (wall < 5.0)
++    if (wall < gsdiag::kReportSeconds)
+         return;
+     const double n = 1.0 / static_cast<double>(count);
++    const uint64_t otherTicks = all > build + submit ? all - build - submit : 0u;
+     std::fprintf(stderr, "[gs-fe] verts=%.0f/s build=%.1fns submit=%.1fns other=%.1fns total_ms=%.0f per_vertex_ns=%.1f\n",
+                  static_cast<double>(count) / wall, static_cast<double>(build) * n * nsPerTick,
+-                 static_cast<double>(submit) * n * nsPerTick, static_cast<double>(all - build - submit) * n * nsPerTick,
++                 static_cast<double>(submit) * n * nsPerTick, static_cast<double>(otherTicks) * n * nsPerTick,
+                  static_cast<double>(all) * nsPerTick / 1e6, static_cast<double>(all) * n * nsPerTick);
+     build = submit = all = count = 0u;
+     last = now;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 03d43a3..30c33de 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -5,6 +5,7 @@
+ #include "runtime/gs/gs_sw_backend.h"
+ #include "runtime/gs/gs_shared_present.h"
+ #include "gs_inventory.h"
++#include "gs_diag_clock.h"
+ #include "ThreadPriority.h"
+ #include "ThreadNaming.h"
+ 
+@@ -23,8 +24,13 @@ namespace
+     constexpr size_t kMaxPendingChunks = 256u;
+     std::atomic<bool> s_enabledByDefault{false};
+ 
+-    // gow-native-pc (patch 66): Op::Run bookkeeping. Malformed or over-long records are dropped one by one (the chunk
+-    // keeps being parsed); the first one prints a line, the counters are reported with the GS stats.
++    // gow-native-pc (patch 66): Op::Run bookkeeping. Two drop modes, deliberately different:
++    //  * a record that cannot be framed (its length runs past the chunk) ends the chunk -- nothing after it
++    //    can be located -- and is counted once;
++    //  * a framed record whose payload is short or malformed is reported, counted and skipped; the offset has
++    //    already moved past it, so parsing continues with the next record.
++    // The first anomaly prints on stderr; both counters ride along in [gs-pub]. Both must stay at zero on a
++    // healthy trace.
+     std::atomic<uint64_t> g_gsRunDrops{0u};
+     std::atomic<uint64_t> g_gsRunOverflows{0u};
+     void reportRunAnomaly(const char *what)
+@@ -39,15 +45,7 @@ namespace
+     // in the queue path; with PS2X_GS_QUEUE_CHUNKS=8 the backlog is 512 KB of commands.
+     void publishDiagAdd(uint64_t waitTicks, uint64_t publishTicks)
+     {
+-        static const double nsPerTick = []
+-        {
+-            const auto t0 = std::chrono::steady_clock::now();
+-            const uint64_t c0 = __rdtsc();
+-            while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(10)) {}
+-            const uint64_t c1 = __rdtsc();
+-            const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+-            return ns > 0.0 ? ns / static_cast<double>(c1 - c0) : 1.0;
+-        }();
++        static const double nsPerTick = gsdiag::nsPerTick();
+         static uint64_t publishes = 0u, waits = 0u, waitTicksSum = 0u, publishTicksSum = 0u;
+         static auto last = std::chrono::steady_clock::now();
+         ++publishes;
+@@ -59,7 +57,7 @@ namespace
+         publishTicksSum += publishTicks;
+         const auto now = std::chrono::steady_clock::now();
+         const double wall = std::chrono::duration<double>(now - last).count();
+-        if (wall < 5.0)
++        if (wall < gsdiag::kReportSeconds)
+             return;
+         // gow-native-pc (patch 66): the Op::Run drop/overflow counters ride along with the publisher stats, so a
+         // malformed or oversized record is never silent. Both must stay at zero on a healthy trace.
+@@ -309,6 +307,29 @@ void GSThreadedBackend::WorkerLoop()
+ 
+ void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBatch &draw)
+ {
++    // gow-native-pc (patch 89): minimum payload the consumer reads for each op. A record shorter than this
++    // would make readAt<>/memcpy consume the bytes of the following record. The encoders below always write
++    // the full struct, so this only rejects corrupt or truncated data; it never fires on a healthy trace.
++    static constexpr auto minimumPayload = [](Op op) -> size_t
++    {
++        switch (op)
++        {
++        case Op::Mxcsr: return sizeof(uint32_t);
++        case Op::Submit: return sizeof(GSPrimitiveBatch);
++        case Op::LoadClut: return sizeof(LoadClutArgs);
++        case Op::BeginTransfer: return sizeof(GSTransferCommand);
++        case Op::Upload: return 0u; // length itself is the image size
++        case Op::TextureFlush: return 0u;
++        case Op::WriteVram: return sizeof(WriteVramArgs);
++        case Op::Sync: return sizeof(GSSyncReason);
++        case Op::DrawState: return sizeof(GSDrawState);
++        case Op::Vertices: return sizeof(GSPrimitiveBatch);
++        case Op::Run: return 4u; // header; the n-dependent size is checked below
++        case Op::Present: return sizeof(GSPresentationRequest);
++        case Op::Call: return sizeof(const std::function<void()> *);
++        }
++        return 0u;
++    };
+     const uint8_t *data = chunk.data();
+     const size_t size = chunk.size();
+     size_t offset = 0u;
+@@ -325,6 +346,14 @@ void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBa
+         }
+         const uint8_t *payload = data + offset + 5u;
+         offset += 5u + length;
++        // gow-native-pc (patch 89): a record whose payload is shorter than its op requires is skipped. The offset
++        // already moved past it, so the rest of the chunk stays framed.
++        if (length < minimumPayload(op))
++        {
++            reportRunAnomaly("record payload truncated");
++            ++g_gsRunDrops;
++            continue;
++        }
+         switch (op)
+         {
+         case Op::Mxcsr:
+@@ -370,20 +399,14 @@ void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBa
+             break;
+         case Op::Run:
+         {
+-            // gow-native-pc (patch 66): skip only this record when it is malformed (the offset already moved past it).
+-            if (length < 4u)
+-            {
+-                reportRunAnomaly("run record truncated");
+-                ++g_gsRunDrops;
+-                break;
+-            }
++            // gow-native-pc (patch 66): skip only this record when it is malformed; offset is already past it.
+             const uint32_t n = readAt<uint32_t>(payload);
+             if (n == 0u || n > kGsRunMaxPrims ||
+                 length < 4u + static_cast<size_t>(n) + static_cast<size_t>(n) * 3u * sizeof(GSVertex))
+             {
+                 reportRunAnomaly(n > kGsRunMaxPrims ? "run record too long" : "run record malformed");
+                 ++g_gsRunDrops;
+-                break;
++                continue;
+             }
+             const uint8_t *counts = payload + 4u;
+             // gow-native-pc (patch 66): no zero fill here; the encoder already zeroes the vertices a primitive does not

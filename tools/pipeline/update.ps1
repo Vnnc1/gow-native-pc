@@ -92,6 +92,34 @@ try {
         [IO.File]::WriteAllText((Join-Path $root 'data\pgo-stale.txt'), "$Version")
         Log 'runtime patches changed: the game needs a rebuild'
     }
+    # The stack that arrived has to land on the runtime that is installed here. A stack that does not apply leaves a
+    # runtime the next build cannot use, and the failure only showed up much later (in the build stage), with a
+    # runtime that was already half updated.
+    $runtimeDir = Join-Path $root 'engine\runtime'
+    if (Test-Path (Join-Path $runtimeDir 'PS2Recomp')) {
+        [string[]]$patchPaths = @(Get-ChildItem (Join-Path $root 'engine\patches') -Filter *.patch -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
+        [Array]::Sort($patchPaths, [StringComparer]::Ordinal)
+        $index = Join-Path $env:TEMP "gow-update-index-$PID"
+        $oldIndex = $env:GIT_INDEX_FILE
+        $broken = @()
+        try {
+            $env:GIT_INDEX_FILE = $index
+            & git -C $runtimeDir read-tree HEAD 2>$null
+            foreach ($p in $patchPaths) {
+                & git -C $runtimeDir apply --cached --whitespace=nowarn $p 2>$null
+                if ($LASTEXITCODE -ne 0) { $broken += (Split-Path $p -Leaf) }
+            }
+        }
+        finally {
+            $env:GIT_INDEX_FILE = $oldIndex
+            Remove-Item $index -Force -ErrorAction SilentlyContinue
+        }
+        if ($broken.Count) {
+            throw "the updated patch stack does not apply to the installed runtime: $($broken -join ', ')"
+        }
+        Log 'the updated patch stack applies to the installed runtime'
+    }
     Remove-Item -Recurse -Force $unpacked, $zip
     Log "updated to $Version"
 }

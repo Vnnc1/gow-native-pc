@@ -41,6 +41,7 @@ class LinuxPipelineTests(unittest.TestCase):
         self.assertIn('-DPS2X_CPU_ARCH=x86-64-v2', command)
         self.assertIn('-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG', command)
         self.assertIn('-DPS2X_ENABLE_FFMPEG=OFF', command)
+        self.assertIn(f'-DGOW_BRAND_IMAGE={work.root / "games" / args.game / work.profile["runtime"]["branding_image"]}', command)
         text = ' '.join(map(str, command))
         self.assertNotIn('-static', text)
         self.assertNotIn('profile-instr-use', text)
@@ -76,6 +77,9 @@ class LinuxPipelineTests(unittest.TestCase):
             (root / 'engine/runtime.toml').write_text(f'repository="unused"\ncommit="{commit}"\n')
             for name, before, after in [('29-fix.patch', 'one', 'two'), ('29a-next.patch', 'two', 'three')]:
                 (patches / name).write_text(f'diff --git a/code.txt b/code.txt\n--- a/code.txt\n+++ b/code.txt\n@@ -1 +1 @@\n-{before}\n+{after}\n', encoding='utf-8')
+            # Retired patches remain as notes in the ordinal chain (for example patch 85).
+            (patches / '29-note.patch').write_text('Already included by earlier patches.\n', encoding='utf-8')
+            (patches / '30-empty.patch').write_text('', encoding='utf-8')
             command('apply', str(patches / '29-fix.patch'))
             pipeline.fetch(root)
             self.assertEqual(source.read_text(), 'three\n')
@@ -85,6 +89,14 @@ class LinuxPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'differs from the patch chain'):
                 pipeline.fetch(root)
             self.assertEqual(source.read_text(), 'local work\n')
+            source.write_text('three\n', encoding='utf-8')
+            (patches / '31-invalid.patch').write_text(
+                'diff --git a/code.txt b/code.txt\n--- a/code.txt\n+++ b/code.txt\n'
+                '@@ -1 +1 @@\n-not the current source\n+four\n', encoding='utf-8')
+            with self.assertRaises(subprocess.CalledProcessError):
+                pipeline.fetch(root)
+            self.assertEqual(source.read_text(), 'three\n')
+            self.assertEqual(command('diff', '--cached'), '')
 
     @unittest.skipUnless(os.name == 'posix', 'requires flock')
     def test_lock_excludes_second_writer_and_releases(self):

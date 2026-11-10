@@ -1,0 +1,408 @@
+USA native save slots: read-only card index and native thumbnails; queue loads on the EE thread through normal frontend teardown/load, never replace an active card.
+
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -4,6 +4,7 @@
+ #include "runtime/gow_test_time.h"
+ #include "runtime/gow_logic_present.h"
+ #include "runtime/gow_save_backup.h"
++#include "runtime/gow_native_load.h"
+ #include "runtime/gow_prompt_input.h"
+ extern std::atomic<uint64_t> g_gowAudioFramesPlayed, g_gowAudioFramesMissing;
+ #include "game_overrides.h"
+@@ -25,6 +26,10 @@
+ void sub_0023B6A0_0x23b6a0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+ void sub_00149340_0x149340(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+ void sub_0022E800_0x22e800(uint8_t *, R5900Context *, PS2Runtime *);
++void sub_0021F3C8_0x21f3c8(uint8_t *, R5900Context *, PS2Runtime *);
++void sub_0021D868_0x21d868(uint8_t *, R5900Context *, PS2Runtime *);
++void sub_0021EBF8_0x21ebf8(uint8_t *, R5900Context *, PS2Runtime *);
++void sub_0022F5E0_0x22f5e0(uint8_t *, R5900Context *, PS2Runtime *);
+ void gowDumpBranchRing(const char *why);
+ #include <map>
+ #include <unordered_map>
+@@ -50,6 +55,46 @@
+     uint32_t readGuest32(const uint8_t *rdram, uint32_t addr);
+     void writeGuest32(uint8_t *rdram, uint32_t addr, uint32_t value);
+     void gowDiagPrimPoll(uint8_t *rdram, double seconds);
++
++    int nativeLoadSlot=-1;
++    void nativeLoadGameplay(uint8_t *r, R5900Context *c, PS2Runtime *rt) {
++        if (nativeLoadSlot<0 && c->pc==0x21F3C8u && readGuest32(r,0x29E560)==11 &&
++            readGuest32(r,0x29E574)==0 && gow_native_load::request.load()>0) {
++            const uint32_t ui=readGuest32(r,0x29CB94)&0x1ffffff;
++            if(ui && ui<0x1fff000) {
++                nativeLoadSlot=gow_native_load::request.exchange(0)-1;
++                writeGuest32(r,ui+0x1a8,0);
++                std::fprintf(stderr,"[native-load] quit gameplay to native frontend\n");
++                c->pc=0x21D868;sub_0021D868_0x21d868(r,c,rt);return;
++            }
++        }
++        sub_0021F3C8_0x21f3c8(r,c,rt);
++    }
++    void nativeLoadFrontend(uint8_t *r,R5900Context *c,PS2Runtime *rt) {
++        if(nativeLoadSlot<0 && c->pc==0x21EBF8 && readGuest32(r,0x29E560)==3)
++            nativeLoadSlot=gow_native_load::request.exchange(0)-1;
++        if(nativeLoadSlot>=0 && c->pc==0x21EBF8 && readGuest32(r,0x29E560)==3) {
++            uint32_t ui=readGuest32(r,0x29CB94)&0x1ffffff;
++            if(ui && ui<0x1fff000) {writeGuest32(r,ui+0x278,2);writeGuest32(r,ui+0x27c,1);}
++        }
++        sub_0021EBF8_0x21ebf8(r,c,rt);
++    }
++    void nativeLoadUpdate(uint8_t *r,R5900Context *c,PS2Runtime *rt) {
++        if(nativeLoadSlot>=0 && c->pc==0x22F5E0) {
++            uint32_t ui=readGuest32(r,0x29CB94)&0x1ffffff;
++            if(ui && ui<0x1fff000 && readGuest32(r,0x2A12B0)==8 &&
++               readGuest32(r,0x2A1290)==0xffffffff) {
++                const uint32_t record=0x35BE80+nativeLoadSlot*16;
++                const bool valid=readGuest32(r,0x2A12A4)==0 && readGuest32(r,record)<=4 && readGuest32(r,record+4)==0xcafebad1;
++                writeGuest32(r,0x2A1290,valid?nativeLoadSlot+1:0);
++                std::fprintf(stderr,"[native-load] selected slot %d\n",nativeLoadSlot);
++            }
++        }
++        sub_0022F5E0_0x22f5e0(r,c,rt);
++        if(nativeLoadSlot>=0 && c->pc==0x21EDE8 && GPR_U32(c,2)!=0) {
++            std::fprintf(stderr,"[native-load] result %d\n",GPR_U32(c,2));gow_native_load::status.store(GPR_U32(c,2)==1?2:-1);nativeLoadSlot=-1;
++        }
++    }
+ 
+     // USA altar transaction: the second write commits the slot index after the payload.
+     // Keep the original async operation and resume behavior; never snapshot a pending/error result.
+@@ -2380,6 +2425,11 @@
+         runtime.replaceFunction(0x002998C0u, gowTimerSystemNoop); // InitTimer
+         runtime.replaceFunction(0x00299A20u, gowTimerSystemNoop); // StartTimerSystemTime
+         runtime.replaceFunction(0x0022E800u, gowAltarSaveWrite);
++        nativeLoadSlot=-1;gow_native_load::request.store(0);gow_native_load::status.store(0);
++        gow_native_load::supported.store(true);
++        runtime.replaceFunction(0x21F3C8,nativeLoadGameplay);
++        runtime.replaceFunction(0x21EBF8,nativeLoadFrontend);
++        runtime.replaceFunction(0x22F5E0,nativeLoadUpdate);
+         runtime.replaceFunction(0x0027B7E8u, gowPad2Init);
+         runtime.replaceFunction(0x0027B828u, gowPad2Init);
+         runtime.replaceFunction(0x0027B890u, gowPad2CreateSocket);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -29,6 +29,7 @@
+ #include "raylib.h"
+ #include "runtime/gow_ajustes_vivo.h"
+ #include "runtime/gow_save_backup.h"
++#include "runtime/gow_native_load.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -627,8 +628,32 @@
+             return out;
+         }(); return mods;
+     }
++    struct NativeSaveRow { int slot; std::string name,detail; Texture2D image{}; };
++    std::vector<NativeSaveRow> nativeRows;
++    int nativeConfirm=-1;
++    void refreshNativeSaves() {
++        for(auto &row:nativeRows)if(row.image.id)UnloadTexture(row.image);
++        nativeRows.clear();nativeConfirm=-1;
++        for(const auto &slot:gow_native_load::slots()) {
++            NativeSaveRow row;row.slot=slot.slot;
++            auto prefix=gow_native_load::assets()/std::to_string(slot.location);
++            row.name=gow_native_load::text(prefix.string()+".name");
++            if(row.name.empty())row.name="Slot "+std::to_string(slot.slot+1)+" - "+slot.zone;
++            char detail[128];const auto date=gow_native_saves::localTime(slot.time);
++            std::snprintf(detail,sizeof(detail),"Slot %d - %s - %dh %02dm",slot.slot+1,date.c_str(),int(slot.seconds/3600),int(slot.seconds/60)%60);
++            row.detail=detail;
++            auto path=prefix.string()+".png";std::error_code error;
++            if(std::filesystem::file_size(path,error)<=1024*1024 && !error) {
++                Image image=LoadImage(path.c_str());
++                if(image.width==128 && image.height==80)row.image=LoadTextureFromImage(image);
++                if(image.data)UnloadImage(image);
++            }
++            nativeRows.push_back(std::move(row));
++        }
++    }
+     int filas(int p) {
+         if(p==PControles) return (g_menu.padBindings?22:32)+2;
++        if(p==PSave) return int(nativeRows.size())+1;
+         if(p==PAudio) return 2;
+         if(p==PMods) return std::max(1,int(activeMods().size()));
+         return p==PGraficos?int(kNumGraficos):p==PTrucos?int(kNumTrucos)+1:1;
+@@ -727,6 +752,10 @@
+             return {textos().nombre[i], textos().descripcion[i], Interruptor, g_activo[i].load(std::memory_order_relaxed), {}, true};
+         if (pestana == PSave)
+         {
++            if(i<int(nativeRows.size())) {
++                const auto &row=nativeRows[i];
++                return {row.name.c_str(),row.detail,Accion,false,tr("Carregar","Load"),gow_native_load::supported.load() && gow_native_load::status.load()!=1};
++            }
+             const bool hay = gow_vivo::copiarSave.load(std::memory_order_relaxed) != nullptr;
+             return {m.saveNombre, !g_menu.saveEstado.empty() ? g_menu.saveEstado : std::string(hay ? m.saveDesc : m.saveNoDisponible),
+                     Accion, false, {}, hay};
+@@ -794,6 +823,7 @@
+         {
+             if (dir != 0)
+                 return;
++            if(i<int(nativeRows.size())) {nativeConfirm=i;return;}
+             if (auto copiar = gow_vivo::copiarSave.load(std::memory_order_relaxed))
+                 g_menu.saveEstado = copiar();
+             return;
+@@ -851,6 +881,7 @@
+     void abrir(int pestana)
+     {
+         gow_vivo::cargar();
++        refreshNativeSaves();g_menu.elegido[PSave]=0;
+         gow_menu_live::loadAudio();
+         if (g_menu.fps < 0)
+         {
+@@ -872,6 +903,7 @@
+ 
+     void cerrar(bool escCierraJuego, int tecla)
+     {
++        nativeConfirm=-1;
+         gow_menu_live::pauseRequested.store(false, std::memory_order_release);
+         g_menuAbierto.store(false, std::memory_order_release);
+         g_menu.teclaCierre = tecla;
+@@ -1003,6 +1035,25 @@
+     int pad=gowPromptGamepad();
+     if(pad<0 || !IsGamepadAvailable(pad)) {pad=-1;for(int i=0;i<4;++i)if(IsGamepadAvailable(i)){pad=i;break;}}
+     const auto pressed=[&](int b){return pad>=0 && IsGamepadButtonPressed(pad,b);};
++    static double nextLoadPoll=0;
++    if(GetTime()>=nextLoadPoll) {
++        nextLoadPoll=GetTime()+.5;
++        if(gow_native_load::poll() && g_menuAbierto.load()){cerrar(escCierraJuego,0);return;}
++    }
++    if(nativeConfirm>=0 && g_menuAbierto.load()) {
++        auto g=geometria();auto mouse=GetMousePosition();
++        Rectangle yes{g.x+g.w*.52f,g.y+g.h*.5f+35*g.escala,g.w*.42f,40*g.escala};
++        Rectangle no{g.x+g.w*.06f,yes.y,g.w*.42f,yes.height};
++        const bool click=IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
++        if(IsKeyPressed(KEY_ESCAPE)||pressed(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)||(click&&CheckCollisionPointRec(mouse,no)))nativeConfirm=-1;
++        else if(IsKeyPressed(KEY_ENTER)||pressed(GAMEPAD_BUTTON_RIGHT_FACE_DOWN)||(click&&CheckCollisionPointRec(mouse,yes))) {
++            const int index=nativeConfirm;nativeConfirm=-1;
++            if(index<int(nativeRows.size()) && gow_native_load::queue(nativeRows[index].slot))cerrar(escCierraJuego,0);
++            else g_menu.saveEstado=tr("Não foi possível carregar este slot.","This slot could not be loaded.");
++        }
++        return;
++    }
++
+     bool chord=false;
+     for(int i=0;i<4;++i) if(IsGamepadAvailable(i))
+         chord|=IsGamepadButtonDown(i,GAMEPAD_BUTTON_MIDDLE_LEFT)&&IsGamepadButtonDown(i,GAMEPAD_BUTTON_MIDDLE_RIGHT);
+@@ -1126,6 +1177,14 @@
+ void gowTrucosMenuDibujar()
+ {
+     drawAccessibilityNotice();
++    static int loadStatus=0;static double loadNotice=0;
++    const int currentLoadStatus=gow_native_load::status.load();
++    if(currentLoadStatus!=loadStatus){loadStatus=currentLoadStatus;loadNotice=GetTime()+7;}
++    if(loadStatus && (loadStatus==1 || GetTime()<loadNotice)) {
++        const char *message=loadStatus==1?tr("Carregando save...","Loading save..."):loadStatus==2?tr("Save carregado.","Save loaded."):tr("Não foi possível carregar o save.","The save could not be loaded.");
++        DrawRectangle(16,16,330,42,Color{20,22,27,240});
++        texto(fuentes().normal,message,28,27,18,kTexto);
++    }
+     static int backupNotice = 0;
+     static double backupNoticeUntil = 0;
+     if (const int notice = gow_saves::notification.exchange(0, std::memory_order_acquire))
+@@ -1204,8 +1263,11 @@
+             DrawRectangleRec(Rectangle{g.x + 1.0f, fy, std::max(3.0f, 4.0f * s), g.fila}, kOro);
+         }
+         const float controlW = fl.tipo == Interruptor ? interruptorW : valorW;
+-        const float textoX = g.x + margen;
+-        const float textoMax = g.w - margen * 2.0f - controlW - 20.0f * s;
++        const bool preview=pestana==PSave && i<int(nativeRows.size()) && nativeRows[i].image.id;
++        const float previewW=preview?90*s:0;
++        if(preview)DrawTexturePro(nativeRows[i].image,{0,0,128,80},{g.x+margen,fy+8*s,80*s,50*s},{},0,WHITE);
++        const float textoX = g.x + margen+previewW;
++        const float textoMax = g.w - margen * 2.0f - controlW - 20.0f * s-previewW;
+         const float bloque = tamNombre + 6.0f * s + tamDesc;
+         const float ty = fy + (g.fila - bloque) * 0.5f;
+         const Color colorNombre = !fl.habilitada ? kTextoTenue : fl.encendido ? kOroClaro : (sel ? kTexto : kTextoSuave);
+@@ -1254,4 +1316,18 @@
+         texto(f.normal,tr("Esc cancela • Solte os botões antes de atribuir","Esc cancels • Release held inputs before binding"),box.x+26*s,box.y+67*s,17*s,kTextoSuave);
+         texto(f.normal,g_menu.bindingStatus.c_str(),box.x+26*s,box.y+104*s,15*s,kOroClaro);
+     }
++    if(nativeConfirm>=0) {
++        DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),Color{0,0,0,215});
++        Rectangle box{g.x,g.y+g.h*.5f-70*s,g.w,160*s};
++        DrawRectangleRounded(box,.04f,8,Color{28,31,38,255});
++        texto(f.negrita,tr("Carregar save?","Load save?"),box.x+20*s,box.y+15*s,22*s,kTexto);
++        const auto warning=ajustar(f.normal,tr("Progresso desde o último altar será perdido.","Progress since the last altar will be lost."),16*s,box.width-40*s);
++        texto(f.normal,warning.c_str(),box.x+20*s,box.y+52*s,16*s,kTextoSuave);
++        Rectangle yes{g.x+g.w*.52f,g.y+g.h*.5f+35*s,g.w*.42f,40*s};
++        Rectangle no{g.x+g.w*.06f,yes.y,g.w*.42f,yes.height};
++        DrawRectangleRec(no,kBorde);DrawRectangleRec(yes,kOro);
++        texto(f.normal,tr("Cancelar - Esc / B","Cancel - Esc / B"),no.x+10*s,no.y+10*s,16*s,kTexto);
++        texto(f.normal,tr("Carregar - Enter / A","Load - Enter / A"),yes.x+10*s,yes.y+10*s,16*s,kTexto);
++    }
++
+ }
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/native_save_slots.h b/PS2Recomp/ps2xRuntime/include/runtime/native_save_slots.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/native_save_slots.h
+@@ -0,0 +1,121 @@
++#pragma once
++
++// Read-only PS2 filesystem/index reader. Never replace a card owned by the IOP.
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <ctime>
++#include <cstdio>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <set>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace gow_native_saves {
++using Bytes = std::vector<uint8_t>;
++inline uint32_t word(const Bytes &b, size_t p, size_t n=4) {
++    if(p>b.size() || n>b.size()-p) throw std::runtime_error("Truncated card data");
++    uint32_t v=0;for(size_t i=0;i<n;++i)v|=uint32_t(b[p+i])<<(8*i);return v;
++}
++struct Entry {uint32_t mode=0,size=0,cluster=0;std::array<uint8_t,8> time{};};
++struct Slot {int slot=0,file=0,location=0,difficulty=0;float seconds=0;std::array<uint8_t,8> time{};std::string zone;};
++inline std::string localTime(const std::array<uint8_t,8> &t) {
++    const int year=t[6]+(int(t[7])<<8);
++    if(year<1970 || year>2099 || !t[5] || t[5]>12 || !t[4] || t[4]>31 || t[3]>23 || t[2]>59 || t[1]>59)return {};
++    std::tm clock{};clock.tm_year=year-1900;clock.tm_mon=t[5]-1;clock.tm_mday=t[4];
++    clock.tm_hour=t[3];clock.tm_min=t[2];clock.tm_sec=t[1];
++#ifdef _WIN32
++    auto utc=_mkgmtime(&clock);
++#else
++    auto utc=timegm(&clock);
++#endif
++    if(utc<0 || clock.tm_mday!=t[4] || clock.tm_mon!=t[5]-1)return {};
++    utc-=9*3600; // PS2 memory-card timestamps use the console RTC's Japan time.
++    std::tm local{};
++#ifdef _WIN32
++    if(localtime_s(&local,&utc))return {};
++#else
++    if(!localtime_r(&utc,&local))return {};
++#endif
++    char formatted[32];if(!std::strftime(formatted,sizeof(formatted),"%d/%m/%Y %H:%M:%S",&local))return {};
++    return formatted;
++}
++struct Card {
++    Bytes data;uint32_t base=0,end=0;std::vector<uint32_t> fat;
++    explicit Card(const Bytes &raw) {
++        if(raw.size()==8650752) {
++            data.reserve(8388608);
++            for(size_t p=0;p<raw.size();p+=528)data.insert(data.end(),raw.begin()+p,raw.begin()+p+512);
++        } else data=raw;
++        if(data.size()!=8388608 || std::memcmp(data.data(),"Sony PS2 Memory Card Format ",28)!=0 ||
++           word(data,40,2)!=512 || word(data,42,2)!=2)throw std::runtime_error("Unsupported memory card");
++        base=word(data,52);end=word(data,56);
++        if(!base || base>=8192 || !end || end>8192-base)throw std::runtime_error("Invalid allocation bounds");
++        uint32_t indirect=word(data,80);
++        if(!indirect || indirect>=base)throw std::runtime_error("Invalid indirect FAT");
++        for(uint32_t i=0;i<(end+255)/256;++i) {
++            uint32_t block=word(data,indirect*1024+i*4);
++            if(!block || block>=base)throw std::runtime_error("Invalid FAT");fat.push_back(block);
++        }
++    }
++    Bytes chain(uint32_t cluster,uint32_t size) const {
++        if(size>data.size())throw std::runtime_error("Invalid file size");
++        Bytes out;out.reserve(size);std::set<uint32_t> seen;
++        while(out.size()<size) {
++            if(cluster>=end || !seen.insert(cluster).second)throw std::runtime_error("Invalid allocation chain");
++            uint32_t next=word(data,fat[cluster/256]*1024+(cluster%256)*4);
++            if(!(next&0x80000000))throw std::runtime_error("Unallocated cluster");
++            size_t p=(base+cluster)*1024,n=std::min<size_t>(1024,size-out.size());
++            out.insert(out.end(),data.begin()+p,data.begin()+p+n);cluster=next&0x7fffffff;
++        }return out;
++    }
++    std::map<std::string,Entry> directory(uint32_t cluster,uint32_t count) const {
++        if(!count || count>1024)throw std::runtime_error("Invalid directory length");
++        Bytes raw=chain(cluster,count*512);std::map<std::string,Entry> result;
++        for(size_t p=0;p<raw.size();p+=512) {
++            Entry e;e.mode=word(raw,p,2);if(!(e.mode&0x8000))continue;
++            e.size=word(raw,p+4);e.cluster=word(raw,p+16);
++            std::copy_n(raw.begin()+p+24,8,e.time.begin());
++            std::string name;for(size_t i=0;i<32 && raw[p+64+i];++i)name+=char(raw[p+64+i]);
++            if(!result.emplace(name,e).second)throw std::runtime_error("Duplicate directory entry");
++        }return result;
++    }
++    std::vector<Slot> entries(const std::string &name) const {
++        uint32_t root=word(data,60);auto entries=directory(root,word(chain(root,512),4));
++        auto game=entries.find(name);if(game==entries.end())return {};
++        if(!(game->second.mode&0x20))throw std::runtime_error("Invalid game directory");
++        auto files=directory(game->second.cluster,game->second.size);auto idx=files.find(name);
++        if(idx==files.end() || idx->second.size!=68)throw std::runtime_error("Invalid save index");
++        Bytes index=chain(idx->second.cluster,68);std::vector<Slot> result;std::set<int> used;
++        for(int i=0;i<4;++i) {
++            Slot s;s.slot=i;s.file=int32_t(word(index,i*16));
++            if(s.file<0 || word(index,i*16+4)!=0xcafebad1)continue;
++            uint32_t bits=word(index,i*16+8);std::memcpy(&s.seconds,&bits,4);
++            s.location=int16_t(word(index,i*16+12,2));s.difficulty=index[i*16+14];
++            if(s.file>4 || !used.insert(s.file).second || !std::isfinite(s.seconds) || s.seconds<0 || s.seconds>1e9 || s.location<=0 || s.location>99)
++                throw std::runtime_error("Invalid save index record");
++            auto payload=files.find("data"+std::to_string(s.file)+".bin");
++            if(payload==files.end() || !(payload->second.mode&0x10) || payload->second.size!=81920)
++                throw std::runtime_error("Missing save payload");
++            Bytes bytes=chain(payload->second.cluster,payload->second.size);
++            if(word(bytes,0)!=0xcafebad1)throw std::runtime_error("Invalid save payload");
++            s.time=payload->second.time;
++            for(int j=8;j<16 && bytes[j];++j)s.zone+=char(bytes[j]);
++            result.push_back(s);
++        }return result;
++    }
++};
++inline std::vector<Slot> read(const std::filesystem::path &path,const std::string &directory) {
++    std::ifstream file(path,std::ios::binary|std::ios::ate);
++    if(!file)throw std::runtime_error("Cannot open memory card");
++    auto size=file.tellg();if(size!=8388608 && size!=8650752)throw std::runtime_error("Unsupported memory card size");
++    Bytes data(static_cast<size_t>(size));file.seekg(0);
++    if(!file.read(reinterpret_cast<char*>(data.data()),data.size()))throw std::runtime_error("Cannot read memory card");
++    return Card(data).entries(directory);
++}
++}
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_native_load.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_native_load.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_native_load.h
+@@ -0,0 +1,41 @@
++#pragma once
++#include "native_save_slots.h"
++#include <atomic>
++#include <cstdlib>
++namespace gow_native_load {
++inline std::atomic<int> request{0},status{0};
++inline std::atomic<bool> supported{false};
++inline std::filesystem::path assets() {
++    const char *p=std::getenv("GOW_SAVE_ASSETS");return p?std::filesystem::u8path(p):std::filesystem::path{};
++}
++inline std::string text(const std::filesystem::path &path) {
++    std::ifstream f(path,std::ios::binary|std::ios::ate);if(!f)return {};
++    auto n=f.tellg();if(n<0 || n>512)return {};std::string s(size_t(n),'\0');f.seekg(0);
++    if(!f.read(s.data(),s.size()))return {};return s;
++}
++inline std::vector<gow_native_saves::Slot> slots() {
++    const char *card=std::getenv("GOW_MC0");if(!card || assets().empty())return {};
++    const auto directory=text(assets()/"directory");
++    if(directory.empty() || directory.size()>32 || directory.find_first_of("/\\\r\n")!=std::string::npos)return {};
++    try{return gow_native_saves::read(std::filesystem::u8path(card),directory);}catch(...){return {};}
++}
++inline bool queue(int slot) {
++    if(!supported.load() || slot<0 || slot>3 || status.load()==1)return false;
++    const auto entries=slots();bool found=false;for(const auto &entry:entries)found|=entry.slot==slot;
++    if(!found)return false;
++    const int previous=status.exchange(1);if(previous==1)return false;
++    int empty=0;if(!request.compare_exchange_strong(empty,slot+1)){status.store(previous);return false;}
++    return true;
++}
++inline bool poll() {
++    if(!supported.load())return false;
++    const char *dir=std::getenv("GOW_MENU_SETTINGS");if(!dir || !*dir)return false;
++    auto file=std::filesystem::u8path(dir)/"load.request";const auto s=text(file);
++    if(s.empty())return false;
++    std::error_code error;std::filesystem::remove(file,error);if(error)return false;
++    if(s.size()!=2 || s[0]<'0' || s[0]>'3' || s[1]!='\n')return false;
++    const bool accepted=queue(s[0]-'0');
++    if(!accepted && status.load()!=1)status.store(-1);
++    return accepted;
++}
++}

@@ -27,7 +27,7 @@ try {
         GOW_PAD_GUION=$profile.optimize.pad_script; GOW_PAD_TEST_NO_CAPTURE='1';
         GOW_MC0=(Join-Path $output 'card.ps2'); GOW_VU1_SIN_COMPILAR='1'; GOW_VU1_CAPTURE_MISSES='0';
         PS2X_GS_HW='1'; PS2X_GS_WORKER='1'; GOW_GS_FINISH_ASINCRONO='1'; PS2X_GS_HW_SCALE='1';
-        PS2X_GS_ESCALA='1'; PS2X_GS_ESCALA_DINAMICA='0'; TOBIICHI_ANCHO='1280'; TOBIICHI_ALTO='720'}
+        TOBIICHI_ANCHO='1280'; TOBIICHI_ALTO='720'}
     $text = "GOW_NATIVE_BOOT_V1`n$elf`n" + (($settings.Keys | Sort-Object | ForEach-Object { "$_=$($settings[$_])" }) -join "`n") + "`n"
     [IO.File]::WriteAllText($boot, $text, (New-Object Text.UTF8Encoding($false)))
     $process = Start-Process -FilePath $runner -WorkingDirectory $output -WindowStyle Hidden -PassThru

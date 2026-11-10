@@ -1,0 +1,190 @@
+Experimental USA high logic rate; original 60 Hz remains the default.
+src/game/gow_logic_rate.cpp (GPL-3.0).
+GOW_EXPERIMENTAL_LOGIC_FPS=120|240 changes the normal frame wait and measured
+simulation step. Movies, fixed steps and non-frame waits retain the original path.
+High-rate presentation follows game flips; VBlank/audio clocks remain unchanged.
+Invalid values use 60. No launcher default or regional registration changes.
+Synthetic tests cover timestep math, fallbacks, scheduler yield/late frames and
+presentation tokens; results/limits: docs/research/experimental-logic-rate.md.
+Integration: fix-chore patch 73-experimental-logic-rate, regenerated on the PR 26 chain (same change, new context).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h b/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h
+index 9d94d8a..a2a1277 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -293,6 +293,8 @@ public:
+     // checkpoints of `cycles` each at once, as many as EeCheckpointClock::advanceQuiet would let through one by one
+     // (all below quietCycles, no flag set). Same clock, timer and IOP state as that many fast-path checkpoints.
+     uint64_t advanceQuietRepeated(uint32_t cycles, uint64_t maxCount) noexcept;
++    // EE executor only: snapshots may lag behind the current frame's pacing deadline.
++    [[nodiscard]] uint64_t currentEeCycle() const noexcept { return m_clock.eeCycle; }
+     [[nodiscard]] bool isExecutingGuest() const noexcept;
+ 
+     // Kernel object API. All calls except postEvent/requestStop execute on the
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_logic_present.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_logic_present.h
+new file mode 100644
+index 0000000..8832715
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_logic_present.h
+@@ -0,0 +1,18 @@
++#pragma once
++#include <atomic>
++#include <cstdint>
++
++// A game flip can precede the next 60 Hz VBlank in the experimental high-rate mode.
++namespace gow_logic_present
++{
++    inline std::atomic<bool> enabled{false};
++    inline std::atomic<uint64_t> flips{0};
++    inline void noteFlip()
++    {
++        if (enabled.load(std::memory_order_relaxed)) flips.fetch_add(1, std::memory_order_release);
++    }
++    inline uint64_t token(uint64_t vblank)
++    {
++        return enabled.load(std::memory_order_relaxed) ? flips.load(std::memory_order_acquire) : vblank;
++    }
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+index c43f760..0fffee7 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+@@ -3,6 +3,7 @@
+ #include "rlgl.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gow_ajustes_vivo.h"
++#include "runtime/gow_logic_present.h"
+ #include "runtime/ps2_perf.h"
+ #include "ps2_log.h"
+ 
+@@ -209,6 +210,7 @@ void GSHostPresentation::blankFallback()
+ 
+ GSHostPresentation::View GSHostPresentation::prepare(GS &gs, uint64_t vsyncTick)
+ {
++    vsyncTick = gow_logic_present::token(vsyncTick);
+     createFallback();
+     const bool shared = gs.usesSharedPresentation() && GSSharedPresent::Active();
+     if (!modeKnown || shared != sharedMode)
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+index ad26012..136c728 100644
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -2,6 +2,7 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_perf.h"
+ #include "runtime/gow_test_time.h"
++#include "runtime/gow_logic_present.h"
+ extern std::atomic<uint64_t> g_gowAudioFramesPlayed, g_gowAudioFramesMissing;
+ #include "game_overrides.h"
+ #include "ps2_runtime.h"
+@@ -1994,6 +1995,7 @@ namespace
+             SET_GPR_U32(ctx, 31, ra);
+         }
+         ps2_gs_display::setDisplay(runtime->memory(), state);
++        gow_logic_present::noteFlip();
+         SET_GPR_U64(ctx, 2, 0u); // the original returned stack garbage; its only caller (0x1837B8 <- 0x17A128) ignores it
+         ctx->pc = GPR_U32(ctx, 31);
+     }
+@@ -2102,8 +2104,102 @@ namespace
+         sub_0017A2A0_0x17a2a0(rdram, ctx, runtime);
+     }
+ 
++    // Experimental USA logic-rate adapter.
++    // gow_logic_rate.cpp (GPL-3.0). Keep VBlank/audio/movie clocks unchanged.
++    // BEGIN experimental logic rate (also compiled by the isolated regression test).
++    int g_logicFps = 60;
++    uint64_t g_logicNextSlot = 0;
++
++    int gowParseLogicFps(const char *value)
++    {
++        if (!value || !*value || std::strcmp(value, "60") == 0) return 60;
++        if (std::strcmp(value, "120") == 0) return 120;
++        if (std::strcmp(value, "240") == 0) return 240;
++        std::fprintf(stderr, "[gow-logic-config] invalid rate; using original 60 Hz\n");
++        return 60;
++    }
++
++    float gowLogicFloat(const uint8_t *rdram, uint32_t address)
++    {
++        float value;
++        std::memcpy(&value, rdram + address, sizeof(value));
++        return value;
++    }
++
++    bool gowLogicOriginalStep(const uint8_t *rdram)
++    {
++        const uint32_t movie = readGuest32(rdram, 0x0029C838u);
++        return readGuest32(rdram, 0x0029C65Cu) == 0u || readGuest32(rdram, 0x0029C660u) != 0u ||
++               readGuest32(rdram, 0x0029C654u) != 1u || (movie >= 3u && movie <= 11u);
++    }
++
++    void gowLogicTimeStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        const bool entry = ctx->pc == 0x0017D778u;
++        const bool measured = readGuest32(rdram, 0x0029C65Cu) != 0u;
++        const bool once = readGuest32(rdram, 0x0029C660u) != 0u;
++        const uint32_t ra = GPR_U32(ctx, 31);
++        sub_0017D778_0x17d778(rdram, ctx, runtime);
++        // The current generated leaf has no checkpoints. Never patch an incomplete return.
++        if (!entry || ctx->pc != ra || g_logicFps <= 60 || !measured || once || gowLogicOriginalStep(rdram))
++            return;
++        const uint32_t ticks = readGuest32(rdram, 0x0029C670u);
++        const float perField = readGuest32(rdram, 0x00331078u) == 3u ? 115.2f : 96.1f;
++        const float lower = 6000.0f / static_cast<float>(g_logicFps);
++        const float hundredths = std::min(std::max(static_cast<float>(ticks) / perField, lower), 400.0f);
++        const float delta = (hundredths / 100.0f) / 60.0f;
++        const float scaled = delta * gowLogicFloat(rdram, 0x0029C644u) * gowLogicFloat(rdram, 0x0029C648u);
++        std::memcpy(rdram + 0x0029C64Cu, &delta, sizeof(delta));
++        std::memcpy(rdram + 0x0029C658u, &scaled, sizeof(scaled));
++    }
++
++    void gowLogicFrameWait(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        const uint32_t ra = GPR_U32(ctx, 31);
++        const bool frameEnd = ctx->pc == 0x0017A1D0u && ra == 0x0017A36Cu;
++        if (g_logicFps <= 60 || !frameEnd || (ctx->cop0_status & 0x10000u) == 0u || gowLogicOriginalStep(rdram))
++        {
++            if (frameEnd)
++            {
++                if (g_logicNextSlot != 0u) writeGuest32(rdram, 0x0029C7D4u, 0u);
++                g_logicNextSlot = 0u;
++            }
++            sub_0017A1D0_0x17a1d0(rdram, ctx, runtime);
++            return;
++        }
++        const uint64_t period = EeScheduler::kEeClockHz / static_cast<uint64_t>(g_logicFps);
++        const uint64_t now = runtime->eeScheduler().currentEeCycle();
++        writeGuest32(rdram, 0x0029C7D4u, 0u);
++        ctx->pc = ra;
++        // Rebase late frames; do not issue catch-up bursts to inflate the counter.
++        if (g_logicNextSlot == 0u || now >= g_logicNextSlot)
++        {
++            g_logicNextSlot = now + period;
++            return;
++        }
++        const uint64_t wait = g_logicNextSlot - now;
++        g_logicNextSlot += period;
++        runtime->eeScheduler().delayCurrent(wait);
++    }
++
++    void gowInstallLogicRate(PS2Runtime &runtime)
++    {
++        g_logicFps = gowParseLogicFps(std::getenv("GOW_EXPERIMENTAL_LOGIC_FPS"));
++        g_logicNextSlot = 0u;
++        gow_logic_present::flips.store(0, std::memory_order_relaxed);
++        gow_logic_present::enabled.store(g_logicFps > 60, std::memory_order_relaxed);
++        if (g_logicFps > 60)
++        {
++            runtime.replaceFunction(0x0017D778u, gowLogicTimeStep);
++            runtime.replaceFunction(0x0017A1D0u, gowLogicFrameWait);
++        }
++        std::fprintf(stderr, "[gow-logic-config] fps=%d experimental=%d vblank=60\n", g_logicFps, g_logicFps > 60);
++    }
++    // END experimental logic rate.
++
+     void applyGowOverrides(PS2Runtime &runtime)
+     {
++        gowInstallLogicRate(runtime);
+         const char *finishWait = std::getenv("GOW_FINISH_COUNTDOWN");
+         // Preserve the older, explicitly selected real-time sleep experiment.
+         const char *sleepWait = std::getenv("GOW_ESPERA_EE");

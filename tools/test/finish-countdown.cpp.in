@@ -1,0 +1,69 @@
+#include "runtime/ee_checkpoint_clock.h"
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+struct R5900Context {
+    uint64_t lo[32]{}, hi[32]{};
+    uint32_t pc = 0;
+};
+#define GPR_U32(ctx, i) static_cast<uint32_t>((ctx)->lo[i])
+#define SET_GPR_S32(ctx, i, v) ((ctx)->lo[i] = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v))))
+struct EeScheduler {
+    EeCheckpointClock m_clock;
+    uint64_t advanceQuietRepeated(uint32_t, uint64_t) noexcept;
+};
+@BATCH@
+struct PS2Runtime {
+    EeScheduler scheduler;
+    unsigned full = 0, reference = 0;
+    EeScheduler &eeScheduler() { return scheduler; }
+    bool eeCheckpointQuiet(uint32_t cycles) { return scheduler.m_clock.advanceQuiet(cycles); }
+    bool eeCheckpointFull(uint32_t cycles) {
+        ++full;
+        scheduler.m_clock.eeCycle += cycles;
+        return true; // stop at the first observable boundary
+    }
+};
+void sub_0017A2A0_0x17a2a0(uint8_t *, R5900Context *, PS2Runtime *rt) { ++rt->reference; }
+@COUNTDOWN@
+void individual(R5900Context *ctx, PS2Runtime *rt) {
+    if (ctx->pc == 0x17A328u) SET_GPR_S32(ctx, 2, GPR_U32(ctx, 2));
+    // Zero is intentionally delegated before folding, including its wraparound.
+    if (!GPR_U32(ctx, 2)) { ++rt->reference; return; }
+    while (GPR_U32(ctx, 2) > 1) {
+        SET_GPR_S32(ctx, 2, GPR_U32(ctx, 2) - 1u);
+        ctx->pc = 0x17A32Cu;
+        if (!rt->eeCheckpointQuiet(32) && rt->eeCheckpointFull(32)) return;
+    }
+    ++rt->reference;
+}
+void require(bool okay) { if (!okay) { std::fputs("FAIL countdown equivalence\n", stderr); std::exit(1); } }
+int main() {
+    unsigned cases = 0;
+    for (uint32_t count : {0u, 1u, 2u, 17u, 20000u, 0x80000000u, 0xFFFFFFFFu})
+    for (uint32_t budget : {0u, 1u, 31u, 32u, 33u, 63u, 64u, 65u, 1000u, 640000u})
+    for (unsigned flags = 0; flags < 4; ++flags)
+    for (uint32_t pc : {0x17A328u, 0x17A32Cu}) {
+        R5900Context a, b;
+        for (unsigned i = 0; i < 32; ++i) { a.lo[i] = 0x7654321000000000ULL + i; a.hi[i] = 0xFEDCBA9876543210ULL + i; }
+        a.pc = pc; a.lo[2] = 0x1234567800000000ULL | count; b = a;
+        PS2Runtime ra, rb;
+        for (auto *r : {&ra, &rb}) {
+            auto &clock = r->scheduler.m_clock;
+            clock.eeCycle = 10000; clock.deferredCycles = 120;
+            clock.quietCycles = budget;
+            clock.checkpointPending = flags & 1;
+            clock.limitsChanged = flags & 2;
+        }
+        individual(&a, &ra); gowFinishCountdown(nullptr, &b, &rb);
+        require(a.pc == b.pc && ra.full == rb.full && ra.reference == rb.reference);
+        for (unsigned i = 0; i < 32; ++i) require(a.lo[i] == b.lo[i] && a.hi[i] == b.hi[i]);
+        auto &x = ra.scheduler.m_clock; auto &y = rb.scheduler.m_clock;
+        require(x.eeCycle == y.eeCycle && x.deferredCycles == y.deferredCycles && x.quietCycles == y.quietCycles);
+        require(x.checkpointPending == y.checkpointPending && x.limitsChanged == y.limitsChanged);
+        ++cases;
+    }
+    std::printf("PASS: %u countdown boundary/register/clock cases (production bodies)\n", cases);
+}

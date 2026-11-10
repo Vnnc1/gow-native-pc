@@ -1,0 +1,23 @@
+VU1 helper de-duplication: the exactness helpers are shared by the generated blocks
+
+This patch used to carry the change that removes the duplicated copies of the
+VU1 exactness helpers (the operand normalisation, the MAC/clip flag helpers
+and the clamp helpers), so that the exact build, the fast build (patch 51) and
+the x86-64 JIT (patch 18) call one set of helpers instead of one copy per
+build.
+
+Its content is in the chain already: the helpers live in
+PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl and in
+PS2Recomp/ps2xRuntime/include/runtime/ps2_vu1_native.h, and the patches that
+carry them are 51-vu1-fast-mode.patch (the vu1n::fast variants of the
+exactness helpers) and 18-vu1-x64-jit.patch (the JIT's calls into them).
+Rebuilding the stack against the working tree (tools/pipeline/rebuild_patch_stack.py)
+found nothing left to say here: the files this patch touches are already in
+their working-tree state at this point of the chain, so this file is kept as
+the place where that change is documented and it carries no file diff of its
+own. The pipeline applies it with --allow-empty.
+
+The helpers are shared through the single namespace of vu1n (the exactness
+helpers in ps2_vu1_native.h, the fast variants in ps2_vu1_native.inl), so a
+helper is defined once and both builds call it; the x86-64 JIT calls them
+through the same HelperFn table (ps2_vu1_x64.inl).

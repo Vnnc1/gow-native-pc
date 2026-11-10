@@ -1,0 +1,61 @@
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+struct R5900Context { uint32_t pc=0; std::array<uint64_t,32> lo{}, hi{}; };
+#define GPR_U32(ctx, i) static_cast<uint32_t>((ctx)->lo[i])
+#define SET_GPR_U32(ctx, i, value) ((ctx)->lo[i]=(value))
+void require(bool ok) { if (!ok) std::abort(); }
+uint32_t readGuest32(const uint8_t *ram, uint32_t address) {
+    uint32_t value; std::memcpy(&value, ram+address, 4); return value;
+}
+void writeGuest32(uint8_t *ram, uint32_t address, uint32_t value) { std::memcpy(ram+address,&value,4); }
+void padReturn(R5900Context *ctx, uint32_t value) { ctx->lo[2]=value; ctx->pc=GPR_U32(ctx,31); }
+struct PS2Runtime { unsigned pictures=0, queries=0, originals=0; };
+namespace ps2_stubs {
+void sceMpegIsRefBuffEmpty(uint8_t *ram, R5900Context *ctx, PS2Runtime *rt) {
+    require(GPR_U32(ctx,4)==readGuest32(ram,0x304f20));
+    ++rt->queries; ctx->lo[2]=rt->pictures==0;
+}
+}
+void sub_00189B00_0x189b00(uint8_t *, R5900Context *ctx, PS2Runtime *rt) {
+    ++rt->originals; padReturn(ctx,1);
+}
+@WRAPPER@
+int main() {
+    std::vector<uint8_t> ram(0x310000);
+    constexpr uint32_t movie=0x304dc8;
+    writeGuest32(ram.data(),0x304f20,movie);
+    writeGuest32(ram.data(),movie+0x140,2);
+    writeGuest32(ram.data(),movie+0x154,1);
+    writeGuest32(ram.data(),0x2fde38,3);
+    R5900Context initial;
+    initial.pc=0x189b00; initial.lo[31]=0x189480;
+    initial.lo[4]=0xabcdef; initial.hi.fill(0x12345678);
+    PS2Runtime rt;
+    // EOF can arrive with several pictures queued: finish only after all are consumed.
+    for (unsigned remaining : {3u,2u,1u,0u}) {
+        rt.pictures=remaining; auto ctx=initial;
+        gowMovieIsEnd(ram.data(),&ctx,&rt);
+        require(ctx.lo[2]==(remaining==0) && ctx.pc==initial.lo[31]);
+        auto expected=initial.lo; expected[2]=ctx.lo[2];
+        require(ctx.lo==expected && ctx.hi==initial.hi);
+    }
+    require(rt.queries==4 && rt.originals==1);
+    // Cancellation, buffered input, non-MPEG movies and resume slots retain original behavior.
+    for (auto [address,value] : {std::pair{0x29c848u,1u}, {0x2fde34u,1u},
+                                {0x2fde38u,2u}, {movie+0x140,1u}, {movie+0x154,0u}, {0x304f20u,0u}}) {
+        auto saved=readGuest32(ram.data(),address);
+        writeGuest32(ram.data(),address,value);
+        auto ctx=initial; rt.pictures=2; auto queries=rt.queries;
+        gowMovieIsEnd(ram.data(),&ctx,&rt);
+        require(ctx.lo[2]==1 && rt.queries==queries);
+        writeGuest32(ram.data(),address,saved);
+    }
+    auto ctx=initial; ctx.pc=0x189b5c; auto queries=rt.queries;
+    gowMovieIsEnd(ram.data(),&ctx,&rt);
+    require(ctx.lo[2]==1 && rt.queries==queries);
+    std::puts("PASS: movie EOF drains decoded pictures; cancellation, input, format and resumes delegate");
+}

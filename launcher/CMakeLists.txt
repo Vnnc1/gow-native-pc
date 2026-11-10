@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 # The release version (tag v<this>, CHANGELOG.md). The updater compares it with the latest release's tag, so the two
 # must match. 0.x until the port is complete; releases up to 3.0.1 were renumbered 0.1.0-0.3.1.
-project(GowNativePcLauncher VERSION 0.5.0 LANGUAGES CXX)
+project(GowNativePcLauncher VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,8 @@ qt_add_executable(gow-launcher WIN32
     src/installer_backend.h
     src/mando.cpp
     src/mando.h
+    src/mods_model.cpp
+    src/mods_model.h
 )
 if(WIN32)
     target_sources(gow-launcher PRIVATE gow-launcher.rc)
@@ -60,6 +62,7 @@ set(ARCHIVOS_QML
     qml/PaginaPartidas.qml
     qml/PaginaTrucos.qml
     qml/PaginaOtros.qml
+    qml/PaginaMods.qml
 )
 # The QML files sit at the module root (no "qml/"), so their folder's implicit import is the module itself and
 # Tema (the theme) loads as a singleton.

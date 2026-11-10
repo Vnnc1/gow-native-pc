@@ -11,7 +11,8 @@ claim**. Native launcher compilation and WSLg UI checks are recorded in
 The v0.5.0 Linux download is intended for community testing on Linux PCs and
 Steam Deck. Only the WSL environment below has been exercised locally; this is
 not certification for SteamOS or other distributions. Release features and
-remaining limitations are listed in the [changelog](../CHANGELOG.md#v050--2026-11-02).
+remaining limitations are listed in the [changelog](../CHANGELOG.md).
+The 0.6.0 local candidate is awaiting manual acceptance; see its [validation record](research/release-0.6.0-candidate.md).
 
 `tools/pipeline/package_linux.py` packages tracked sources plus the two native
 launcher executables, verifies every archive member, and writes a SHA-256 file.
@@ -23,7 +24,7 @@ The archive uses **system libraries**, not a bundled runtime: consult
 The packager's `--installer <file.run>` option also creates a self-extracting
 installer containing the same verified archive. Run
 `bash gow-native-pc-linux-x86_64-ubuntu26.04-experimental.run` to install under
-`~/.local/share/gow-native-pc-0.5.0`, or supply a new destination directory as its
+`~/.local/share/gow-native-pc-0.6.0`, or supply a new destination directory as its
 only argument. It checks the payload before extracting and refuses existing
 destinations to preserve games and saves. Open `start-linux.sh` in the installed
 folder, then import your own compatible ISO through the launcher. The installer

@@ -42,18 +42,7 @@ elseif(MINGW)
     target_link_options(gow_memory_tests PRIVATE -Wl,--stack,8388608)
 endif()
 enable_testing()
-add_executable(gow_shared_present_tests "${CMAKE_CURRENT_LIST_DIR}/shared-present.cpp")
-target_include_directories(gow_shared_present_tests PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib")
-target_link_libraries(gow_shared_present_tests PRIVATE ps2_runtime)
-add_test(NAME gow_shared_present_tests COMMAND gow_shared_present_tests)
-set_tests_properties(gow_shared_present_tests PROPERTIES TIMEOUT 15)
 add_test(NAME gow_memory_tests COMMAND gow_memory_tests)
-add_executable(gow_texture_budget_tests "${CMAKE_CURRENT_LIST_DIR}/gs-texture-budget.cpp")
-target_compile_features(gow_texture_budget_tests PRIVATE cxx_std_20)
-target_include_directories(gow_texture_budget_tests PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
-add_test(NAME gow_texture_budget_tests COMMAND gow_texture_budget_tests)
-add_executable(gow_texture_upload_test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/gs-texture-upload.cpp")
-target_link_libraries(gow_texture_upload_test PRIVATE ps2_runtime)
 set_tests_properties(gow_memory_tests PROPERTIES TIMEOUT 120)
 add_executable(gow_frame_metrics "${CMAKE_CURRENT_LIST_DIR}/frame_metrics.cpp")
 target_compile_features(gow_frame_metrics PRIVATE cxx_std_20)
@@ -103,3 +92,49 @@ target_include_directories(gow_qte_input_test PRIVATE "${CMAKE_SOURCE_DIR}/ps2xR
 foreach(mode IN ITEMS off shake rotate smoke)
     add_test(NAME gow_qte_input_${mode} COMMAND gow_qte_input_test ${mode})
 endforeach()
+FetchContent_GetProperties(raylib SOURCE_DIR GOW_PROMPT_RAYLIB_SOURCE)
+add_test(NAME gow_control_prompts COMMAND "${Python3_EXECUTABLE}" -I
+    "${CMAKE_CURRENT_LIST_DIR}/control-prompts.py"
+    --runtime "${CMAKE_SOURCE_DIR}/ps2xRuntime" --compiler "${CMAKE_CXX_COMPILER}"
+    --raylib "${GOW_PROMPT_RAYLIB_SOURCE}/src" --output "${CMAKE_CURRENT_BINARY_DIR}/control-prompts")
+set_tests_properties(gow_control_prompts PROPERTIES TIMEOUT 180)
+
+# PR 26 integration: production cache policy, shader ownership and software fallback.
+foreach(pair IN ITEMS "texture_budget|gs-texture-budget" "shader_program|gs-shader-program" "software_reference|gs-software-reference")
+    string(REPLACE "|" ";" fields "${pair}")
+    list(GET fields 0 target)
+    list(GET fields 1 source)
+    add_executable(gow_${target} "${CMAKE_CURRENT_LIST_DIR}/${source}.cpp")
+    target_compile_features(gow_${target} PRIVATE cxx_std_20)
+    target_include_directories(gow_${target} PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include"
+        "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib/gs/gpu")
+    if(target STREQUAL "software_reference")
+        target_link_libraries(gow_${target} PRIVATE ps2_runtime)
+    endif()
+    add_test(NAME gow_${target} COMMAND gow_${target})
+endforeach()
+
+# fix-chore suites restored by the PR 26 integration (their runtime patches are in the chain as zzz-204 / zzz-261,
+# and the run path is patch 66 + zzz-300). The deferred GS candidates (alpha passes, sampler cache, alpha bounds,
+# renderer variants) stay out until they are ported: docs/research/pr26-integration.md.
+add_executable(gow_test_time "${CMAKE_CURRENT_LIST_DIR}/test_time.cpp")
+target_compile_features(gow_test_time PRIVATE cxx_std_20)
+target_include_directories(gow_test_time PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
+add_test(NAME gow_test_time COMMAND gow_test_time)
+add_executable(gow_gs_run_tests "${CMAKE_CURRENT_LIST_DIR}/gs_run_tests.cpp")
+target_compile_features(gow_gs_run_tests PRIVATE cxx_std_20)
+target_link_libraries(gow_gs_run_tests PRIVATE ps2_runtime)
+add_test(NAME gow_gs_run_tests COMMAND gow_gs_run_tests)
+set_tests_properties(gow_gs_run_tests PROPERTIES TIMEOUT 120)
+add_executable(gow_shared_present_tests "${CMAKE_CURRENT_LIST_DIR}/shared-present.cpp")
+target_include_directories(gow_shared_present_tests PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib")
+target_link_libraries(gow_shared_present_tests PRIVATE ps2_runtime)
+add_test(NAME gow_shared_present_tests COMMAND gow_shared_present_tests)
+set_tests_properties(gow_shared_present_tests PROPERTIES TIMEOUT 15)
+add_executable(gow_texture_upload_test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/gs-texture-upload.cpp")
+target_link_libraries(gow_texture_upload_test PRIVATE ps2_runtime)
+# Production mod consumers (patches 71/84 + zzz-006): VFS table lookup and declarative data patches in fresh
+# processes, driven by tools/test/mod-runtime.py.
+add_executable(gow_mod_runtime "${CMAKE_CURRENT_LIST_DIR}/mod-runtime.cpp")
+target_compile_features(gow_mod_runtime PRIVATE cxx_std_20)
+target_link_libraries(gow_mod_runtime PRIVATE ps2_runtime)

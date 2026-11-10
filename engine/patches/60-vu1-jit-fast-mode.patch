@@ -1,0 +1,268 @@
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_x64.inl
+@@ -22,7 +22,8 @@
+ //
+ // Code: System V (Linux) and Windows x64 calling conventions; rbx = VU1NativeCtx *, rbp = constant table, r12 = the
+ // frame (temporaries: unclamped FMAC results, MAC / clip values, VI backups, cached nrm() values), r13 = the next pc,
+-// r14 = VU1State *, r15 = VU data. Only xmm0-xmm5 are used (callee-saved xmm6-15 on Windows stay untouched). Code
++// r14 = VU1State *, r15 = VU data. xmm0-xmm5 are the scratch registers; with GOW_VU1_ACC_REG=1 (patch 78, off by default)
++// xmm15 holds the accumulator for the whole chain (the prologue parks the caller's xmm15 in the frame). Code
+ // memory: a reserved 1 GB range committed read-write-execute 1 MB at a time, never freed (a block's code stays valid for
+ // the process lifetime, like the build's). Statement data (operands, flag-source lists) lives next to the block, also
+ // never freed. GOW_VU1X_DUMP=<dir> writes each block's code (objdump -D -b binary -mi386:x86-64).
+@@ -47,6 +48,7 @@
+ #endif
+ #include <cstddef>
+ #include <bit>
++#include <cstdlib>
+ #include <deque>
+ #include <initializer_list>
+ #include <memory>
+@@ -56,6 +58,41 @@
+ 
+ namespace vu1x
+ {
++    // GOW-Port (patch 60): the fast VU semantics patch 51 compiles into the AOT blocks, applied to the JIT translator: no
++    // Inf/NaN operand normalisation and no MADD/MSUB overflow check (plain a * b +/- acc; the clamp field still applies).
++    // Read on first use, after main has restored the boot profile (not during static initialisation, see patch 29a).
++    inline bool fastMode()
++    {
++        static const bool fast = []
++        {
++            const char *v = std::getenv("GOW_VU1_FAST");
++            return v && v[0] == '1';
++        }();
++        return fast;
++    }
++
++    // GOW-Port (patch 78): keep the accumulator (VU1State.acc) in xmm15 for the whole block instead of loading it for
++    // every MADD/MSUB and storing it for every ACC destination (ACC read 47-48% of the pairs, ACC destination 29.7-30.8%,
++    // patch 65). Same semantics as tools/vu1/vu1n_gen.py GOW_VU1_ACC_REG: DEST-masked writes blend into the resident
++    // value, helpers (exact-engine call-outs) store it before and reload after, and the epilogue stores it. A block entered
++    // by the JIT -> JIT jump keeps xmm15 live (the prologue that saved the caller's xmm15 also loaded it), and the epilogue
++    // that ends the chain restores it, so the per-block cost is zero; only chain starts/ends touch memory.
++    // Windows x64: xmm6-xmm15 are non-volatile, so chainFn and the helpers preserve xmm15. System V: every xmm is
++    // caller-saved and chainFn would clobber it, so the switch is forced off there.
++    inline bool accReg()
++    {
++#if defined(_WIN32)
++        static const bool on = []
++        {
++            const char *v = std::getenv("GOW_VU1_ACC_REG");
++            return v && v[0] == '1';
++        }();
++        return on;
++#else
++        return false;
++#endif
++    }
++
+     // ------------------------------------------------------------------------------------------------- decode (vu1n_gen.py)
+     constexpr uint32_t kFlat = 4u; // FLAT in vu1n_gen.py = VU1Interpreter::kFmacLatency (private there)
+     constexpr int kRev4[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+@@ -324,6 +361,7 @@
+     // ------------------------------------------------------------------------------------------------- statements
+     struct alignas(16) Frame
+     {
++        __m128 accSave;   // patch 78: caller's xmm15, restored by the epilogue that ends the chain
+         __m128 q[64];     // unclamped FMAC results of MAC writers (q{j})
+         __m128 nv[32];    // inline tier: nrm(vf[r]) kept for later reads of the same register in the block
+         uint32_t m[64];   // MAC values (m{j})
+@@ -879,7 +917,7 @@
+                 // the same results as ldn: the lanes read raw must be clean, all four for MADD / MSUB (madd's wide-evaluation
+                 // test looks at every lane) unless the operand is a broadcast.
+                 const auto norm = [&](uint32_t r, uint32_t need, bool allLanes) -> bool {
+-                    if (r == 0)
++                    if (fastMode() || r == 0)
+                         return false;
+                     const L128 want = L128::lanes(r, need);
+                     if (((s0 & ~fromEntry) & want) == want)
+@@ -1328,7 +1366,7 @@
+                   std::bit_cast<uint32_t>(1.0f / 32768.0f) == 0x38000000u && std::bit_cast<uint32_t>(16.0f) == 0x41800000u &&
+                   std::bit_cast<uint32_t>(4096.0f) == 0x45800000u && std::bit_cast<uint32_t>(32768.0f) == 0x47000000u &&
+                   std::bit_cast<uint32_t>(2147483648.0f) == 0x4F000000u, "vu1x constant table");
+-    constexpr int XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5;
++    constexpr int XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5, XMM15 = 15;
+     constexpr uint8_t CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF, CC_E = 0x4, CC_NE = 0x5, CC_P = 0xA;
+ 
+     // a memory operand: [base + disp32] or [base + index * scale + disp32]
+@@ -1559,6 +1597,15 @@
+             e.movupsS(mm, XMM4);
+         }
+     }
++    // stf<M> into a resident register instead of memory (patch 78, ACC in xmm15): the lanes outside the mask keep their
++    // value, the masked ones come from r (vu1n::accw<M> in the generator).
++    void emitStfReg(E &e, int d, int r, uint32_t mask)
++    {
++        if (mask == 15u)
++            e.movaps(d, r);
++        else if (mask != 0u)
++            e.blendps(d, r, static_cast<uint8_t>(mask));
++    }
+     // rax = VU data address of quadword eax: r15 + ((eax * 16) & n.mask)
+     void emitQaddr(E &e)
+     {
+@@ -1632,6 +1679,17 @@
+             if (use[t].writes & bit)
+                 return;
+         }
++    }
++
++    // Operand load for a statement: ldn (normalised, cached in frame.nv) normally, a raw vf read in fast mode.
++    void emitLoad(Ctx &cx, int x, uint32_t r)
++    {
++        if (fastMode())
++        {
++            cx.e.movupsL(x, vfM(r));
++            return;
++        }
++        loadNorm(cx, x, r);
+     }
+ 
+     // m{i} = macValRt(q{i}, m) (vu1n::macValRt) from the frame. Uses xmm1-xmm3, eax, ecx, edx.
+@@ -1679,14 +1737,14 @@
+         E &e = cx.e;
+         Asm &a = cx.a;
+         if (k.aNorm)                            // a = ld / ldn (vf[fs])
+-            loadNorm(cx, XMM1, k.fs);
++            emitLoad(cx, XMM1, k.fs);
+         else
+             e.movupsL(XMM1, vfM(k.fs));
+         switch (k.src)
+         {
+         case S_BC:
+             if (k.bNorm)
+-                loadNorm(cx, XMM2, k.ft);
++                emitLoad(cx, XMM2, k.ft);
+             else
+                 e.movupsL(XMM2, vfM(k.ft));
+             e.shufps(XMM2, XMM2, static_cast<uint8_t>(k.bc * 0x55u));
+@@ -1703,7 +1761,7 @@
+             break;
+         default:
+             if (k.bNorm)
+-                loadNorm(cx, XMM2, k.ft);
++                emitLoad(cx, XMM2, k.ft);
+             else
+                 e.movupsL(XMM2, vfM(k.ft));
+             break;
+@@ -1719,9 +1777,23 @@
+         case K_MINI: e.ps(0x5D, XMM1, XMM2); break;
+         case K_MADD:
+         case K_MSUB:
++            if (fastMode()) // patch 60: plain a * b +/- acc, no wide-evaluation overflow check (patch 51's fast semantics)
++            {
++                e.ps(0x59, XMM1, XMM2);                               // p = a * b
++                if (accReg())                                         // patch 78: resident accumulator
++                    e.movaps(XMM5, XMM15);
++                else
++                    e.movupsL(XMM5, stM(offsetof(VU1State, acc)));
++                e.ps(k.op == K_MADD ? 0x58 : 0x5C, XMM5, XMM1);       // r = acc +/- p
++                e.movaps(XMM1, XMM5);
++                break;
++            }
+             // vu1n::madd: p = a * b; r = acc +/- p; any lane of p or r beyond 0x7F7FFFFE -> the helper (wide evaluation)
+             e.ps(0x59, XMM1, XMM2);                                   // xmm1 = p
+-            e.movupsL(XMM5, stM(offsetof(VU1State, acc)));
++            if (accReg())
++                e.movaps(XMM5, XMM15);
++            else
++                e.movupsL(XMM5, stM(offsetof(VU1State, acc)));
+             e.ps(k.op == K_MADD ? 0x58 : 0x5C, XMM5, XMM1);           // xmm5 = r
+             // hot lanes: max(|p|, |r|) > limit (signed compare of non-negative bit patterns: the same lanes as the helper's
+             // (|p| > limit) | (|r| > limit))
+@@ -1755,7 +1827,12 @@
+             e.psM(0x5D, XMM1, cM(C_FMAX));
+         }
+         if (k.store)
+-            emitStf(e, k.toAcc ? stM(offsetof(VU1State, acc)) : vfM(k.fd), XMM1, k.m);
++        {
++            if (k.toAcc && accReg()) // patch 78: ACC destination merges into the resident value
++                emitStfReg(e, XMM15, XMM1, k.m);
++            else
++                emitStf(e, k.toAcc ? stM(offsetof(VU1State, acc)) : vfM(k.fd), XMM1, k.m);
++        }
+         if (slow)
+             cx.cold.push_back({slowAt, a.c.size(), hFmac, &k}); // the whole statement from the unchanged state
+         if (k.mac && k.macM)
+@@ -1776,7 +1853,7 @@
+             emitStf(e, vfM(k.ft), XMM1, k.m);
+             return;
+         }
+-        loadNorm(cx, XMM1, k.fs);
++        emitLoad(cx, XMM1, k.fs);
+         if (kind == IN_ABS)
+         {
+             e.psM(0x54, XMM1, cM(C_ABS));
+@@ -1802,8 +1879,8 @@
+     void emitClip(Ctx &cx, const Imm &k)
+     {
+         E &e = cx.e;
+-        loadNorm(cx, XMM1, k.fs);                                     // v
+-        loadNorm(cx, XMM2, k.ft);
++        emitLoad(cx, XMM1, k.fs);                                     // v
++        emitLoad(cx, XMM2, k.ft);
+         e.shufps(XMM2, XMM2, 0xFF);
+         e.psM(0x54, XMM2, cM(C_ABS));                                 // w = |t.w|
+         if (e.avx)
+@@ -2247,6 +2324,12 @@
+         a.movRM(R14, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, s)));
+         a.movRM(R15, RBX, static_cast<int32_t>(offsetof(VU1NativeCtx, data)));
+         a.movRI64(RBP, reinterpret_cast<uint64_t>(&kConst[0][0]));
++        if (accReg()) // patch 78: park the caller's xmm15, then load the accumulator into it
++        {
++            E e{a, avxEnabled()};
++            e.movupsS(frM(offsetof(Frame, accSave)), XMM15);
++            e.movupsL(XMM15, stM(offsetof(VU1State, acc)));
++        }
+     }
+     uint32_t prologueSize()
+     {
+@@ -2311,7 +2394,11 @@
+                     cx.e.movzx8(RAX, stM(k.flagT ? offsetof(VU1State, tBitEnabled) : offsetof(VU1State, dBitEnabled)));
+                     a.testEaxEax();
+                     const size_t skip = a.jcc(CC_Z);
++                    if (accReg()) // patch 78: the helper sees / updates state.acc
++                        cx.e.movupsS(stM(offsetof(VU1State, acc)), XMM15);
+                     emitCallHelper(a, st.fn, k);
++                    if (accReg())
++                        cx.e.movupsL(XMM15, stM(offsetof(VU1State, acc)));
+                     toRet.push_back(a.jmp());
+                     a.patch(skip, a.c.size());
+                     continue;
+@@ -2324,7 +2411,11 @@
+                 }
+             }
+             cx.cached = 0u; // a helper may write any VF register
++            if (accReg())   // patch 78: exact-engine call-outs (and XGKICK) see / may update state.acc
++                cx.e.movupsS(stM(offsetof(VU1State, acc)), XMM15);
+             emitCallHelper(a, st.fn, k);
++            if (accReg())
++                cx.e.movupsL(XMM15, stM(offsetof(VU1State, acc)));
+             if (st.exitIfNonZero)
+             {
+                 a.testEaxEax();
+@@ -2334,6 +2425,11 @@
+                 a.movRR32(R13, RAX); // hNext's result
+         }
+         const auto epilogue = [&] {
++            if (accReg()) // patch 78: the chain ends here: make state.acc authoritative and give the caller its xmm15 back
++            {
++                cx.e.movupsS(stM(offsetof(VU1State, acc)), XMM15);
++                cx.e.movupsL(XMM15, frM(offsetof(Frame, accSave)));
++            }
+             a.addRsp(kStackBytes + 8u);
+             a.pop(R15); a.pop(R14); a.pop(R13); a.pop(R12); a.pop(RBP); a.pop(RBX);
+         };
+@@ -2382,7 +2478,11 @@
+         for (const Cold &c : cx.cold)
+         {
+             a.patch(c.from, a.c.size());
++            if (accReg()) // patch 78: the statement restarts from state: make acc authoritative first, reload the result after
++                cx.e.movupsS(stM(offsetof(VU1State, acc)), XMM15);
+             emitCallHelper(a, c.fn, *c.k);
++            if (accReg())
++                cx.e.movupsL(XMM15, stM(offsetof(VU1State, acc)));
+             a.patch(a.jmp(), c.resume);
+         }
+         return a.c;

@@ -25,6 +25,7 @@ using std::min;
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -54,7 +55,11 @@ struct Footer
 constexpr char kMagic[8] = {'G', 'O', 'W', 'S', 'E', 'T', 'U', 'P'};
 constexpr size_t kBlock = 16u << 20;
 
-#ifdef GOW_DIAGNOSTIC_SETUP
+#if defined(GOW_SETUP_TEST_IDENTITY)
+const wchar_t *const kProduct = L"God of War Setup Regression Test";
+const wchar_t *const kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gow-native-pc-setup-test";
+const wchar_t *const kInstallFolder = L"gow-native-pc-setup-test";
+#elif defined(GOW_DIAGNOSTIC_SETUP)
 const wchar_t *const kProduct = L"God of War Native PC - Diagnostico";
 const wchar_t *const kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\gow-native-pc-diagnostics";
 const wchar_t *const kInstallFolder = L"gow-native-pc-diagnostics";
@@ -228,7 +233,7 @@ enum Txt
 {
     tSubtitle, tFolder, tChange, tDesktop, tInfo, tInstall, tUpdate, tCancel, tInstalling, tUnpacking, tDone, tDoneText,
     tOpen, tClose, tFailed, tRetry, tLocked, tNoWrite, tBroken, tPick, tUninstall, tUninstallTitle, tKeep, tRemoving,
-    tRemoved, tRemovedKept, tRemovedAll, tRunning, tCount
+    tRemoved, tRemovedKept, tRemovedAll, tRunning, tBuildFolder, tBuildHint, tBuildInvalid, tBuildForeign, tBuildPick, tCount
 };
 const wchar_t *const kTexts[tCount][3] = {
     {L"NATIVE PC  \u00b7  SETUP", L"NATIVE PC  \u00b7  INSTALADOR", L"NATIVE PC  \u00b7  INSTALADOR"},
@@ -270,6 +275,18 @@ const wchar_t *const kTexts[tCount][3] = {
     {L"Everything was removed.", L"Tudo foi removido.", L"Se quit\u00f3 todo."},
     {L"The launcher or the game is open: close it first.", L"O launcher ou o jogo est\u00e1 aberto: feche antes.",
      L"El lanzador o el juego est\u00e1 abierto: ci\u00e9rralo antes."},
+    {L"BUILD FOLDER", L"PASTA DA BUILD", L"CARPETA DE COMPILACI\u00d3N"},
+    {L"Builds use this path with suffixes such as -clang. Changing it requires a rebuild; previous builds and saves are kept.",
+     L"A build usa este caminho com sufixos como -clang. Alterar exige recompilar; builds anteriores e saves s\u00e3o preservados.",
+     L"La compilaci\u00f3n usa este camino con sufijos como -clang. Cambiarlo exige recompilar; se conservan las partidas y builds anteriores."},
+    {L"Choose a short, absolute local path (up to 40 characters), such as D:\\gow-build. Do not use the installation folder or a drive root.",
+     L"Escolha um caminho local absoluto e curto (at\u00e9 40 caracteres), como D:\\gow-build. N\u00e3o use a pasta de instala\u00e7\u00e3o nem a raiz do disco.",
+     L"Elige un camino local absoluto y corto (hasta 40 caracteres), como D:\\gow-build. No uses la carpeta de instalaci\u00f3n ni la ra\u00edz del disco."},
+    {L"This build location contains files from another installation or unrelated files. Choose an empty location.",
+     L"Este local da build cont\u00e9m arquivos de outra instala\u00e7\u00e3o ou arquivos desconhecidos. Escolha um local vazio.",
+     L"Esta ubicaci\u00f3n contiene archivos de otra instalaci\u00f3n o archivos ajenos. Elige una ubicaci\u00f3n vac\u00eda."},
+    {L"Choose the build folder (for example D:\\gow-build)", L"Escolha a pasta da build (por exemplo D:\\gow-build)",
+     L"Elige la carpeta de compilaci\u00f3n (por ejemplo D:\\gow-build)"},
 };
 std::wstring T(Txt t) { return kTexts[t][g_lang]; }
 
@@ -283,6 +300,9 @@ UINT g_dpi = 96;
 State g_state = State::Ready;
 bool g_uninstall = false;      // this run removes an installation
 std::wstring g_dir;            // install folder
+std::wstring g_buildRoot;      // pipeline base; existing compiler/configuration suffixes remain unchanged
+HWND g_buildLabel = nullptr, g_buildPath = nullptr, g_buildButton = nullptr;
+HFONT g_buildFont = nullptr;
 bool g_existing = false;       // g_dir already holds an installation
 bool g_toggle = false;         // desktop shortcut (off unless the user turns it on) / keep game data (on)
 std::wstring g_message;        // Failed / UninstallDone text
@@ -389,9 +409,92 @@ std::vector<std::pair<std::wstring, std::vector<uint8_t>>> readPatches(const std
     return patches;
 }
 
-void installWorker(std::wstring dir, bool desktop)
+bool buildBelongsTo(const std::wstring &build, const std::wstring &dir);
+
+std::wstring recordedBuildRoot(const std::wstring &dir)
+{
+    std::vector<uint8_t> bytes;
+    if (!readAll(dir + L"\\data\\build-root.txt", bytes) || bytes.empty()) return L"C:\\gow-build";
+    const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, reinterpret_cast<const char *>(bytes.data()), static_cast<int>(bytes.size()), nullptr, 0);
+    std::wstring value(n, L'\0');
+    if (n) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, reinterpret_cast<const char *>(bytes.data()), static_cast<int>(bytes.size()), value.data(), n);
+    while (!value.empty() && (value.back() == L'\r' || value.back() == L'\n' || value.back() == L' ')) value.pop_back();
+    if (!value.empty() && value.front() == 0xfeff) value.erase(0, 1);
+    return value;
+}
+
+const wchar_t *const buildSuffixes[] = {L"", L"-clang", L"-dev", L"-dev-clang", L"-clang-pgogen", L"-dev-clang-pgogen", L"-verify-clang"};
+
+std::wstring initialBuildRoot(const std::wstring &dir)
+{
+    auto value = recordedBuildRoot(dir);
+    if (exists(dir + L"\\data\\build-root.txt")) return value;
+    for (auto suffix : buildSuffixes) {
+        if (exists(value + suffix + L"\\CMakeCache.txt") && !buildBelongsTo(value + suffix, dir)) {
+            uint32_t hash = 2166136261u;
+            for (auto c : dir) hash = (hash ^ static_cast<uint32_t>(towlower(c))) * 16777619u;
+            wchar_t ending[16]; swprintf(ending, 16, L"-%08x", hash);
+            return value + ending;
+        }
+    }
+    return value;
+}
+
+std::wstring validateBuildRoot(const std::wstring &dir, const std::wstring &build)
+{
+    const auto canonical = fs::path(build).lexically_normal().wstring();
+    const auto install = fs::path(dir).lexically_normal().wstring();
+    auto within = [](const std::wstring &a, const std::wstring &b) {
+        return _wcsicmp(a.c_str(), b.c_str()) == 0 ||
+            (a.size() > b.size() && _wcsnicmp(a.c_str(), b.c_str(), b.size()) == 0 && a[b.size()] == L'\\');
+    };
+    if (build.size() < 4 || build[1] != L':' || build[2] != L'\\' || canonical != build ||
+        (build.size() > 40 && _wcsicmp(build.c_str(), recordedBuildRoot(dir).c_str()) != 0) ||
+        build.find_first_of(L"<>\"|?*\r\n") != std::wstring::npos || build.find(L':', 2) != std::wstring::npos ||
+        build.back() == L'.' || build.back() == L' ' || within(build, install) || within(install, build)) return T(tBuildInvalid);
+    const auto drive = GetDriveTypeW(build.substr(0, 3).c_str());
+    if (drive != DRIVE_FIXED && drive != DRIVE_REMOVABLE) return T(tBuildInvalid);
+    for (auto suffix : buildSuffixes) {
+        const auto folder = build + suffix;
+        std::error_code ec;
+        if (exists(folder) && (!fs::is_directory(folder, ec) ||
+            (!fs::is_empty(folder, ec) && !buildBelongsTo(folder, dir)))) return T(tBuildForeign);
+        if (ec) return T(tNoWrite);
+    }
+    // Probe the selected volume before unpacking; never overwrite an existing file.
+    std::error_code ec;
+    fs::create_directories(build, ec);
+    if (ec) return T(tNoWrite);
+    const auto probe = build + L"\\.gow-write-test-" + std::to_wstring(GetCurrentProcessId());
+    HANDLE f = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return T(tNoWrite);
+    CloseHandle(f);
+    return {};
+}
+
+bool storeBuildRoot(const std::wstring &dir, const std::wstring &build)
+{
+    std::error_code ec;
+    fs::create_directories(dir + L"\\data", ec);
+    if (ec) return false;
+    const int n = WideCharToMultiByte(CP_UTF8, 0, build.data(), static_cast<int>(build.size()), nullptr, 0, nullptr, nullptr);
+    std::string bytes(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, build.data(), static_cast<int>(build.size()), bytes.data(), n, nullptr, nullptr);
+    const auto path = dir + L"\\data\\build-root.txt", temporary = path + L".setup-tmp";
+    if (!writeAll(temporary, reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size())) return false;
+    if (MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    DeleteFileW(temporary.c_str());
+    return false;
+}
+
+void installWorker(std::wstring dir, bool desktop, std::wstring buildRoot)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+#ifndef GOW_DIAGNOSTIC_SETUP
+    const auto previousBuild = recordedBuildRoot(dir);
+    const auto buildError = validateBuildRoot(dir, buildRoot);
+    if (!buildError.empty()) return finish(false, buildError), CoUninitialize();
+#endif
     std::error_code ec;
     fs::create_directories(dir, ec);
     const std::wstring probe = dir + L"\\.write-test";
@@ -479,6 +582,15 @@ void installWorker(std::wstring dir, bool desktop)
         writeAll(dir + L"\\data\\pgo-stale.txt", reinterpret_cast<const uint8_t *>(version.data()), version.size());
     }
 
+#ifndef GOW_DIAGNOSTIC_SETUP
+    if (!storeBuildRoot(dir, buildRoot)) return finish(false, T(tNoWrite)), CoUninitialize();
+    if (_wcsicmp(previousBuild.c_str(), buildRoot.c_str()) != 0) {
+        const std::string reason = "build location changed; rebuild required";
+        if (!writeAll(dir + L"\\data\\needs-rebuild.txt", reinterpret_cast<const uint8_t *>(reason.data()), reason.size()) ||
+            !writeAll(dir + L"\\data\\pgo-stale.txt", reinterpret_cast<const uint8_t *>(reason.data()), reason.size()))
+            return finish(false, T(tNoWrite)), CoUninitialize();
+    }
+#endif
     // uninstaller, Windows' Apps entry, shortcuts (97-100 %)
     writeAll(dir + L"\\uninstall.exe", g_self.data(), static_cast<size_t>(g_footer.offset));
     const std::string bom = "\xFF\xFE";
@@ -520,11 +632,11 @@ bool buildBelongsTo(const std::wstring &build, const std::wstring &dir)
     std::vector<uint8_t> cache;
     if (!readAll(build + L"\\CMakeCache.txt", cache))
         return false;
-    std::wstring want = dir + L"\\engine\\runtime";
+    std::wstring want = dir + L"\\engine\\runtime\\PS2Recomp";
     std::replace(want.begin(), want.end(), L'\\', L'/');
-    const int n = WideCharToMultiByte(CP_UTF8, 0, want.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string key(n > 0 ? n - 1 : 0, ' ');
-    WideCharToMultiByte(CP_UTF8, 0, want.c_str(), -1, key.data(), n, nullptr, nullptr);
+    const int n = WideCharToMultiByte(CP_UTF8, 0, want.data(), static_cast<int>(want.size()), nullptr, 0, nullptr, nullptr);
+    std::string key(n, ' ');
+    WideCharToMultiByte(CP_UTF8, 0, want.data(), static_cast<int>(want.size()), key.data(), n, nullptr, nullptr);
     const std::string text(cache.begin(), cache.end());
     const size_t at = text.find("CMAKE_HOME_DIRECTORY:INTERNAL=");
     if (at == std::string::npos)
@@ -532,7 +644,7 @@ bool buildBelongsTo(const std::wstring &build, const std::wstring &dir)
     const size_t start = at + 30, end = text.find_first_of("\r\n", start);
     std::string home = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
     auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); }); return s; };
-    return lower(home).rfind(lower(key), 0) == 0;
+    return lower(home) == lower(key);
 }
 
 void removeWorker(std::wstring dir, bool keep)
@@ -572,20 +684,12 @@ void removeWorker(std::wstring dir, bool keep)
         // data/ (discs, saves, recompiled code, VU1 recordings), the downloaded runtime and the build folders
         // (tools/pipeline/build.ps1) — a build folder only when its CMake cache belongs to this installation, so a
         // build made from another copy (a development checkout) is never touched
-        std::wstring build = L"C:\\gow-build"; // this copy's build folder: data\build-root.txt (build.ps1)
-        std::vector<uint8_t> chosen;
-        if (readAll(dir + L"\\data\\build-root.txt", chosen) && !chosen.empty())
-        {
-            std::wstring s(chosen.begin(), chosen.end()); // an ASCII path such as C:\gow-build-1a2b3c4d
-            s.erase(s.find_last_not_of(L" \r\n\t") + 1);
-            if (!s.empty())
-                build = s;
-        }
+        const auto build = recordedBuildRoot(dir);
         fs::remove_all(dir + L"\\data", ec);
         fs::remove_all(dir + L"\\engine\\runtime", ec);
-        for (const std::wstring &folder : {build, build + L"-dev"})
-            if (buildBelongsTo(folder, dir))
-                fs::remove_all(folder, ec);
+        for (auto suffix : buildSuffixes)
+            if (buildBelongsTo(build + suffix, dir))
+                fs::remove_all(build + suffix, ec);
     }
     progress(900, L"");
     RemoveDirectoryW((dir + L"\\engine").c_str());
@@ -599,11 +703,16 @@ void removeWorker(std::wstring dir, bool keep)
 
 bool gameRunning(const std::wstring &dir)
 {
-    // the launcher locks its exe while it runs; the game runner is in the build folder
-    HANDLE f = CreateFileW((dir + L"\\" + kLauncher).c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE)
-        return GetLastError() == ERROR_SHARING_VIOLATION;
-    CloseHandle(f);
+    std::vector<std::wstring> programs{dir + L"\\" + kLauncher};
+    const auto base = recordedBuildRoot(dir);
+    for (auto suffix : buildSuffixes) if (buildBelongsTo(base + suffix, dir))
+        programs.push_back(base + suffix + L"\\ps2xRuntime\\ps2EntryRunner.exe");
+    for (const auto &program : programs) {
+        HANDLE f = CreateFileW(program.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == ERROR_SHARING_VIOLATION) return true;
+        } else CloseHandle(f);
+    }
     return false;
 }
 
@@ -620,18 +729,25 @@ void start()
         InvalidateRect(g_wnd, nullptr, FALSE);
         return;
     }
+#ifndef GOW_DIAGNOSTIC_SETUP
+    if (!g_uninstall) {
+        const auto error = validateBuildRoot(g_dir, g_buildRoot);
+        if (!error.empty()) { MessageBoxW(g_wnd, error.c_str(), kProduct, MB_ICONWARNING); return; }
+    }
+#endif
     g_state = State::Working;
+    for (HWND control : {g_buildLabel, g_buildPath, g_buildButton}) if (control) ShowWindow(control, SW_HIDE);
     g_target = g_shown = 0;
     g_file.clear();
     SetTimer(g_wnd, kTimer, 16, nullptr);
     if (g_uninstall)
         g_worker = std::thread(removeWorker, g_dir, g_toggle);
     else
-        g_worker = std::thread(installWorker, g_dir, g_toggle);
+        g_worker = std::thread(installWorker, g_dir, g_toggle, g_buildRoot);
     InvalidateRect(g_wnd, nullptr, FALSE);
 }
 
-void pickFolder()
+void pickFolder(bool build = false)
 {
     IFileOpenDialog *dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))))
@@ -639,9 +755,9 @@ void pickFolder()
     DWORD opts = 0;
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-    dlg->SetTitle(T(tPick).c_str());
+    dlg->SetTitle(T(build ? tBuildPick : tPick).c_str());
     IShellItem *start = nullptr;
-    const std::wstring parent = fs::path(g_dir).parent_path().wstring();
+    const std::wstring parent = fs::path(build ? g_buildRoot : g_dir).parent_path().wstring();
     if (SUCCEEDED(SHCreateItemFromParsingName(parent.c_str(), nullptr, IID_PPV_ARGS(&start))))
     {
         dlg->SetFolder(start);
@@ -654,6 +770,12 @@ void pickFolder()
         std::wstring chosen = path;
         while (chosen.size() > 3 && chosen.back() == L'\\')
             chosen.pop_back();
+        if (build) {
+            // A drive selection creates a named build base, never writes into the drive root.
+            if (chosen.size() == 3) chosen += L"gow-build";
+            g_buildRoot = chosen;
+            SetWindowTextW(g_buildPath, g_buildRoot.c_str());
+        } else {
         // a folder of its own unless the chosen one is empty or already an installation
         std::error_code ec;
         const bool empty = fs::is_empty(chosen, ec);
@@ -661,6 +783,9 @@ void pickFolder()
             chosen = (chosen.back() == L'\\' ? chosen : chosen + L"\\") + kInstallFolder;
         g_dir = chosen;
         g_existing = isInstall(g_dir);
+        g_buildRoot = initialBuildRoot(g_dir);
+        if (g_buildPath) SetWindowTextW(g_buildPath, g_buildRoot.c_str());
+        }
     }
     CoTaskMemFree(path);
     if (item)
@@ -836,10 +961,16 @@ void paint(HDC dc)
             g_hit[hChange] = toRect(change);
             text(g, T(tChange), L"Segoe UI Semibold", 13.5f, g_hover == hChange ? C(0xffffff) : C(0xff8a75), change, StringAlignmentCenter,
                  StringAlignmentCenter);
-            toggleRow(g, m, bodyY + F(90), cw, T(tDesktop));
+#ifdef GOW_DIAGNOSTIC_SETUP
+            const float extra = 0;
+#else
+            const float extra = F(124);
+            text(g, T(tBuildHint), L"Segoe UI", 12, C(0xa9afba), RectF(m, bodyY + F(152), cw, F(50)));
+#endif
+            toggleRow(g, m, bodyY + F(90) + extra, cw, T(tDesktop));
             std::wstring info = T(tInfo);
             info.replace(info.find(L"%1"), 2, std::to_wstring(g_rawSize >> 20));
-            text(g, info, L"Segoe UI", 12.5f, C(0x6a707c), RectF(m, bodyY + F(128), cw, F(40)));
+            text(g, info, L"Segoe UI", 12.5f, C(0x6a707c), RectF(m, bodyY + F(128) + extra, cw, F(40)));
             primary(g, btn1, T(g_existing ? tUpdate : tInstall));
         }
         secondary(g, btn2, T(tCancel));
@@ -959,6 +1090,19 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
+    case WM_COMMAND:
+        if (LOWORD(wp) == 101 && HIWORD(wp) == BN_CLICKED && g_state == State::Ready) { pickFolder(true); return 0; }
+        if (LOWORD(wp) == IDOK && g_state == State::Ready) { start(); return 0; }
+        if (LOWORD(wp) == IDCANCEL && g_state != State::Working) { PostMessageW(hwnd, WM_CLOSE, 0, 0); return 0; }
+        break;
+    case WM_CTLCOLORSTATIC:
+        if (reinterpret_cast<HWND>(lp) == g_buildLabel || reinterpret_cast<HWND>(lp) == g_buildPath) {
+            SetTextColor(reinterpret_cast<HDC>(wp), RGB(238, 240, 244));
+            SetBkColor(reinterpret_cast<HDC>(wp), RGB(21, 23, 28));
+            static HBRUSH background = CreateSolidBrush(RGB(21, 23, 28));
+            return reinterpret_cast<LRESULT>(background);
+        }
+        break;
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
@@ -1010,7 +1154,8 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_KEYDOWN:
-        if (wp == VK_RETURN && g_state != State::Working)
+        if (wp == VK_TAB && g_buildPath && g_state == State::Ready) SetFocus(g_buildPath);
+        else if (wp == VK_RETURN && g_state != State::Working)
             click(hPrimary);
         else if (wp == VK_ESCAPE && g_state != State::Working)
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -1072,13 +1217,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
 
     // silent use (and tests): /S [/D=<folder>] installs; /uninstall-from <folder> /S [/purge] removes
     bool silent = false, purge = false;
-    std::wstring silentDir;
+    std::wstring silentDir, selectedBuild;
     for (int i = 1; i < argc; ++i)
     {
         silent |= _wcsicmp(argv[i], L"/S") == 0;
         purge |= _wcsicmp(argv[i], L"/purge") == 0;
         if (_wcsnicmp(argv[i], L"/D=", 3) == 0)
             silentDir = argv[i] + 3;
+        if (_wcsnicmp(argv[i], L"/BUILDROOT=", 11) == 0)
+            selectedBuild = argv[i] + 11;
     }
 
     std::wstring selfToDelete;
@@ -1127,12 +1274,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
         }
     }
 
+    if (!g_uninstall) {
+        if (!silentDir.empty()) g_dir = fs::absolute(silentDir).lexically_normal().wstring();
+        g_existing = isInstall(g_dir);
+        g_buildRoot = selectedBuild.empty() ? initialBuildRoot(g_dir) : fs::path(selectedBuild).lexically_normal().wstring();
+    }
     if (silent)
     {
+        if (gameRunning(g_dir)) { say("Close the launcher and game before changing this installation.\n"); return 1; }
         if (g_uninstall)
             removeWorker(g_dir, !purge);
         else if (g_payload)
-            installWorker(silentDir.empty() ? g_dir : silentDir, false);
+            installWorker(g_dir, false, g_buildRoot);
         if (!g_ok)
         {
             const int n = WideCharToMultiByte(CP_UTF8, 0, g_message.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -1165,9 +1318,29 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = L"GowNativePcSetup";
     RegisterClassW(&wc);
-    const int w = static_cast<int>(F(620)), h = static_cast<int>(F(400));
+    const int w = static_cast<int>(F(620)), h = static_cast<int>(F(
+#ifdef GOW_DIAGNOSTIC_SETUP
+        400
+#else
+        g_uninstall ? 400 : 524
+#endif
+    ));
     g_wnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, (std::wstring(kProduct) + L" Setup").c_str(), WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
                             (GetSystemMetrics(SM_CXSCREEN) - w) / 2, (GetSystemMetrics(SM_CYSCREEN) - h) / 2, w, h, nullptr, nullptr, inst, nullptr);
+#ifndef GOW_DIAGNOSTIC_SETUP
+    if (!g_uninstall && g_state == State::Ready) {
+        g_buildFont = CreateFontW(-static_cast<int>(F(14)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_buildLabel = CreateWindowW(L"STATIC", T(tBuildFolder).c_str(), WS_CHILD | WS_VISIBLE,
+            static_cast<int>(F(36)), static_cast<int>(F(198)), static_cast<int>(F(548)), static_cast<int>(F(20)), g_wnd, nullptr, inst, nullptr);
+        g_buildPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_buildRoot.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
+            static_cast<int>(F(36)), static_cast<int>(F(220)), static_cast<int>(F(432)), static_cast<int>(F(36)), g_wnd, nullptr, inst, nullptr);
+        g_buildButton = CreateWindowW(L"BUTTON", T(tChange).c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            static_cast<int>(F(480)), static_cast<int>(F(220)), static_cast<int>(F(104)), static_cast<int>(F(36)), g_wnd,
+            reinterpret_cast<HMENU>(101), inst, nullptr);
+        for (HWND control : {g_buildLabel, g_buildPath, g_buildButton}) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_buildFont), TRUE);
+    }
+#endif
     ShowWindow(g_wnd, SW_SHOW);
     UpdateWindow(g_wnd);
 
@@ -1184,6 +1357,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
                 Graphics g(&shot);
                 HDC dc = g.GetHDC();
                 paint(dc);
+                for (HWND control : {g_buildLabel, g_buildPath, g_buildButton}) if (control && IsWindowVisible(control)) {
+                    RECT bounds; GetWindowRect(control, &bounds);
+                    POINT origin{bounds.left, bounds.top}; ScreenToClient(hwnd, &origin);
+                    const int saved = SaveDC(dc);
+                    SetViewportOrgEx(dc, origin.x, origin.y, nullptr);
+                    SendMessageW(control, WM_PRINT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND);
+                    RestoreDC(dc, saved);
+                }
                 g.ReleaseHDC(dc);
             }
             CLSID png;
@@ -1202,11 +1383,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0)
     {
+        if (g_buildPath && GetFocus() != g_wnd && IsDialogMessageW(g_wnd, &m)) continue;
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
     if (g_worker.joinable())
         g_worker.join();
+    if (g_buildFont) DeleteObject(g_buildFont);
     GdiplusShutdown(token);
     CoUninitialize();
     if (!selfToDelete.empty())

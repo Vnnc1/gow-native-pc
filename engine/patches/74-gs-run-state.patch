@@ -1,0 +1,99 @@
+﻿gs-native-pc (patch 74): a coalesced primitive run compares its draw state once instead of once per primitive
+
+Patch 66 turns per-primitive submits into same-state runs on the GS frontend, but the worker still receives each
+primitive through the generic SubmitRun loop, which calls Submit() per primitive. Submit() compares the batch state
+with the pending state field by field (`sameState`) on every primitive even though a run carries exactly one state.
+
+Measured on the Asia disc at 0.5x (`GOW_GS_COST=1`, 5 s windows): `compare_ms` falls from 53-134 ms to 2-7 ms per
+window and the per-primitive cost from ~250-260 ns to ~200-215 ns (ship deck, t=15-60 s). The comparison is not
+removed, only amortized: the first primitive of the run still runs the full compare and flushes when it differs, so
+the pending-batch contents are identical to the old path.
+
+PS2X_GS_RUN_STATE_FAST=0 restores the per-primitive loop (the old behaviour) for A/B.
+
+Files: PS2Recomp/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+       PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 8db1f53..1a5489c 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -2497,7 +2497,9 @@ struct GSHwBackend::Impl
+         return true;
+     }
+ 
+-    void submit(const GSPrimitiveBatch &b)
++    // patch 74: stateKnown means the caller already established that this primitive carries the state of the pending
++    // batch (a coalesced run has one state), so the field-by-field compare is redundant.
++    void submit(const GSPrimitiveBatch &b, bool stateKnown = false)
+     {
+         beginGpuSample(); // first primitive after a Present opens the frame's GPU window (opt-in)
+         // patch 62: whole per-primitive cost of this worker (all exit paths, including the skips)
+@@ -2547,9 +2549,9 @@ struct GSHwBackend::Impl
+             }
+         if (havePending)
+         {
+-            const uint64_t compareStart = costOn ? costTicks() : 0u;
+-            const bool same = sameState(pendingState, s);
+-            if (costOn)
++            const uint64_t compareStart = (costOn && !stateKnown) ? costTicks() : 0u;
++            const bool same = stateKnown ? true : sameState(pendingState, s);
++            if (costOn && !stateKnown)
+             {
+                 cost.compareTicks += costTicks() - compareStart;
+                 ++cost.compares;
+@@ -3589,6 +3591,39 @@ void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
+     d.submit(batch);
+ }
+ 
++// gow-native-pc (patch 74): the GS frontend coalesces primitives that share one draw state into a run (patch 66). Every
++// primitive of the run therefore carries the same state as the one before it, and the worker only has to compare the
++// run's state with the pending batch once, on the first primitive. The per-primitive results are unchanged: the first
++// submit still does the full comparison and flushes when it differs.
++void GSHwBackend::SubmitRun(const GSDrawState &state, const GSVertex *vertices, const uint8_t *counts, uint32_t primCount)
++{
++    static const bool runFast = []
++    {
++        const char *v = std::getenv("PS2X_GS_RUN_STATE_FAST");
++        return !(v && *v == '0');
++    }();
++    if (!runFast)
++    {
++        GSRasterBackend::SubmitRun(state, vertices, counts, primCount);
++        return;
++    }
++    Impl &d = *m_impl;
++    if (!d.ensure())
++        return;
++    GSPrimitiveBatch batch{};
++    batch.state = state;
++    for (uint32_t i = 0; i < primCount; ++i)
++    {
++        const uint8_t n = static_cast<uint8_t>(std::min<uint32_t>(counts[i], 3u));
++        if (n == 0u)
++            continue;
++        batch.vertexCount = n;
++        for (uint8_t v = 0; v < n; ++v)
++            batch.vertices[v] = vertices[static_cast<size_t>(i) * 3u + v];
++        d.submit(batch, i != 0u);
++    }
++}
++
+ void GSHwBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+ {
+     Impl &d = *m_impl;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_hw_backend.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+index 97f05e1..94fca69 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+@@ -18,6 +18,9 @@ public:
+     void Reset() override;
+ 
+     void Submit(const GSPrimitiveBatch &batch) override;
++    // gow-native-pc (patch 74): a coalesced run carries one draw state for all of its primitives, so only the first one
++    // compares it with the pending batch. PS2X_GS_RUN_STATE_FAST=0 replays the per-primitive path.
++    void SubmitRun(const GSDrawState &state, const GSVertex *vertices, const uint8_t *counts, uint32_t primCount) override;
+     void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override;
+     void BeginTransfer(const GSTransferCommand &command) override;
+     void UploadImage(const uint8_t *data, uint32_t sizeBytes) override;
+

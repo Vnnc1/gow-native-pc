@@ -19,12 +19,15 @@ static void env(const char *k, const char *v) {
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "Usage: gow_vu1_tasks --fixture <file|none> | --replay <file> [hybrid|jit|helper|sse|exact] [repetitions=5]\n");
+        std::fprintf(stderr, "Usage: gow_vu1_tasks --fixture <file|none> [runs=4] | --replay <file> [hybrid|jit|helper|sse|exact] [repetitions=5]\n");
         return 2;
     }
     env("GOW_VU1N_X64", "1");
     const std::string action = argv[1];
     if (action == "--fixture") {
+        char *end = nullptr;
+        const unsigned long runs = argc > 3 ? std::strtoul(argv[3], &end, 10) : 4;
+        if (!runs || runs > 1000000 || (end && *end)) return 2;
         if (std::string(argv[2]) != "none") env("GOW_VU1_TASK_RECORD", argv[2]);
         env("GOW_VU1_TASK_LIMIT", "3"); env("GOW_VU1_TASK_STRIDE", "1");
         std::array<uint32_t, 4096> code{};
@@ -41,7 +44,7 @@ int main(int argc, char **argv)
         GS gs;
         VU1Interpreter vu;
         uint64_t digest = 0;
-        for (unsigned i = 0; i < 4; ++i) {
+        for (unsigned i = 0; i < runs; ++i) {
             for (unsigned lane = 0; lane < 4; ++lane) {
                 vu.state().vf[1][lane] = float(i + lane);
                 vu.state().vf[2][lane] = 1.0f;

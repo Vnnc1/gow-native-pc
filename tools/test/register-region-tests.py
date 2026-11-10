@@ -78,6 +78,12 @@ experimental_frame_pc = "0x100000"
             self.register()
         self.assertFalse(self.manifest.exists())
 
+    def test_build_cache_without_source_root_is_rejected(self):
+        self.write(self.runner.parent.parent / 'CMakeCache.txt', b'CMAKE_CXX_COMPILER=clang++\n')
+        with self.assertRaisesRegex(ValueError, 'CMAKE_HOME_DIRECTORY'):
+            self.register()
+        self.assertFalse(self.manifest.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

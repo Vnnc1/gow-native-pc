@@ -57,16 +57,42 @@ def summarize(rows, warmup):
     }
 
 
-def environment(profile, run, args, early):
+def region_for_elf(profile, elf):
+    # A regional executable has its own frame probe address and menu confirm button; the profile's global
+    # diagnostics/optimize values describe the USA disc only (Japan/Asia use 0x183BB8 and Circle).
+    name = Path(elf).name
+    for region in profile.get("regions", []):
+        if region.get("elf") == name:
+            return region
+    return None
+
+
+def regional_pad_script(script, confirm):
+    # Replace the USA "x" presses with the regional confirm button, keeping each entry's *N repeat count.
+    if not confirm or confirm == "x":
+        return script
+    entries = []
+    for entry in script.split(","):
+        time, _, action = entry.partition(":")
+        base, star, count = action.partition("*")
+        if base.lower() == "x":
+            action = f"{confirm}*{count}" if star else confirm
+        entries.append(f"{time}:{action}")
+    return ",".join(entries)
+
+
+def environment(profile, run, args, early, frame_pc=None, pad_script=None):
+    # USA defaults; regional runs pass their own frame probe and confirm-button script (region_for_elf).
+    frame_pc = frame_pc or profile["diagnostics"]["frame_pc"]
+    pad_script = pad_script or profile["optimize"]["pad_script"]
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
     env.update(GOW_PERF_DIAG="1" if args.mode == "timing" else "frames", GOW_FRAME_DIAG="1",
-        GOW_PERF_FRAME_PC=profile["diagnostics"]["frame_pc"], GOW_PAD_TEST="1", GOW_FAST_BOOT="1",
-        GOW_SKIP_FMV="1", GOW_PAD_TEST_NO_CAPTURE="1", GOW_PAD_GUION=profile["optimize"]["pad_script"],
+        GOW_PERF_FRAME_PC=frame_pc, GOW_PAD_TEST="1", GOW_FAST_BOOT="1",
+        GOW_SKIP_FMV="1", GOW_PAD_TEST_NO_CAPTURE="1", GOW_PAD_GUION=pad_script,
         GOW_MC0=str(run / "card.ps2"), GOW_SAVES_DIR=str(run / "saves"), GOW_AUDIO="1",
         GOW_VU1N_X64="1", GOW_VU1X_INLINE="1", GOW_VU1_SIN_COMPILAR="1", GOW_VU1_CAPTURE_MISSES="0",
         GOW_GS_FINISH_ASINCRONO="1", GOW_VU1_EARLY_FINISH=str(early), PS2X_GS_WORKER="1", PS2X_GS_HW="1",
-        PS2X_GS_HW_SCALE=str(args.scale), PS2X_GS_ESCALA=str(args.scale), PS2X_GS_ESCALA_DINAMICA="0",
-        GOW_WINDOW_HIDDEN="1" if args.hidden else "0", TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720",
+        PS2X_GS_HW_SCALE=str(args.scale),        GOW_WINDOW_HIDDEN="1" if args.hidden else "0", TOBIICHI_ANCHO="1280", TOBIICHI_ALTO="720",
         TOBIICHI_FXAA="0", TOBIICHI_VSYNC="0", TOBIICHI_VENTANA_FPS="60", TOBIICHI_PANORAMICO="16:9")
     if getattr(args, "experiment", "barrier") in ("stage-spin", "build"):
         env.update(GOW_VU1_EARLY_FINISH="0", GOW_GS_EARLY_FINISH="1",
@@ -114,10 +140,15 @@ def main():
     for f in (runner, baseline, elf, helper):
         if not f.is_file():
             p.error(f"Required file missing: {f}")
+    region = region_for_elf(profile, elf)
+    frame_pc = (region or {}).get("experimental_frame_pc") or profile["diagnostics"]["frame_pc"]
+    confirm = (region or {}).get("experimental_menu_confirm") or "x"
+    pad_script = regional_pad_script(profile["optimize"]["pad_script"], confirm)
     output = (a.output or data / "logs" / time.strftime("worker-ab-%Y%m%d-%H%M%S")).resolve()
     output.mkdir(parents=True, exist_ok=False)
     identity = {"runner_sha256": sha(runner), "elf_sha256": sha(elf), "helper_sha256": sha(helper),
-                "card_sha256": sha(a.card) if a.card else None}
+                "card_sha256": sha(a.card) if a.card else None,
+                "region": region.get("id") if region else "usa", "frame_pc": frame_pc, "menu_confirm": confirm}
     identity["baseline_runner_sha256"] = sha(baseline)
     report = {"schema": 1, "mode": a.mode, "identity": identity, "settings": vars(a) | {"root": str(root)},
               "scope": "Alternating real-time scripted route; scene alignment is not guaranteed. Timing/capture are not FPS benchmarks.",
@@ -138,10 +169,11 @@ def main():
             shutil.copyfile(a.card, run / "card.ps2")
             if sha(run / "card.ps2") != identity["card_sha256"]: raise RuntimeError("Initial card changed while copying")
         effective_early = early if a.experiment == "barrier" else 0
-        settings = {"experiment": a.experiment, "variant": early, "early_finish": effective_early, "mode": a.mode, "warmup_seconds": a.warmup, "visible": not a.hidden,
-                    "scale": a.scale, "dynamic_scale": False, "input_script": profile["optimize"]["pad_script"]}
+        settings = {"experiment": a.experiment, "variant": early, "early_finish": effective_early, "mode": a.mode,
+                    "warmup_seconds": a.warmup, "visible": not a.hidden, "scale": a.scale, "dynamic_scale": False,
+                    "input_script": pad_script, "frame_pc": frame_pc, "region": identity["region"]}
         (session / "session.json").write_text(json.dumps({"schema": 1, "id": run.name, "state": "prepared", "settings": settings}))
-        env = environment(profile, run, a, early)
+        env = environment(profile, run, a, early, frame_pc, pad_script)
         print(f"Run {index + 1}/{len(sequence)}: {a.experiment} variant={early}, mode={a.mode}, {a.seconds}s", flush=True)
         selected_runner = baseline if a.experiment == "build" and not early else runner
         proc = subprocess.Popen([str(helper), str(session), str(selected_runner), str(elf), str(root)], cwd=run, env=env)

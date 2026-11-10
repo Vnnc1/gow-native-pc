@@ -1,6 +1,7 @@
 """Check a generated .run installer in private directories, without game data."""
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -15,7 +16,9 @@ with tempfile.TemporaryDirectory(prefix='gow-installer-test-') as temporary:
     manifest = json.loads((target / 'linux-package.json').read_text())
     for name, digest in manifest['files'].items():
         assert hashlib.sha256((target / name).read_bytes()).hexdigest() == digest, name
-    assert manifest['version'] == '0.5.0'
+    version = re.search(r'project\(GowNativePcLauncher VERSION ([0-9.]+)',
+                        (target / 'launcher/CMakeLists.txt').read_text()).group(1)
+    assert manifest['version'] == version
     assert (target / 'launcher/bin/gow-launcher').stat().st_mode & 0o111
     sentinel = target / 'player-save-sentinel'
     sentinel.write_text('preserve')

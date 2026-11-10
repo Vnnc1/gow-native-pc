@@ -1,0 +1,34 @@
+# zzz-303-gs-ab-markers: effective-setting markers that tools/test/gs-run-ab.py checks before it accepts a session.
+#
+# The PR 26 rewrite of GS::GS() (patch 66) dropped fix-chore's "[gs-run-config] enabled=<0|1>" line, so every
+# gs-run-ab.py session failed its effective_setting check on the integrated chain. It is printed again, once per
+# process, where PS2X_GS_RUN is read. "[gs-wrap-config] group=<0|1>" reports zzz-302's GOW_GS_WRAP_GROUP next to
+# "[gs-hw] render-target renderer ready", so FPS sessions (without GOW_GS_HW_STATS) can prove which path ran.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 5a5443b..0910ca8 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1018,6 +1018,7 @@ struct GSHwBackend::Impl
+             scale = std::clamp(static_cast<float>(std::atof(s)), 0.25f, 4.0f);
+         std::fprintf(stderr, "[gs-hw] render-target renderer ready, scale %.2f (%s)\n", scale,
+                      reinterpret_cast<const char *>(g.GetString(kRenderer)));
++        std::fprintf(stderr, "[gs-wrap-config] group=%d\n", wrapGroupOn ? 1 : 0); // zzz-303: effective zzz-302 setting
+         initialized = true;
+         return true;
+     }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 18a7442..cc672a2 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -425,6 +425,11 @@ GS::GS()
+     }();
+     m_runEnabled = runEnabled;
+     m_runDiag = std::getenv("GOW_GS_COST") != nullptr;
++    // zzz-303: the effective setting, once per process, for session reports and tools/test/gs-run-ab.py (the
++    // fix-chore patch 66 marker that the PR 26 rewrite of this constructor dropped)
++    static std::atomic<bool> runConfigReported{false};
++    if (!runConfigReported.exchange(true, std::memory_order_relaxed))
++        std::fprintf(stderr, "[gs-run-config] enabled=%d\n", runEnabled ? 1 : 0);
+     reset();
+ }
+ 

@@ -13,6 +13,7 @@ crc = "D6385328"               # PCSX2 game CRC (XOR of the ELF's 32-bit words) 
 text_sha1 = "8c6e61a95e84e88b01a0cea25b3824cf6b2cbe00"
 
 [runtime]
+branding_image = "assets/ratone/ratone-original-corrected.png"
 # paths inside the runtime checkout (engine/runtime.toml) used by the pipeline
 recompiler_template = "config/recomp.template.toml"
 function_map = "config/funcmap.csv"
@@ -31,12 +32,22 @@ iop_modules_dir = "IOP_MOD"    # the game loads its IRX modules as IOP_MOD/<name
 text_files = ["R_PERM.WAD", "R_SHELL.WAD"]   # where a translation's text lives
 widescreen_movie_ext = ".PSW"  # the 16:9 movies; the port plays them, so a disc without them maps them to .PSS
 movie_ext = ".PSS"
-# The standalone PT-BR disc has a reduced SEMO01.PSW that never completes playback.
+# The standalone PT-BR disc has reduced SEMO widescreen placeholders that cannot complete playback.
 # Match exact bytes, not a general size threshold: short valid movies must survive.
-widescreen_placeholders = [{size = 16388, sha256 = "98117b3548648b5aec8843bd95fd0187f7b59411b8e0f70d403ce25d0e6c190c"}]
+widescreen_placeholders = [
+    {size = 16388, sha256 = "98117b3548648b5aec8843bd95fd0187f7b59411b8e0f70d403ce25d0e6c190c"},
+    {size = 114692, sha256 = "97a80e440f6ca7d6253069629351d78984826ebb50d738832af7bc901640702a"},
+]
 
 [build]
 unity_batch = 16
+
+[saves]
+directory = "BASCUS-97399GodOfWar"
+preview_wad = "R_SAVEPT.WAD"
+names_wad = "R_PERM.WAD"
+names_resource = "msgs_en.txt"
+location_message_base = 600
 
 [optimize]
 # scripted run that records the VU1 microcode and IOP modules the game uses (Tobiichi's recording script)
@@ -45,6 +56,49 @@ pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,40:cuadrado,41:cuadrado,42:cuadra
 
 [diagnostics]
 frame_pc = "0x1837B8"          # vid::Flip: guest frames, distinct from host presentation rate
+
+[diagnostics.scenes.ship_guard]
+# Private blank-card benchmark: initial ship encounter, no movement/camera input.
+# A 50-unit envelope allows observed block/knockback motion; not a frozen replay.
+# Holding block and refilling health keep the initial arena active without deaths.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,g0:l1*600"
+god_mode = true
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+
+[diagnostics.scenes.ship_frames]
+# Rejected combat pilot: arrival/knockback still diverges. Keep gates mandatory;
+# do not use its timing as a valid comparison until trajectories match.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,f0:l1*100000"
+god_mode = true
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+frame_begin = 240
+frame_end = 840
+trajectory_tolerance = 25.0
+
+[diagnostics.scenes.ship_arrival_frames]
+# Rendered arrival before combat, not an FMV or paused menu. The zero-length
+# frame entry suppresses leftover menu confirms without pressing a gameplay key.
+pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,f0:l1*0"
+god_mode = false
+position_tolerance = 50.0
+zones = ["Athn01A", "Athn01B"]
+frame_begin = 0
+frame_end = 360
+trajectory_tolerance = 25.0
+
+[diagnostics.scenes.ship_altar_frames]
+# Requires a private copy of a card whose first slot is the Athn01D ship altar.
+# Stationary heavy scene, not combat. Wrong locations/trajectory drift must fail.
+requires_card = true
+pad_script = "5:start,12:abajo*0.15,18:x,24:x,30:x,f0:l1*0"
+god_mode = false
+position_tolerance = 5.0
+zones = ["Athn01D"]
+frame_begin = 600
+frame_end = 2400
+trajectory_tolerance = 5.0
 
 # Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
 # accepted as a translation, and its language is guessed from the words below.
@@ -65,6 +119,24 @@ language = "ja"
 label = "Japanese (Japan)"
 known_crc = "CA052D22"
 known_text_sha1 = "8ed48ca88c73e7e340be3a8e7ff16b07825cb96c"
+experimental_frame_pc = "0x183BB8"
+experimental_menu_confirm = "circulo"
+
+# Asia, second pressing. Measured on 2026-11-03 from a supplied SCAJ-97399 image: its boot executable is the
+# Japanese one byte for byte (same CRC, same .text SHA-1 and size), so the disc runs the Japan build and never
+# the USA one. `code` names the region whose build runs this executable, without asking for a second build of
+# identical code; the disc data (movies, text, layout) stays its own. Its shell is Chinese: the first boot on a
+# Japan build (2026-11-03) rendered "新游戏" / "确定" over the Japanese logo, so the localization lives in the
+# disc's textures and the executable stays the Japanese one. The profile's language_hints only see the
+# Japanese build's internal strings and return "en", which is why this value is recorded by hand.
+[[regions]]
+id = "asia-97399"
+elf = "SCAJ_973.99"
+language = "zh"
+label = "God of War (Asia, SCAJ-97399, Chinese)"
+known_crc = "CA052D22"
+known_text_sha1 = "8ed48ca88c73e7e340be3a8e7ff16b07825cb96c"
+code = "japan"
 experimental_frame_pc = "0x183BB8"
 experimental_menu_confirm = "circulo"
 

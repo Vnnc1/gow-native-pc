@@ -64,6 +64,16 @@ cache made from another source folder): build.ps1 takes `C:\gow-build-<hash>` wh
 copy, and records the choice in `data\build-root.txt`, which the launcher (runner path) and the uninstaller read.
 The launcher also checks CMakeCache's source root before accepting a runner, so a fresh copy cannot use another copy's build.
 
+Normal setup exposes a separate build base (`/BUILDROOT=` in silent mode) and
+persists UTF-8 `data/build-root.txt`. Updates retain it unless explicitly changed.
+A location change requires rebuilding; never copy CMake/Ninja caches as relocatable
+or delete the old build/player data automatically. Collision fallback stays beside
+the selected base, with exact source ownership checks. Installer tests use the
+compile-only `GOW_SETUP_TEST_IDENTITY` to isolate registration and shortcuts:
+`tools/test/setup-build-location.py`; pipeline selection is covered by
+`tools/test/build-root-tests.ps1` (also in pipeline-tests.ps1). See
+`docs/research/player-integration-2026-11-09.md` for the agreed next features.
+
 ## Isolated regional builds
 
 Europe SCES_531.33 and Japan SLPM_670.10 have separate Windows builds validated
@@ -84,6 +94,9 @@ Run `tools/test/register-region-tests.py`, the launcher's `gow_region_tests` tar
 See `docs/research/regional-port-2026-11-02.md` for evidence and limitations.
 
 ## Experimental Linux integration
+
+Patch `zzz-324` selects MSVC `intrin.h` versus Clang/GCC `x86intrin.h` for GS/VU1 cycle counters.
+Keep x86 architecture gates and the non-x86 fallback; verify the native Linux runtime library after header changes.
 
 `bash build.sh` runs `tools/pipeline/linux.py` with Python 3.12+, native Clang,
 system/SDK Qt 6.5+ and SDL2. It shares the profile, disc preparation, transactional
@@ -137,7 +150,171 @@ recycle it until normal host release, and reset it on host lifecycle changes.
 is part of `verify`. This removes one lock wait, not all host/backend/driver waits;
 see GPU-02 in the performance ledger before extending its performance claims.
 
+## PR 26 integration (runtime chain 59-94 + zzz-*)
+
+The runtime chain is PR 26's renderer/VU1/mod stack (59-94, `zz-workspace-final-state`) followed by the fix-chore
+work rebuilt on top of it: `zzz-001..006` (ring ownership, software reference, frame order, texture budget, shader
+lifecycle, mod-table bounds), `zzz-100..103` (audio, movie tail), `zzz-200..205` (finish countdown, dump clock gate,
+VU1 scalar outline, queue-wait metrics, frame-aligned tests, experimental logic rate), `zzz-261` (shared present)
+and `zzz-300` (review fixes on default paths: segment-fenced vertex ring, Op::Run tail over-read, Op::Vertices
+guard that dropped every compact single primitive, BufferStorage only with ARB_buffer_storage below 4.4).
+The `zzz-` prefix keeps them after the PR's names; a later renumbering must keep this order. `*.patch -text` in
+`.gitattributes` is required: without it a Windows clone checks the patches out with CRLF and stage `fetch` fails at
+patch 02. Launcher changes live in `launcher/` sources, never as patch files. Decisions, bugs found, tests and the
+laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integration.md).
+
 ## Player diagnostic reports
+
+Patch `zzz-325` requires a verified current `R2ButtonPress` instance for Greek R2 replacement. The symbol's
+leaf meshes also appear outside that instance; replacing by leaf identity corrupts the Spartan-style HUD.
+Preserve those original draws and the existing readiness/capacity gates. `control-prompts.py` covers the
+regression; private slot-3 captures and limits are in `docs/research/spartan-r2-prompt-2026-11-10.md`.
+
+Patch `zzz-318` adds the RatOne startup and six-category in-game dock. The profile's
+`runtime.branding_image` supplies `GOW_BRAND_IMAGE` at Windows/Linux configure time;
+keep the approved PNG byte-identical and embed it, never depend on an artist's local path.
+F1/Back+Start opens the dock; F2 opens cheats; Ctrl+F1 remains the debugger.
+Live keyboard/controller bindings use immutable shared snapshots; prompts use the same
+getters. Capture discards queued navigation and waits for release. Preserve classic
+aliases, modifier semantics, and post-close input/ExitKey release gates.
+Audio gain/mute applies after diagnostic PCM in the common SPU2 callback (both devices).
+Patch `zzz-319` keeps the dock inside the minimum window width and labels unbound
+inputs explicitly; retain the 320-pixel layout check in the GPU menu suite.
+Mods supply bounded manager-owned `GOW_ACTIVE_MODS`, reserved and cleared on deactivation.
+Patches `zzz-320..322` pause EE execution at scheduler boundaries, rebase host deadlines, and freeze audio queue consumption/sample clocks. Host polling and normal shutdown remain active. Settings edits publish bounded atomic per-session transactions under launcher app data; `menu_settings.h` validates and imports only changed fields, including bindings and audio, into the existing QSettings category. Never put the private bridge path in reusable boot files or diagnostic exports. Run `menu-state.py`, `game-menu-smoke.py --pause-trace` and `menu-pause-report.py`, as well as the existing
+control-prompts suite and explicit GPU `tools/test/game-menu.py` when changing this UI.
+See `docs/research/menu-pause-settings-2026-11-10.md` for acceptance limits, evidence and the still-pending native save-slot work.
+
+Patch `zzz-310` restores USA Flash button prompts with last-active input and the
+production keyboard/controller mappings. Input selection is shared by buttons,
+sticks and labels; never switch merely because an idle pad is connected.
+Publish complete prompt batches at the guest flip, including empty frames.
+Patch `zzz-311` suppresses recognized original Flash symbols, learned button
+plates and shoulder-label glyphs after host replacements render successfully.
+Keep original drawing before readiness, for unknown art and at batch capacity;
+clear learned plates when movie discovery resets. Preserve rotation/shake diagrams.
+`gow_control_prompts` in verify covers input, labels and bounded publication;
+`control-prompts-smoke.py` captures the final host overlay with a private card.
+Forced styles require `GOW_PAD_TEST=1` and are not hardware detection evidence.
+Patch `zzz-312` replaces the USA `goMiniGameCircle` submissions at `0x158020` /
+`0x158B40` only for the verified `0x157A60` callers, stack matrix layout and exact
+resource identity. Preserve the original path on invalid data/readiness/capacity;
+never alter creature/QTE state to replace the visual. World coordinates must not
+receive Flash's additional aspect stretch. `gow_control_prompts` also tests these
+production hooks. Physical Sony pads, real combat QTEs and guest-depth occlusion
+remain acceptance gaps. See `docs/research/world-control-prompts-2026-11-09.md`
+and `docs/research/control-prompts-2026-11-09.md`.
+
+Patch `zzz-313` bakes prompt textures to 48 pixels high and themes Xbox badges.
+Xbox world badges project the animated model plane, with readable back faces;
+never add a host-clock spin that continues through guest pause. They still lack
+shared guest depth. `gow_control_prompts` covers projected corners and stable
+samples; `tools/test/control-prompts-render.py` is an explicit hidden GPU artwork
+preview, not a combat test or part of data-free verify.
+
+Patch `zzz-314` adds a keyboard-only mapped movement guide beneath Greek stick
+QTE diagrams. Preserve original directional animations and the one-guide/frame
+and four-slot capacity gates; do not turn a visual hint into automatic input.
+Default/custom labels and composite leaves are covered by `gow_control_prompts`.
+Aphrodite's reported silence remains unproven despite successful asset/mixer
+checks; see `docs/research/aphrodite-and-keyboard-qte-2026-11-09.md`.
+
+Patch `zzz-315` moves task-recording delay/stride/limit checks before the large
+interpreter-copy frame, retaining the mutex across selection and publication.
+This fixes diagnostic overhead only; the recording-disabled gameplay path is
+unchanged. Run `tools/test/vu1-task-tests.py` and captured-task replay after edits.
+`tools/profile/sampler.cpp` supports `SAMPLER_CPU_ONLY=1` for thread CPU counters
+without suspension; instruction sampling remains intrusive and separate from
+FPS measurements. See `docs/research/vu1-waits-2026-11-09.md` (VU-09).
+
+Patch `zzz-316` specializes `chain` for ordinary versus diagnostic execution,
+without changing guest timing/flags/history or the AOT/JIT ABI. Keep the detailed
+path selected for cost, opcode or native counters. VU-10 records pinned replay
+and three visible private-card Athn01D pairs; this is not universal 60 FPS.
+`ship_altar_frames` requires an explicit card with that first-slot location;
+`gs-run-ab.py --card` must copy/hash it and never launch against the source card.
+Run task replay and `vu1-equivalence.py` after chain edits, including self-loop
+budget/depth exits and diagnostic modes. See `docs/research/vu1-chain-2026-11-09.md`.
+
+Patch `zzz-317` adds numbered mapped-key sequences for six rotation QTE symbols.
+Resolve shared leaves through bounded USA Flash instance ancestry and the final
+arrow matrix; CW/CCW names alone do not determine displayed direction. Preserve
+caller/stack/vtable/movie gates, complete-guide capacity and original arrow art.
+`GOW_QTE_AUTO=1` is default-off automatic pressing of recognized Greek button
+prompts only, not world indicators, ordinary tutorials or stick gestures. Keep
+empty-frame publication, stale/focus/conflict rejection and scripted-pad exclusion.
+`gow_control_prompts` covers production recognition/input; `qte-controls.py` tests
+the actual accessibility toggle. See `docs/research/keyboard-qte-sequences-2026-11-09.md`.
+
+Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
+index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
+written. Keep entry/resume, caller, primary-slot and size/result gates; do not use
+card timestamps, low-level page writes or generic MCSERV RPC as completion signals
+(this game uses EE libmc2 over DBCMAN). The earlier payload write is not completion.
+`runtime/gow_save_backup.h` is shared with F1 and publishes the final card name only
+after closing data and metadata successfully. Host notifications consume an atomic
+result; never draw on the EE thread. History uses existing paths and `source: auto`.
+Run `altar-save-tests.py` (also in verify), `save-history-ui.py` and the private-card
+`altar-save-smoke.py`; regional runners still need separate validated hooks.
+See `docs/research/altar-save-backups-2026-11-09.md`.
+
+Collector final metadata uses bounded atomic-write retries after child exit.
+`SessionDiagnostics::sessionMetadata` reconciles incomplete active metadata only
+with a valid latest-process exit event; never infer completion from silence or a
+stale heartbeat. Summary, exit handling, diagnostic UI and export share this
+reader. Recovery is flagged `final_metadata_incomplete` and preserves original
+files; raw incomplete metadata remains excluded from retention pruning. See
+`docs/research/collector-final-state-2026-11-09.md` and `session_diagnostics.py`.
+
+Patch `zzz-307` emits host-owned shared-acquisition counters as `[gow-present]`
+under existing performance diagnostics. Publication sequences are not unique
+game frames or scanout; hold age is not GPU time or input latency. Preserve
+lifecycle resets and hold age across report windows without adding GPU waits.
+The RAM path and older runners have no such metric. `tools/test/frame_metrics.cpp`
+and the deployed collector's `tools/test/session_diagnostics.py` cover accounting
+and export. See `docs/research/issue-31-stutter-2026-11-09.md` for unresolved stutter.
+
+Patch `zzz-308` sets raylib `FLAG_WINDOW_ALWAYS_RUN` at host window creation.
+The guest/audio already run independently: without this flag minimization blocks
+host polling and a close request cannot reach normal shutdown until restoration.
+Preserve this flag across window modes. `tools/test/window-lifecycle.py` is the
+Windows desktop/GPU integration gate (visible, minimized-close, restored-close),
+using a private disc/card and the deployed collector. This is not an AF/rain FPS fix.
+
+The 2026-11-05 [system audit](docs/research/system-audit-2026-11-05.md) records
+confirmed defects, test failures and vendor-tool limitations. Patch 76 validates
+GS raster shader links and releases temporary shader objects; `gow_shader_program_tests`
+injects creation/compile/link failures in verify. Patch 77 resets audio resampling
+phase with its output queue; `gow_sound_regression` checks reset/fresh-stream parity.
+Neither patch establishes a gameplay FPS or audio-dropout improvement.
+Patch 78 adds bounded `GOW_AUDIO_TRACE=1` events for transition diagnosis. Normal
+`main` uses `_Exit`, so flush explicitly after joining the producer and stopping
+audio; a destructor alone is insufficient. Dumps must remain outside callbacks.
+`session-game-smoke.py --audio-trace` rejects missing end markers or overflow.
+Event `t_us` is relative to the begin marker; collector dump time is not event time.
+Patch 79 snapshots producer context only at publication under the output mutex;
+never read producer-only pending context from the callback. Reason totals count
+published audio frames, not call counts or execution time.
+Patch 80 extends movie-clock catch-up only to USA `0x189A88` entered from
+`0x18979C` in the final display-drain loop. Preserve both entry/caller gates,
+the existing one-field cap and original/resume delegation; do not generalize
+this to all sound RPC calls or regional overrides. `movie-tail-tests.py` is in verify.
+
+Patch `zzz-305` fixes the USA movie reader's drained-EOF retry loop (issue 30,
+`P04MP05`) and keeps movie completion false while decoded pictures remain.
+Preserve the entry/caller, cancellation, pending-block, MPEG-format and resume
+gates. Signaling EOF alone discards the last picture. `movie-tail-tests.py` covers
+both wrappers; `movie-smoke.ps1 -NewGame -RequireCompletion -ExpectedLastPicture 740`
+checks this clip through the intro route with a private card. See
+`docs/research/issue-30-movie-eof-2026-11-09.md` for evidence and scope.
+
+Patch `zzz-306` keeps VU1 generator images raw and decodes one at a time per pass;
+retain pass/input ordering so generated C++ stays byte-identical. Validate input
+length before allocation. After generator changes, run
+`python -I tools/test/vu1-generator-tests.py --generator <built-generator>`;
+use `--reference <baseline-generator>` for output-parity acceptance. Issue 6's
+original capture set is unavailable; lower local memory usage is not proof of
+closing every allocation failure. See `docs/research/community-issues-2026-11-09.md`.
 
 `launcher/diagnostics` is the private precompiled Windows test frontend. It uses a separate application-data
 identity, validates the profile ELF `.text` and packaged runner/helper hashes, copies the adjacent memory card
@@ -159,6 +336,17 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 ## Contracts (do not break)
 
+- **Individual saves (zzz-323)**: the launcher and in-game menu read the four valid 16-byte records of the USA
+  68-byte card index, not every dataN.bin file. `launcher/src/native_save_slots.h` must match the runtime copy
+  shipped by the patch. `tools/disc/save_slots.py` derives edition-specific names/previews from disc resources;
+  `discs` and `sync` populate `.gow-save-slots`. Never package those copyrighted caches or player cards.
+  Loading uses a session-local request and the EE's native teardown/frontend/load path, with loader state 8
+  (not a transient UI dialog field) as the slot-selection gate. Validate card 0 and the native index before
+  choosing; preserve original resume/error paths. Never overwrite the IOP's active card. Whole-card history
+  restoration still requires a closed game; regional hooks remain unvalidated. Run `save-slots.py`,
+  `native-load-tests.py`, `game-menu.py`, `save-history-ui.py` and the private-card `native-save-smoke.py`.
+  Evidence: `docs/research/native-save-slots-2026-11-10.md`.
+
 - **Pipeline output protocol** (parsed by `installer_backend.cpp`): `=== <step> ===`, `@@progress <done> <all>`,
   `@@status <text>`, anything else is log. Errors: a final `ERROR: <message>` line and exit code 1.
   `modules/build-progress.ps1` excludes Ninja glob checks and nested CMake regeneration counters from game progress.
@@ -168,12 +356,51 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   `python -I tools/test/loading-progress.py <Qt SDK bin/qml.exe> <llvm-mingw bin>` (real QML, fake pipeline signals).
 - **languages.json** (`data/<id>/`): `{game, title, recompile_elf, languages: [{language, label, edition, quality,
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
-- **In-game menu (patch 39)**: F1 opens the game menu (`gow_trucos.cpp`: Graphics, Cheats, Save tabs), F2 opens it on
-  the cheats, Ctrl+F1 opens the ImGui runtime debugger. Graphics changes are live for the session through the header-only
+- **In-game menu (patch 39, redesigned by zzz-318)**: F1 or Back+Start opens the category dock in `gow_trucos.cpp`
+  (Graphics, Controls, Audio, Mods, Cheats, Save); F2 opens cheats, Ctrl+F1 opens the ImGui runtime debugger.
+  Remapping, master volume/mute and supported graphics changes are live and persist through the launcher settings bridge.
+  The menu pauses simulation and audio consumption; it keeps host input/rendering active. Graphics changes use the header-only
   `runtime/gow_ajustes_vivo.h` (read once from GOW_SCALER, GOW_SHARPEN, TOBIICHI_FXAA, GOW_ANISO, TOBIICHI_ASPECTO,
-  TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings. TOBIICHI_PANTALLA = completa | sin_bordes |
+  TOBIICHI_FPS_GOSTER); the launcher imports durable edits on its next poll/open.   TOBIICHI_PANTALLA = completa | sin_bordes |
   ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
+- **GS primitive grouping (patch 66)**: since the PR 26 integration the PR's patch 66 is in the chain and grouping
+  is ON by default (`PS2X_GS_RUN=0` restores individual submissions; the launcher writes it from
+  `gsAgruparPrimitivas`). This is still an open decision: fix-chore's laptop A/B improved mean FPS but regressed
+  p95/p99 in its last pair, and the PR's evidence is frontend cost on an HD 4400 (366-427 -> 86-118 ns/vertex), not
+  frame tails. `gs-run-ab.py --compare grouping` on the i5-8265U is the gate; if p95/p99 regress again, set the
+  default back to off in both `gs_frontend.cpp` (zzz-300) and `Main.qml`, and record it in the performance ledger.
+  zzz-300 restored fix-chore's review fixes to the run encoder and the per-GS read of `PS2X_GS_RUN`.
+  fix-chore's opt-in GS candidates (67 alpha prune, 72 sampler cache, 73 specialized shader, 74 alpha bounds,
+  75 variant counters) and 71 VU1 chain inline are not in the chain since the PR 26 integration: they conflict
+  with the PR's renderer rewrite and none was a shipped default (the notebook favored 67's reference in all three
+  pairs). Their patches and tests are archived in `docs/research/pr26/deferred-fix-chore-patches/`; port one only
+  with its test back in verify.
+  `gs-run-ab.py --compare grouping|alpha|scaler --gpu-samples` uses private disc/card roots and optional Windows PDH
+  engine counters. GPU busy time is not power draw; report the busiest engine, not a sum of independent engines.
+  Timing/capture runs are not FPS benchmarks; scaler comparisons change output filtering and must disclose that.
+  Preserve flush ordering at state/transfer/CLUT/TEXFLUSH/FINISH/presentation/readback boundaries and GIF packet ends.
+  Inactive vertex tails must use `GSVertex{}` defaults (`q=1`), never read multiple vertices from a single local.
+  `gow_gs_run_tests` in `verify` compares the production frontend and worker queue against the individual path.
+  `tools/test/gs-run-ab.py` uses one executable, frames-only timing and private disc/card roots for visible A/B tests.
+  Window percentile medians are not pooled frame-time percentiles. Keep captures separate from FPS runs.
+- **Graphics settings coverage** (`launcher/qml/PaginaGrafico.qml`): the Graphics tab exposes every picture, texture
+  and renderer variable the runtime reads — the original quality controls, the texture-pack controls from patch 52
+  (`GOW_TEXTURE_PACK_MB`, `_STATS`, `GOW_TEX_PCSX2_NAMES`, `GOW_GS_HW_TEXDUMP`), presentation (`GOW_PROGRESIVO`,
+  `TOBIICHI_ASPECTO` with fixed ratios, `PS2X_GS_DIRECT_PRESENT`, `GOW_GL_MAX_MINOR`), the GS pipeline switches
+  (patches 59/61/66/69/72/74/77) and the renderer diagnostics. Pipeline and diagnostic switches sit behind
+  "Advanced renderer options" and are labelled with their variable name. Defaults reproduce the shipped build:
+  on-by-default switches write "1" (the runtime only checks for "0"), set-means-on switches are removed when off,
+  and numeric defaults are removed so the runtime's own value applies. A new switch needs a `Settings` property,
+  `restablecer()`, the `jugar()` play map, `Lanzador::iniciar`, `Textos.js` + `idiomas/*.js`, and both
+  `session_diagnostics.cpp` allowlists, and `tools/mods/gow_mods_cli.py`'s `ENV_ALLOWED` (plus an `EFFECT_PRESETS`
+  entry when a mod should offer it); `tools/test/launcher-env-contract.py` and `tools/test/regional-play-ui.py`
+  guard the chain. `GOW_TEX_PCSX2_NAMES` is launcher-owned and stays in `ENV_RESERVED`: a mod must not redirect
+  the exported texture-name list. Never expose a variable without a `getenv` reader: `GOW_RENDER_HEIGHT`, `GOW_GS_TIER`,
+  `GOW_FPS_TARGET`, `GOW_MIN/MAX_SCALE`, `GOW_TEX_PRELOAD`, `PS2X_GS_ESCALA`, `TOBIICHI_FILTRO` and
+  `PS2X_GS_SHADER_CACHE_DIR` exist only in design docs or are dead; `PS2X_GS_FOG_OFF` has a reader but the game
+  never draws with GS fog, so exposing it would be a switch that changes nothing. All renderer switches are read
+  once at startup: changing one needs a game restart (the F1 menu only handles patch 39's live atomics).
 - **Runtime env vars the launcher sets** (see `lanzador.cpp`): TOBIICHI_* (window, keys, cheats), PS2X_GS_* (renderer),
   GOW_VU1_CAPTURA (continuous VU1 recording into data/<id>/vu1_capture), GOW_ANISO (anisotropic filtering, 2..16),
   GOW_QTE_HOLD / _HZ (accessibility: a held button becomes the presses the minigames ask for, engine/patches/53; the
@@ -200,7 +427,7 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   GOW_MC0 (the memory card image: Mcd001.ps2 next to the ELF unless already set) and GOW_SAVES_DIR (data/<id>/saves):
   F1 > Save in game (Ctrl+F1 > Saves in the debugger) copies the card to GOW_SAVES_DIR/<yyyyMMdd-HHmmss>/{Mcd001.ps2, save.json} (patch 26); the Saves
   tab (PaginaPartidas.qml, Lanzador::partidas/guardarPartida/importarPartida/restaurarPartida/borrarPartida) lists,
-  makes, imports, deletes and restores copies. save.json: {label, time, source: F1|launcher|import|backup, card, bytes}.
+  makes, imports, deletes and restores copies. save.json: {label, time, source: auto|F1|launcher|import|backup, card, bytes}.
   A restore needs the game closed and first keeps the current card as a "backup" copy. There are no savestates: a copy
   holds the game's own last save (save altars), see docs/saves.md.
   GOW_VU1X_INLINE=0 selects the helper tier; GOW_VU1X_ONLY=1 is test-only (clears AOT registrations, requires JIT on).
@@ -253,6 +480,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **Runtime code**: edit in `engine/runtime/`, then turn the change into a new `engine/patches/NN-name.patch` (git diff
   in engine/runtime, with a header saying what/why/measured result). Patches apply in order; a later patch may depend
   on an earlier one. Keep each patch to one concern.
+  Changes to the profile's `runtime.overrides` also require `sync,build`: the runner compiles owned copies under
+  `ps2xRuntime/src/runner`, not `engine/runtime/src` directly. A successful `fetch,build` can leave the previous
+  override in the executable. Check synchronization and runner identity before accepting a gameplay comparison.
 - **Moving the patches to a newer runtime commit**: `tools/pipeline/patches.ps1 start -Onto <commit or ref>` turns
   engine/patches into a commit stack (branch gow-patches, worktree engine/runtime-patches) and rebases it with git's
   3-way merge; resolve conflicts there (`git add`, `git rebase --continue`), then `patches.ps1 export` rewrites only the
@@ -327,6 +557,8 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
   without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
   holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
+  Automatic configure also rejects missing, malformed or mismatched manifests; without a matching shipped profile,
+  it preserves the rejected local profile and configures without PGO. Never silently reuse stale optimization data.
 - Texture packs (runtime patch 52): PCSX2's replacement names, so PCSX2 packs work unchanged; the name code mirrors
   `GSTextureCache::HashCacheKey` (blocks or unswizzled rows, 32-bit palette, PSM/TW/TH/TEXA bits). Never commit or ship
   packs, dumps or screenshots of them. `GOW_TEX_PCSX2_NAMES=<file>` lists the names a session draws.
@@ -392,6 +624,17 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 
 ## Direct launch and diagnostics
 
+Patch 73 is a USA-only high logic-rate experiment: `GOW_EXPERIMENTAL_LOGIC_FPS=120|240`,
+unset/60/invalid means the original 60 Hz path. It changes the measured timestep
+and the frame-end wait only; fixed steps, movies and other callers retain their
+original waits. Presentation follows game flips in the experimental mode, while
+VBlank/audio clocks stay unchanged. `EeScheduler::currentEeCycle()` is EE-executor-only.
+Never enable it for regional overlays or add it to default boot profiles.
+`logic-rate-tests.py` is part of verify; `gs-run-ab.py --compare logic-rate` uses
+real-time input/windows, private cards and `GOW_DELTA_DIAG`. A speed ratio near
+one does not validate frame-counted QTEs, combos or collision behavior. See
+`docs/research/experimental-logic-rate.md` for evidence and limitations.
+
 Patches 36–37 add opt-in `GOW_SYNC_DIAG=1` worker/GS-stage wait aggregates and bounded isolated MSCAL task replay.
 `tools/test/worker-ab.py` separates FPS, intrusive timing and capture modes; it uses private cards and stops only its
 own child. `tools/test/vu1-task-replay.py` validates local task corpora with `gow_vu1_tasks` from the verify build.
@@ -407,6 +650,36 @@ The Performance diagnostics toggle enables audio buffer/rate, IOP drift, VU1 and
 `tools/test/sound_regression.cpp` covers positive/negative SPU2 master-volume overflow (patch 24).
 See `docs/research/audio-standalone-mods-2026-10-26.md` for unresolved scene, HUD and mod acceptance criteria.
 
+Patch 68 is an opt-in CPU countdown candidate (`GOW_FINISH_COUNTDOWN=1`, default off).
+It wraps only USA GoW resume PCs 0x17A328/0x17A32C and batches existing quiet
+checkpoints; retain generated polling/calls and full timer/IOP/event checkpoints.
+`tools/test/finish-countdown-tests.py` extracts the owned `engine/runtime/src/gow_overrides.cpp`,
+not the generated runner copy, and is part of verify. `gs-run-ab.py --scene ship_guard`
+checks encounter state, zone and cross-run position bounds; it is not a frozen replay.
+Do not equate sampler RIP occupancy (which includes waits) with thread CPU utilization.
+
+Patch 69 gates the timed GS dump clock read; keep its first-draw origin and eligible
+first-batch trigger. `gs-run-ab.py --task-capture` is an intrusive diagnostic mode
+with a 32-record cap; never present those session FPS as a benchmark or export its
+local game-derived task files. See the scene-bottleneck report for rejected combat
+comparisons and the separately validated exact-input VU1 corpus.
+
+Patch 70 adds test-only `f<N>` pad/capture times and frame-window boundaries.
+`ship_arrival_frames` compares the first 360 rendered arrival frames; it is not sustained combat.
+The harness requires matching frame-indexed trajectories and consecutive pad observations.
+Pad-observed intervals are not GPU latency; exact audio snapshots can straddle one device callback.
+Missing five-second windows and unavailable exact dropped-audio counts must remain null.
+Patch 71's JIT chain adapter is opt-in (`GOW_VU1X_CHAIN_INLINE=1`), default off.
+`gs-run-ab.py --compare vu1-inline` forces JIT-only in both variants and checks effective markers;
+do not present those results as the shipped hybrid mode. Preserve the original chain/AOT/DLL path.
+Run the methodology tests, full verify and identical-task replay for changes to these contracts.
+
+Performance continuation checkpoint (2026-11-04):
+`docs/research/render-delivery-2026-11-04/resume-checkpoint.md` records the user-requested pause,
+unaccepted scalar-outline/encounter-anchor drafts, evidence and pending validation. Read it before
+resuming this investigation. Drafts under that report's `drafts/` are not ordinal runtime patches;
+never apply/package them automatically. A later explicit user request to resume supersedes the pause.
+
 Queue backpressure diagnostics (patch 59): `GOW_SYNC_DIAG=1` also emits `[gow-queue]`
 for stage-ring capacity (queue 1, bytes) and backend capacity (queue 2, chunks).
 These producer waits include scheduling and can overlap existing VU/GS timers.
@@ -419,3 +692,20 @@ outside this budget. `gow_texture_budget_tests` is in verify; `gow_texture_uploa
 run, real-OpenGL CT32/T8/T4 pixel check, not a headless test. `session-game-smoke.py --texture-cache`
 checks `[gs-cache]` counters. Keep reference validity during eviction and preserve cache-key dimensions/formats.
 Detailed private-kit reports enable `GOW_GS_HW_STATS`; normal FPS collection keeps it off.
+
+Experimental renderer patches 72–74 remain default-off: `GOW_GS_SAMPLER_CACHE`,
+`GOW_GS_FAST_SHADER`, `GOW_GS_ALPHA_BOUNDS`. Preserve reference paths, upload-time
+sampler invalidation, per-program uniform locations and optional shader fallback.
+Alpha bounds exclude texture-alpha-dependent draws. `verify` includes sampler
+state and alpha interval tests. `gow_renderer_variants_test` plus
+`tools/test/renderer-variants.py` is an explicit real-OpenGL color comparison,
+not headless GPU validation. Patch 75 `GOW_GS_VARIANT_DIAG` adds test-only counters.
+See GS-07/08/09 in the performance ledger before proposing default promotion.
+zzz-302/304 group wrapping-blend (COLCLAMP=0 shader blend) triangles whose pixel coverage is provably disjoint
+(identical shared edge, or a separating line with a 1/16 GL pixel margin) into one feedback draw; anything else keeps
+one draw per triangle with a barrier. Keep the shader's destination read at `gl_FragCoord` only, or the grouping is
+no longer exact. `GOW_GS_WRAP_GROUP=0` is the reference path; `GOW_GS_HW_STATS` prints `[gs-hw-wrap]`.
+zzz-303 prints `[gs-run-config] enabled=N` and `[gs-wrap-config] group=N`: `gs-run-ab.py` rejects a session without
+the marker of its compared setting, so keep them when touching `GS::GS()` or the renderer init.
+Future Vulkan/Direct3D and automatic launcher selection are proposals only in
+`docs/research/graphics-api-roadmap.md`; no such backend or selector is implemented.

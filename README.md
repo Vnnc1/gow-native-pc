@@ -11,19 +11,27 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-0.5.0-crimson)
+![version](https://img.shields.io/badge/version-0.6.0-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 </div>
 
+**0.6.0 test candidate:** new paused in-game menu with persistent settings, native save-slot loading, altar backups, mapped QTE prompts, optional QTE assistance and build-directory selection. See the [complete changes](CHANGELOG.md) and [candidate validation](docs/research/release-0.6.0-candidate.md). Published only as v0.6.0-rc.1 for testing; v0.5.0 remains stable.
+
 **Linux / Steam Deck (experimental):** native launcher, build pipeline and Linux installer are available for testing.
 See [installation and remaining validation](docs/linux.md). Steam Deck hardware and performance are not yet validated.
 
 > [!IMPORTANT]
-> This repository contains **no game files**. You need your own copy of God of War. The native runtime
+> This repository contains **no game files**. You need your own **legally acquired copy of God of War** (the game,
+> its disc image and any extracted assets are never distributed here). The native runtime
 > (**PS2Recomp**, as extended by Waffle565, KIexster and the Tobiichi port) is **required**; the launcher downloads it,
 > it is not stored here. Full attribution: [`CREDITS.md`](CREDITS.md).
+>
+> These folders are created locally by the install and are **not committed**: `data/` (prepared discs, saves, logs,
+> recorded VU1/IOP code, portable tools), `engine/runtime/` (the runtime the `fetch` stage clones),
+> `launcher/build*/` and `launcher/bin/` (launcher builds), and `games/*/pgo/` (profile-guided data). See
+> [`.gitignore`](.gitignore).
 
 > [!WARNING]
 > **The project is not finished yet.** The game is playable, but it is not 100%: a locked 60 fps is not reached in
@@ -71,11 +79,14 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
   ("Hold instead of mashing" in the Accessibility tab), alongside stick gestures and texture packs.
-- **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
+- **In-game menu (F1 / Select + Start)**: pauses gameplay; graphics, controls, audio, accessibility, texture packs,
+  cheats and saves. Supported changes persist and synchronize with the launcher.
 - **Launcher in nine languages**: English, Portuguese, Spanish, Turkish, French, German, Italian, Russian and
   Simplified Chinese.
 
 ## What's new in 0.5.0
+
+For the newer 0.6.0 test candidate, see the [complete changelog](CHANGELOG.md). The following is the previous release.
 
 - **Experimental Linux:** native launcher, build pipeline and `.run` installer for testing on Linux PCs and
   Steam Deck. Built and smoke-tested in WSL; real Steam Deck performance and compatibility remain unvalidated.
@@ -185,6 +196,10 @@ launcher development also take space. The ISO is not needed to play after prepar
 Builds use a short folder on `C:` by default: `C:\gow-build-clang` for clang Release (the PGO training build uses
 `C:\gow-build-clang-pgogen`). If another copy already uses that root, the pipeline chooses `C:\gow-build-<hash>-clang`.
 The base path is recorded in `data/build-root.txt`; the launcher reads it automatically.
+In setup, use **Build folder → Change** to choose a short local path such as `D:\gow-build`
+(up to 40 characters). The same choice is available when updating an existing installation.
+Changing it requires compiling again; existing saves and the previous build are preserved.
+The installer does not move compiled CMake caches. Updates without a new choice retain the current path.
 
 ## Getting started
 
@@ -240,13 +255,15 @@ Players do not need Qt or a compiler for the launcher itself.
 
 | Key | Action |
 |---|---|
-| **F1** | Game menu: Graphics (live), Cheats, Save |
+| **F1 / Select + Start** | Paused game menu: Graphics, Controls, Audio, Texture packs, Cheats, Saves |
 | **F2** | Game menu on the Cheats tab |
 | **F11** | Full screen / window (borderless when that mode is selected) |
 | **Ctrl+F1** | Runtime debugger (for developers) |
 
-Graphics changes made in the F1 menu last for the session; the launcher keeps your saved settings. Internal resolution
-and widescreen are changed in the launcher (they need a restart).
+Supported graphics, audio, control and accessibility changes in the menu persist and synchronize with the launcher.
+Startup-only renderer options still require a restart. Saves lists the active card's native slots with location,
+preview and time; loading discards progress since the last altar after confirmation. Historical card restoration
+remains a separate closed-game operation. See [save documentation](docs/saves.md).
 
 ## Updates and maintenance
 
@@ -269,9 +286,13 @@ screen, place PNG, JPG or WebP images in `data/gow1/loading/`.
 
 ## Performance
 
-The game is capped at 60 frames by design (its logic follows the PS2's 60 Hz VBlank). Every measurement, with the code
+By default, the game keeps its original 60 Hz frame pacing. Every measurement, with the code
 and settings used: [`docs/tested-hardware.md`](docs/tested-hardware.md). Results vary between machines — treat them as
 a reference.
+
+An opt-in **120/240 logic-rate experiment** is available for development tests, disabled by default.
+The local laptop tests did not reach these gameplay rates; host presentation frequency is not guest FPS.
+See [instructions, results and remaining validation](docs/research/experimental-logic-rate.md).
 
 On the project's **Xeon E5-2666 v3 / 16 GB / Radeon RX 580 2048SP** test PC (full screen 1080p, internal resolution 2×,
 PGO, Early FINISH), the opening ship averages **about 55 fps**, with heavy-combat windows around **50–53 fps**; a

@@ -1,0 +1,19 @@
+Review-only overlay for the 2026-11-04 delivery, NOT the installed runtime patch chain.
+Fix out-of-bounds reads for zero/one-vertex Run records. Preserve classic default tails.
+No gameplay FPS or driver validation is implied.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -468,9 +468,9 @@
+             m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(src), reinterpret_cast<const uint8_t *>(src + vc));
+             if (vc < 3u)
+             {
+-                // Unused vertices are zeroed once here so a decoder does not have to special-case them.
+-                const GSVertex empty{};
+-                m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&empty), reinterpret_cast<const uint8_t *>(&empty) + (3u - vc) * sizeof(GSVertex));
++                // Preserve default vertex fields (including q=1) without reading past one vertex.
++                const std::array<GSVertex, 3> empty{};
++                m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(empty.data()), reinterpret_cast<const uint8_t *>(empty.data() + (3u - vc)));
+             }
+         }
+     }

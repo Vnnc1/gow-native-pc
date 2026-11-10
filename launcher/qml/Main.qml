@@ -33,6 +33,17 @@ ApplicationWindow {
     // The Settings object for the pages: inside their Components "ajustes" names the page's own property.
     readonly property var ajustesGuardados: ajustes
 
+    function sincronizarAjustesMenu() {
+        const changes = lanzador.sincronizarMenu()
+        for (const key in changes) ajustes[key] = changes[key]
+        if (Object.keys(changes).length) ajustes.sync()
+    }
+
+    Timer {
+        interval: 500; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: ventana.sincronizarAjustesMenu()
+    }
+
     Settings {
         id: ajustes
         category: "ajustes"
@@ -45,21 +56,25 @@ ApplicationWindow {
         property bool estirar: false
         property string filtro: "bilineal" // soft image by default
         property real nitidez: 0.8
+        property int audioVolume: 100
+        property bool audioMute: false
         property bool fxaa: true
         property string anisotropico: "1" // anisotropic texture filtering: 1 = off, 2..16 (GOW_ANISO)
         property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_HW_SCALE)
-        property int fpsLimite: 120
+    property bool dibujoHardware: true // false = software rasterizer, for a GPU without OpenGL 4.3 (PS2X_GS_RENDERER=sw)
+        property int fpsLimite: 60
         property bool vsync: false
         property bool mostrarFps: false
         property string elf: ""
         property string iso: ""
         property string ejecutable: ""
-        property bool saltarVideos: true // skip the pre-rendered movies
+        property bool saltarVideos: false // native movies include sound
         property bool arranqueRapido: false // used to shorten the game's opening (see Component.onCompleted)
         property int versionAjustes: 0
         property bool controlesDmc5: true
         property bool cancelarAnimaciones: true // snappier evade and input buffer (GOW_CANCELAR)
         // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
+        property bool qteAuto: false
         property bool qteHold: false
         property string qteHoldButtons: "circle" // Base group; shoulders are independent opt-ins.
         property bool qteHoldL1: false
@@ -83,6 +98,41 @@ ApplicationWindow {
         property bool vuRapida: false // GOW_VU1_FAST (runtime patch 51): VU1 blocks without operand normalisation / MADD overflow check
         property bool jitInline: true
         property bool diagnostics: false
+        // gow-native-pc (runtime patch 80): effect switches. All off = the original picture; they only change the
+        // host-side GS draw, the guest runs exactly the same.
+        property bool fxSinSombras: false // GOW_FX_NO_SHADOWS
+        property bool fxSinAditivos: false // GOW_FX_NO_ADDITIVE3D
+        property bool fxSinFiltrado: false // GOW_FX_NO_TEXTURE_FILTER
+        // gow-native-pc: the rest of the picture, texture and renderer switches the runtime actually reads.
+        // Every default below is the runtime's own default; a switch left at its default writes no variable
+        // (or writes "1" where the runtime only checks for "0"), so the original picture is byte-identical.
+        // Texture packs (runtime patch 52).
+        property int texPresupuestoMb: 1024 // GOW_TEXTURE_PACK_MB: GPU budget for replacement PNGs, >= 64 MiB
+        property bool texEstadisticas: false // GOW_TEXTURE_PACK_STATS: hits / loads / evictions every 300 frames
+        property bool texNombres: false // GOW_TEX_PCSX2_NAMES: list the texture names a session samples
+        property int texVolcado: 0 // GOW_GS_HW_TEXDUMP: dump the first N game textures (developer only)
+        // Presentation and video mode.
+        property bool progresivo: true // GOW_PROGRESIVO=0 goes back to the game's interlaced setting
+        property string presentacion: "auto" // TOBIICHI_ASPECTO: auto | estirar | 4:3 | 16:9 | 16:10 | 21:9 | 32:9
+        property bool presentacionDirecta: true // PS2X_GS_DIRECT_PRESENT=0 forces the RAM readback path
+        property int glMenor: 6 // GOW_GL_MAX_MINOR: first OpenGL 4.n context to request (3..6)
+        // Renderer pipeline (advanced): on by default in the runtime, "0" selects the older code path.
+        property bool gsCacheEstado: true // GOW_GS_STATE_CACHE (patch 72)
+        property bool gsReusoTexturas: true // GOW_GS_TEXREUSE (patch 61)
+        property bool gsAnilloVertices: true // GOW_GS_HW_RING (patch 59)
+        property bool gsProfundidadZbp: true // GOW_GS_DEPTH_PER_ZBP (patch 69)
+        property bool gsAgruparPrimitivas: true // PS2X_GS_RUN (patch 66)
+        property bool gsRunRapido: true // PS2X_GS_RUN_STATE_FAST (patch 74)
+        property bool gsColaCompacta: true // PS2X_GS_COMPACT_QUEUE
+        property bool gsHiloWorker: true // PS2X_GS_WORKER (VIF1/GIF on its own thread)
+        property bool gsHiloPipeline: true // PS2X_GS_PIPELINE (GS frontend stage thread)
+        property bool gsFinishAsincrono: true // GOW_GS_FINISH_ASINCRONO
+        property bool gsEnvioAsincrono: false // GOW_GS_ASYNC_SUBMIT (patch 77, off by default)
+        property int gsBloquesCola: 0 // PS2X_GS_QUEUE_CHUNKS: 0 = the renderer's own default
+        // Renderer diagnostics (counters only, no picture change).
+        property bool gsEstadisticas: false // GOW_GS_HW_STATS
+        property bool gsPerfilGpu: false // GOW_GS_GPU_PROFILE
+        property bool verAvanzado: false // UI only: reveal the advanced renderer switches
         property string trucos: "" // cheats active at start, comma separated (gow_trucos.cpp)
         property string textoJuego: "" // game language: a "language" of installer.languages() (e.g. "en", "pt-BR"); empty = ask
         property real portadaFoco: 0.55
@@ -163,11 +213,11 @@ ApplicationWindow {
         return Math.max(2, Math.min(8, Math.floor(alto / 448)))
     }
     function escalaElegida() {
-        var n = parseInt(ajustes.resolucionInterna)
-        return ajustes.resolucionInterna === "auto" || isNaN(n) ? escalaAuto() : Math.max(1, Math.min(8, n))
+        var n = parseFloat(ajustes.resolucionInterna)
+        return ajustes.resolucionInterna === "auto" || isNaN(n) ? escalaAuto() : Math.max(0.25, Math.min(4, n))
     }
     function textoEscala(n) {
-        return n + "× · " + (512 * n) + "×" + (448 * n)
+        return n + "× · " + Math.round(512 * n) + "×" + Math.round(448 * n)
     }
 
     function detectarRutas(forzar) {
@@ -183,21 +233,29 @@ ApplicationWindow {
         ajustes.alto = pantalla.ancho / pantalla.alto < 1.7 ? 800 : 720
         ajustes.aspecto = aspectoPorDefecto()
         ajustes.estirar = false
-        // the "Balanced" profile of the Graphics page
-        ajustes.filtro = "fsr"
+        // Match the current first-launch defaults, including diagnostic and experimental options.
+        ajustes.filtro = "bilineal"
         ajustes.nitidez = 0.8
         ajustes.fxaa = true
-        ajustes.anisotropico = "4"
+        ajustes.anisotropico = "1"
         ajustes.resolucionInterna = "2"
         // the game makes at most 60 frames; a higher window rate only repeats them
         ajustes.fpsLimite = 60
         ajustes.vsync = false
         ajustes.mostrarFps = false
-        ajustes.saltarVideos = true
+        ajustes.saltarVideos = false
+        ajustes.finAnticipado = true
+        ajustes.vuRapida = false
+        ajustes.diagnostics = false
+        ajustes.autoNative = false
+        ajustes.usarPacoteTexturas = false
         ajustes.arranqueRapido = false
         ajustes.controlesDmc5 = true
+        ajustes.audioVolume = 100
+        ajustes.audioMute = false
         ajustes.mando = ""
         ajustes.cancelarAnimaciones = true
+        ajustes.qteAuto = false
         ajustes.qteHold = false
         ajustes.qteHoldButtons = "circle"
         ajustes.qteHoldL1 = false
@@ -209,11 +267,38 @@ ApplicationWindow {
         ajustes.escSalir = false
         ajustes.minimizarAlJugar = true
         ajustes.trucos = ""
+        ajustes.fxSinSombras = false
+        ajustes.fxSinAditivos = false
+        ajustes.fxSinFiltrado = false
+        // Textures, presentation, renderer pipeline and diagnostics: all back to the runtime's defaults.
+        ajustes.texPresupuestoMb = 1024
+        ajustes.texEstadisticas = false
+        ajustes.texNombres = false
+        ajustes.texVolcado = 0
+        ajustes.progresivo = true
+        ajustes.presentacion = "auto"
+        ajustes.presentacionDirecta = true
+        ajustes.glMenor = 6
+        ajustes.gsCacheEstado = true
+        ajustes.gsReusoTexturas = true
+        ajustes.gsAnilloVertices = true
+        ajustes.gsProfundidadZbp = true
+        ajustes.gsAgruparPrimitivas = true
+        ajustes.gsRunRapido = true
+        ajustes.gsColaCompacta = true
+        ajustes.gsHiloWorker = true
+        ajustes.gsHiloPipeline = true
+        ajustes.gsFinishAsincrono = true
+        ajustes.gsEnvioAsincrono = false
+        ajustes.gsBloquesCola = 0
+        ajustes.gsEstadisticas = false
+        ajustes.gsPerfilGpu = false
     }
 
     // Name key of the Graphics page's quick profile the current settings match (PaginaGrafico.qml perfiles).
     function perfilTexto() {
         var r = ajustes.resolucionInterna, f = ajustes.filtro, x = ajustes.fxaa, a = ajustes.anisotropico
+        if (r === "0.5" && f === "bilineal" && !x && a === "1") return "perfilBajo"
         if (f !== "fsr") return "perfilPersonalizado"
         if (r === "1" && !x && a === "1") return "perfilDesempenho"
         if (r === "2" && x && a === "4") return "perfilEquilibrado"
@@ -240,13 +325,41 @@ ApplicationWindow {
             elegido = idiomasJuego[0]
             ajustes.textoJuego = elegido.language
         }
+        // Mods (launcher patch 73): stage the enabled profile and hand the environment to the runner. With no mod,
+        // prepararEntorno returns an empty map (and clears stale mod variables) so the original game is untouched.
+        var modPrep = modeloMods.prepararEntorno(ajustes.usarPacoteTexturas ? ajustes.pacoteTexturas : "", elegido.elf, elegido.runner)
+        if (!modPrep.ok) {
+            dialogoError.texto = Tema.t("modsError")
+            dialogoError.detalle = modPrep.error
+            dialogoError.open()
+            ventana.pagina = 9
+            return
+        }
         var a = {
             gpu: gpuPerdida ? "auto" : ajustes.gpu,
             modoPantalla: ajustes.modoPantalla,
             ancho: ajustes.ancho, alto: ajustes.alto,
-            aspecto: ajustes.aspecto, estirar: ajustes.estirar,
+            aspecto: ajustes.aspecto, presentacion: ajustes.presentacion,
             filtro: ajustes.filtro, nitidez: ajustes.nitidez, fxaa: ajustes.fxaa, anisotropico: ajustes.anisotropico,
             escala: escalaElegida(),
+            dibujoHardware: ajustes.dibujoHardware,
+            // Effect switches (runtime patch 80). Lanzador::iniciar reads them from this map and turns true into a
+            // GOW_FX_* environment variable; a key missing here makes the switch a dead toggle (all read as false).
+            fxSinSombras: ajustes.fxSinSombras, fxSinAditivos: ajustes.fxSinAditivos,
+            fxSinFiltrado: ajustes.fxSinFiltrado,
+            // Textures, presentation, renderer pipeline and diagnostics. Every key Lanzador::iniciar() reads
+            // must be forwarded here: a missing key silently reads as false/0 (the patch 81 v2 dead-toggle bug).
+            texPresupuestoMb: ajustes.texPresupuestoMb, texEstadisticas: ajustes.texEstadisticas,
+            texNombres: ajustes.texNombres, texVolcado: ajustes.texVolcado,
+            progresivo: ajustes.progresivo, presentacionDirecta: ajustes.presentacionDirecta,
+            glMenor: ajustes.glMenor,
+            gsCacheEstado: ajustes.gsCacheEstado, gsReusoTexturas: ajustes.gsReusoTexturas,
+            gsAnilloVertices: ajustes.gsAnilloVertices, gsProfundidadZbp: ajustes.gsProfundidadZbp,
+            gsAgruparPrimitivas: ajustes.gsAgruparPrimitivas, gsRunRapido: ajustes.gsRunRapido,
+            gsColaCompacta: ajustes.gsColaCompacta, gsHiloWorker: ajustes.gsHiloWorker,
+            gsHiloPipeline: ajustes.gsHiloPipeline, gsFinishAsincrono: ajustes.gsFinishAsincrono,
+            gsEnvioAsincrono: ajustes.gsEnvioAsincrono, gsBloquesCola: ajustes.gsBloquesCola,
+            gsEstadisticas: ajustes.gsEstadisticas, gsPerfilGpu: ajustes.gsPerfilGpu,
             fpsLimite: ajustes.fpsLimite, vsync: ajustes.vsync, mostrarFps: ajustes.mostrarFps,
             elf: elegido.elf, iso: "", ejecutable: elegido.runner,
             // new VU1 microcode met while playing is recorded; the Install tab compiles it ("Speed up visited areas")
@@ -269,12 +382,14 @@ ApplicationWindow {
             qteHoldL1: ajustes.qteHoldL1, qteHoldL2: ajustes.qteHoldL2,
             qteHoldR1: ajustes.qteHoldR1, qteHoldR2: ajustes.qteHoldR2,
             qteStickMode: ajustes.qteStickMode,
+            audioVolume: ajustes.audioVolume, audioMute: ajustes.audioMute,
+            qteAuto: ajustes.qteAuto,
             qteHold: ajustes.qteHold, qteHoldButtons: ajustes.qteHoldButtons, qteHoldRate: ajustes.qteHoldRate,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
             mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",
             trucos: ajustes.trucos, idioma: Tema.idioma, textoJuego: ajustes.textoJuego
         }
-        if (lanzador.iniciar(a)) {
+        if (lanzador.iniciar(a, modPrep.env)) {
             playingRegional = !!elegido.regional
             if (ajustes.minimizarAlJugar) minimizarTrasArrancar.start()
         }
@@ -372,11 +487,19 @@ ApplicationWindow {
             if (ajustes.fpsLimite === 120) ajustes.fpsLimite = 60
             ajustes.versionAjustes = 7
         }
+        // Version 8: the old "stretch to window" on/off switch became the full TOBIICHI_ASPECTO selector
+        // (auto / estirar / fixed ratios). Keep a saved stretch choice, otherwise stay on auto.
+        if (ajustes.versionAjustes < 8) {
+            if (ajustes.estirar) ajustes.presentacion = "estirar"
+            ajustes.estirar = false
+            ajustes.versionAjustes = 8
+        }
         if (ajustes.idioma.length === 0) {
             ajustes.idioma = Textos.idiomaDeLocale(Qt.locale().name) // the system's language when the launcher has it
         }
         if (ajustes.aspecto.length === 0) ajustes.aspecto = aspectoPorDefecto()
-        if (!listo) ventana.pagina = 1  // nothing installed yet: open on the Install tab
+        // A capture/test can request a specific starting tab; only fall back to Install for a normal launch.
+        if (!listo && pestanaInicial <= 0) ventana.pagina = 1
         // "--jugar": starts the game right away with the saved settings (the shortcut's "Play now" action).
         if (Qt.application.arguments.indexOf("--jugar") >= 0 && listo)
             jugar()
@@ -508,7 +631,8 @@ ApplicationWindow {
                     { clave: "pestTrucos", icono: "" },
                     { clave: "pestOtros", icono: "" },
                     { clave: "pestPartidas", icono: "\uE74E" },
-                    { clave: "pestAccessibility", icono: "\uE776" }
+                    { clave: "pestAccessibility", icono: "\uE776" },
+                    { clave: "pestMods", icono: "\uE9D9" }
                 ]
                 delegate: NavItem {
                     required property var modelData
@@ -1045,7 +1169,7 @@ ApplicationWindow {
         // Settings pages: a large title over a panel.
         Repeater {
             model: ["pestInstalar", "pestGrafico", "pestRendimiento", "pestControles", "pestTrucos", "pestOtros",
-                    "pestPartidas", "pestAccessibility"]
+                    "pestPartidas", "pestAccessibility", "pestMods"]
             delegate: Item {
                 id: hojaAjustes
                 required property string modelData
@@ -1080,7 +1204,8 @@ ApplicationWindow {
                             anchors.margins: 24
                             anchors.rightMargin: 14
                             sourceComponent: [paginaInstalar, paginaGrafico, paginaRendimiento, paginaControles,
-                                              paginaTrucos, paginaOtros, paginaPartidas, accessibilityPage][hojaAjustes.index]
+                                              paginaTrucos, paginaOtros, paginaPartidas, accessibilityPage,
+                                              paginaMods][hojaAjustes.index]
                         }
                     }
                 }
@@ -1093,6 +1218,20 @@ ApplicationWindow {
         AccessibilityPage {
             settings: ventana.ajustesGuardados
             onOpenControls: ventana.pagina = 4
+        }
+    }
+
+    Component {
+        id: paginaMods
+        PaginaMods {
+            settings: ventana.ajustesGuardados
+            modelo: modeloMods
+            onAviso: (texto) => ventana.aviso(texto)
+            onFallo: (texto, detalle) => {
+                dialogoError.texto = texto
+                dialogoError.detalle = detalle
+                dialogoError.open()
+            }
         }
     }
 
@@ -1154,6 +1293,7 @@ ApplicationWindow {
             carpeta: ventana.carpetaPartidas
             elf: ventana.selectedGame ? ventana.selectedGame.elf : ""
             onAviso: (t) => ventana.aviso(t)
+            onIniciarSlot: ventana.jugar()
         }
     }
 
