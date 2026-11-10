@@ -3,6 +3,7 @@
 #include "runtime/ps2_pad.h"
 #include "runtime/gow_prompt_input.h"
 #include "runtime/gow_qte_prompt.h"
+#include "runtime/gow_menu_live.h"
 #include <cassert>
 #include <cstring>
 #include <cstdio>
@@ -158,5 +159,28 @@ int main(int argc,char **argv) {
         focused=false;backend.readState(0,0,data,32);assert(data[3]&0x20);
         focused=true;gow_qte_prompt::publish(0);backend.readState(0,0,data,32);assert(data[3]&0x20);
     }
-    std::puts("PASS: active input, four slots, focus, drift, disconnect, production maps and all prompt families");
+    const std::string previousLabel=rotulo(ETeclado,BMoveUp);
+    keys.fill(false);mouse.fill(false);connected.fill(false);gowPromptPoll();
+    const int baselineKeys[]={KEY_W,KEY_A,KEY_S,KEY_D,KEY_X,KEY_SPACE,KEY_C,KEY_ESCAPE,KEY_Z,KEY_KP_0,KEY_V,KEY_KP_1,KEY_Q,KEY_E,KEY_LEFT_SHIFT,KEY_RIGHT_SHIFT};
+    std::array<uint16_t,16> before{};
+    for(int i=0;i<16;++i){keys.fill(false);keys[baselineKeys[i]]=true;backend.readState(0,0,data,32);before[i]=data[2]|(data[3]<<8);}
+    assert(gowMenuBind("qte_stick",KEY_G,false));
+    for(int i=0;i<16;++i){keys.fill(false);keys[baselineKeys[i]]=true;backend.readState(0,0,data,32);assert(before[i]==(data[2]|(data[3]<<8)));}
+    gowMenuResetBindings();
+    assert(!gowMenuBind("invalid",KEY_I,false));
+    assert(!gowMenuBind("cross",99999,false));
+    assert(!gowMenuBind("li_arriba",5,true));
+    assert(gowMenuBind("li_arriba",KEY_I,false));
+    assert(rotulo(ETeclado,BMoveUp)=="I");
+    connected.fill(false); keys.fill(false); mouse.fill(false); keys[KEY_I]=true;
+    assert(tobiichiSticksTeclado(sticks)); assert(sticks[3]==0);
+    assert(gowMenuBind("cross",GAMEPAD_BUTTON_RIGHT_FACE_UP,true));
+    assert(rotulo(EXbox,BCruz)=="Y" && rotulo(EPS4,BCruz)=="#TRIANGLE");
+    gowMenuResetBindings();assert(rotulo(ETeclado,BMoveUp)==previousLabel);
+    int16_t samples[]={-32768,32767,100,-100};
+    gow_menu_live::volume.store(50);gow_menu_live::applyVolume(samples,4);
+    assert(samples[0]==-16384 && samples[1]==16383 && samples[2]==50 && samples[3]==-50);
+    gow_menu_live::mute.store(true);gow_menu_live::applyVolume(samples,4);
+    for(auto sample:samples)assert(sample==0);
+    std::puts("PASS: input families, live remapping/reset, keyboard movement and audio volume/mute");
 }

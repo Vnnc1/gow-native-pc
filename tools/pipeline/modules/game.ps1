@@ -188,6 +188,8 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
             $extra += "-DFETCHCONTENT_SOURCE_DIR_$($src.Name.Substring(0, $src.Name.Length - 4).ToUpper())=$(Barra $src.FullName)"
         }
     }
+    $brand = if ($prof.runtime.branding_image) { Barra (Join-Path $prof._dir $prof.runtime.branding_image) } else { '' }
+    $extra += "-DGOW_BRAND_IMAGE=$brand"
     $cmakeArgs = @('-S', $rec, '-B', $dir, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Config", "-DPS2X_RELEASE_LTCG=$ltcgValue", "-DPS2X_RELEASE_PDB=$pdbValue",
         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF', '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
         '-DPS2X_ENABLE_FFMPEG=OFF',

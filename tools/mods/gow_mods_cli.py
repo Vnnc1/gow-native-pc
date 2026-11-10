@@ -125,6 +125,7 @@ ENV_ALLOWED: dict[str, str] = {
 # Manager-owned: staging paths, the test harness and diagnostics that write files.  A mod must not touch them, or
 # activation would stop being reversible and a package could redirect the game's own evidence.
 ENV_RESERVED = {
+    "GOW_ACTIVE_MODS",
     "GOW_MOD_VFS_TABLE",
     "GOW_MOD_VFS_STATS",
     "GOW_MOD_VFS_TRACE",
@@ -1461,6 +1462,8 @@ def build_plan(ctx: Context, profile: str, packages: dict[tuple[str, str], Packa
 
 def plan_hook_env(plan: dict[str, Any], staging: Path, hooks_dir: Path | None = None) -> dict[str, str]:
     env = {key: entry["value"] for key, entry in plan["env"].items()}
+    env["GOW_ACTIVE_MODS"] = ';'.join(re.sub(r'[;\r\n\t]', ' ', f'{m["id"]} @ {m["version"]}')[:120]
+                                      for m in plan.get('mods', [])[:32])
     if plan["textures"]:
         env["GOW_TEXTURE_PACK"] = str((staging / "textures").resolve())
     if plan.get("patches") and hooks_dir is not None:
@@ -1642,7 +1645,7 @@ def runner_and_elf(ctx: Context) -> tuple[Path, Path]:
 
 def sanitized_environ() -> dict[str, str]:
     env = dict(os.environ)
-    for key in ("GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_MOD_VFS_LOG", "GOW_MOD_PATCH_TABLE", "GOW_MOD_PATCH_LOG", "GOW_TEXTURE_PACK"):
+    for key in ("GOW_ACTIVE_MODS", "GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_MOD_VFS_LOG", "GOW_MOD_PATCH_TABLE", "GOW_MOD_PATCH_LOG", "GOW_TEXTURE_PACK"):
         env.pop(key, None)
     return env
 
@@ -2182,6 +2185,9 @@ def cmd_selftest(ctx: Context, args: argparse.Namespace) -> int:
     check("env plan keeps the {value,mod} shape", plan_r["env"].get("GOW_SCALER", {}).get("value") == "2")
     check("plan_hook_env flattens the env map",
           plan_hook_env(plan_r, mods / "staging").get("GOW_SCALER") == "2")
+    check("in-game list contains only selected mods",
+          plan_hook_env(plan_r, mods / "staging")["GOW_ACTIVE_MODS"] ==
+          ';'.join(f'{m["id"]} @ {m["version"]}' for m in plan_r['mods']))
     check("invalid enabled mod is reported, not dropped",
           "selftest.invalid2@1.0.0" in excluded_r
           and bool(excluded_r["selftest.invalid2@1.0.0"].get("message"))

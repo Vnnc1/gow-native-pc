@@ -13,6 +13,7 @@ crc = "D6385328"               # PCSX2 game CRC (XOR of the ELF's 32-bit words) 
 text_sha1 = "8c6e61a95e84e88b01a0cea25b3824cf6b2cbe00"
 
 [runtime]
+branding_image = "assets/ratone/ratone-original-corrected.png"
 # paths inside the runtime checkout (engine/runtime.toml) used by the pipeline
 recompiler_template = "config/recomp.template.toml"
 function_map = "config/funcmap.csv"

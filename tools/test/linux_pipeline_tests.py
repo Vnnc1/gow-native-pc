@@ -41,6 +41,7 @@ class LinuxPipelineTests(unittest.TestCase):
         self.assertIn('-DPS2X_CPU_ARCH=x86-64-v2', command)
         self.assertIn('-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG', command)
         self.assertIn('-DPS2X_ENABLE_FFMPEG=OFF', command)
+        self.assertIn(f'-DGOW_BRAND_IMAGE={work.root / "games" / args.game / work.profile["runtime"]["branding_image"]}', command)
         text = ' '.join(map(str, command))
         self.assertNotIn('-static', text)
         self.assertNotIn('profile-instr-use', text)

@@ -162,6 +162,21 @@ laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integrat
 
 ## Player diagnostic reports
 
+Patch `zzz-318` adds the RatOne startup and six-category in-game dock. The profile's
+`runtime.branding_image` supplies `GOW_BRAND_IMAGE` at Windows/Linux configure time;
+keep the approved PNG byte-identical and embed it, never depend on an artist's local path.
+F1/Back+Start opens the dock; F2 opens cheats; Ctrl+F1 remains the debugger.
+Live keyboard/controller bindings use immutable shared snapshots; prompts use the same
+getters. Capture discards queued navigation and waits for release. Preserve classic
+aliases, modifier semantics, and post-close input/ExitKey release gates.
+Audio gain/mute applies after diagnostic PCM in the common SPU2 callback (both devices).
+Patch `zzz-319` keeps the dock inside the minimum window width and labels unbound
+inputs explicitly; retain the 320-pixel layout check in the GPU menu suite.
+Mods supply bounded manager-owned `GOW_ACTIVE_MODS`, reserved and cleared on deactivation.
+Changes are session-only and the menu does not pause simulation. Run the existing
+control-prompts suite and explicit GPU `tools/test/game-menu.py` when changing this UI.
+See `docs/research/ratone-game-menu-2026-11-10.md` for acceptance limits and evidence.
+
 Patch `zzz-310` restores USA Flash button prompts with last-active input and the
 production keyboard/controller mappings. Input selection is shared by buttons,
 sticks and labels; never switch merely because an idle pad is connected.
@@ -322,8 +337,10 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   `python -I tools/test/loading-progress.py <Qt SDK bin/qml.exe> <llvm-mingw bin>` (real QML, fake pipeline signals).
 - **languages.json** (`data/<id>/`): `{game, title, recompile_elf, languages: [{language, label, edition, quality,
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
-- **In-game menu (patch 39)**: F1 opens the game menu (`gow_trucos.cpp`: Graphics, Cheats, Save tabs), F2 opens it on
-  the cheats, Ctrl+F1 opens the ImGui runtime debugger. Graphics changes are live for the session through the header-only
+- **In-game menu (patch 39, redesigned by zzz-318)**: F1 or Back+Start opens the category dock in `gow_trucos.cpp`
+  (Graphics, Controls, Audio, Mods, Cheats, Save); F2 opens cheats, Ctrl+F1 opens the ImGui runtime debugger.
+  Remapping, master volume/mute and supported graphics changes are live for the session; the menu blocks input,
+  not simulation. Graphics changes use the header-only
   `runtime/gow_ajustes_vivo.h` (read once from GOW_SCALER, GOW_SHARPEN, TOBIICHI_FXAA, GOW_ANISO, TOBIICHI_ASPECTO,
   TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings.   TOBIICHI_PANTALLA = completa | sin_bordes |
   ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a

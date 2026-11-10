@@ -1,0 +1,942 @@
+RatOne startup and launcher-themed in-game dock: immutable embedded artwork, live bindings/audio, mod list and QTE assist; preserves guest hooks and launcher settings.
+
+diff --git a/PS2Recomp/ps2xRuntime/CMakeLists.txt b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+--- a/PS2Recomp/ps2xRuntime/CMakeLists.txt
++++ b/PS2Recomp/ps2xRuntime/CMakeLists.txt
+@@ -780,3 +780,20 @@
+ 
+ # GOW-Port include
+ target_include_directories(ps2EntryRunner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/runner)
++
++# Profile-owned, immutable artwork embedded into the runner (no runtime path dependency).
++set(GOW_BRAND_IMAGE "" CACHE FILEPATH "Startup artwork supplied by the game profile")
++set(GOW_BRAND_CPP "${CMAKE_CURRENT_BINARY_DIR}/gow_brand_image.cpp")
++if(GOW_BRAND_IMAGE)
++    if(NOT EXISTS "${GOW_BRAND_IMAGE}")
++        message(FATAL_ERROR "Missing profile branding image: ${GOW_BRAND_IMAGE}")
++    endif()
++    file(READ "${GOW_BRAND_IMAGE}" GOW_BRAND_HEX HEX)
++    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," GOW_BRAND_BYTES "${GOW_BRAND_HEX}")
++    set(GOW_BRAND_CONTENT "#include <cstddef>\nextern const unsigned char gowBrandImage[] = {${GOW_BRAND_BYTES}};\nextern const std::size_t gowBrandImageSize = sizeof(gowBrandImage);\n")
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${GOW_BRAND_IMAGE}")
++else()
++    set(GOW_BRAND_CONTENT "#include <cstddef>\nextern const unsigned char gowBrandImage[] = {0};\nextern const std::size_t gowBrandImageSize = 0;\n")
++endif()
++file(CONFIGURE OUTPUT "${GOW_BRAND_CPP}" CONTENT "${GOW_BRAND_CONTENT}" @ONLY)
++target_sources(ps2_runtime PRIVATE "${GOW_BRAND_CPP}")
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_brand.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_brand.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_brand.h
+@@ -0,0 +1,65 @@
++#pragma once
++#include "raylib.h"
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++
++extern const unsigned char gowBrandImage[];
++extern const std::size_t gowBrandImageSize;
++namespace gow_brand {
++constexpr float duration = 4.1f;
++inline std::atomic<bool> inputGuard{false};
++inline uint32_t noise(uint32_t x) { x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; return x ^ (x >> 16); }
++inline float progress(float time) { return std::clamp((time - .25f) / 2.35f, 0.f, 1.f); }
++inline void draw(Texture2D image, float time, int width, int height) {
++    ClearBackground(BLACK);
++    if (!image.id) return;
++    const float scale = std::min(height * .82f / image.height, width * .65f / image.width);
++    const float w = image.width * scale, h = image.height * scale;
++    const float x = (width-w)*.5f, y = (height-h)*.5f;
++    const float p = progress(time);
++    const float opacity = std::clamp((duration-time)/.45f, 0.f, 1.f);
++    // Reveal the original pixels in irregular vertical spray passes; never recolor the artwork.
++    for (int col=0; col<image.width; col+=8) {
++        const float jitter = (noise(col+19)%1000)/1000.f;
++        const float edge = std::clamp(p*1.12f - jitter*.12f, 0.f, 1.f)*image.height;
++        if (edge <= 0) continue;
++        const float cw = float(std::min(8, image.width-col));
++        DrawTexturePro(image, Rectangle{float(col),0,cw,edge},
++                       Rectangle{x+col*scale,y,cw*scale,edge*scale}, Vector2{},0,Fade(WHITE,opacity));
++    }
++    if (p>0 && p<1) {
++        const int tick = int(time*30);
++        for (int i=0; i<90; ++i) {
++            const uint32_t n = noise(uint32_t(i+tick*101));
++            const float px = x+w*(n%1000)/1000.f;
++            const float py = y+h*p + float(int((n>>10)%51)-25)*scale;
++            DrawCircleV(Vector2{px,py}, (.35f+float((n>>19)%3)*.35f)*std::max(.6f,scale),
++                        Fade(Color{236,228,208,255}, .12f*opacity));
++        }
++    }
++}
++inline Texture2D load() {
++    if (!gowBrandImageSize || gowBrandImageSize > 8*1024*1024) return {};
++    Image image = LoadImageFromMemory(".png",gowBrandImage,int(gowBrandImageSize));
++    Texture2D texture{};
++    if (image.data) { texture=LoadTextureFromImage(image); UnloadImage(image); }
++    return texture;
++}
++inline void startup() {
++    Texture2D texture=load();
++    if (!texture.id) return;
++    const double begin=GetTime();
++    SetTargetFPS(60);
++    while (!WindowShouldClose() && GetTime()-begin<duration) {
++        bool skip=IsKeyPressed(KEY_ENTER)||IsKeyPressed(KEY_SPACE)||IsKeyPressed(KEY_ESCAPE);
++        for (int p=0;p<4;++p) if (IsGamepadAvailable(p))
++            skip |= IsGamepadButtonPressed(p,GAMEPAD_BUTTON_RIGHT_FACE_DOWN)||IsGamepadButtonPressed(p,GAMEPAD_BUTTON_MIDDLE_RIGHT);
++        if (skip) { inputGuard.store(true); break; }
++        BeginDrawing(); draw(texture,float(GetTime()-begin),GetScreenWidth(),GetScreenHeight()); EndDrawing();
++    }
++    UnloadTexture(texture);
++}
++}
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h
+@@ -0,0 +1,21 @@
++#pragma once
++#include <atomic>
++#include <algorithm>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++namespace gow_menu_live {
++inline std::atomic<int> volume{100};
++inline std::atomic<bool> mute{false};
++inline std::atomic<bool>& autoQte() {
++    static std::atomic<bool> enabled{[] { const char *v=std::getenv("GOW_QTE_AUTO"); return v && !std::strcmp(v,"1"); }()};
++    return enabled;
++}
++inline void applyVolume(int16_t *samples, size_t count) {
++    const int gain=mute.load(std::memory_order_relaxed)?0:std::clamp(volume.load(std::memory_order_relaxed),0,100);
++    if(gain==100) return;
++    for(size_t i=0;i<count;++i) samples[i]=int16_t(int(samples[i])*gain/100);
++}
++}
++bool gowMenuBind(const char *action,int code,bool pad);
++void gowMenuResetBindings();
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_integracion.cpp
+@@ -1,3 +1,5 @@
++int gowVentanaFps();
++#include "runtime/gow_brand.h"
+ // GOW-Port: funciones de Tobiichi Port sobre el runtime de Waffle565 (God-Of-War-Native-Port).
+ //
+ // El runtime de Waffle (GS nativo por render targets, IOP y VU1 compilados, vídeos nativos) es la base. Aquí se
+@@ -448,6 +450,8 @@
+         alternarSinBordes();
+     if (!escCierraJuego())
+         SetExitKey(KEY_NULL);
++    if (!hidden && !envFlag("GOW_PAD_TEST", false)) gow_brand::startup();
++    SetTargetFPS(gowVentanaFps());
+ }
+ 
+ // GOW-Port: cuadros por segundo de la ventana (Waffle: 60). TOBIICHI_VENTANA_FPS=0 los deja sin límite.
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -1,3 +1,8 @@
++#include "runtime/gow_brand.h"
++#include "runtime/gow_menu_live.h"
++#include "runtime/gow_prompt_input.h"
++int tobiichiCodigosAccion(const char*,int*,int);
++int tobiichiBotonMandoAccion(const char*);
+ // GOW-Port: menú de trucos (entrenador) de God of War (SCUS-97399, NTSC-U). F2 lo abre durante la partida;
+ // TOBIICHI_TRUCOS="inmortal,un_golpe,..." (lanzador) da el estado inicial y TOBIICHI_IDIOMA (tr/en/es/pt) el idioma.
+ // gow-native-pc (patch 39): it is now the game menu: F1 opens it with Graphics (live settings, gow_ajustes_vivo.h),
+@@ -315,6 +320,7 @@
+         PGraficos,
+         PTrucos,
+         PSave,
++        PControles, PAudio, PMods,
+         kNumPestanas
+     };
+     enum Grafico : int
+@@ -537,16 +543,22 @@
+         return s;
+     }
+ 
+-    constexpr Color kOro{212, 168, 87, 255};
+-    constexpr Color kOroClaro{243, 216, 150, 255};
+-    constexpr Color kTexto{240, 230, 218, 255};
+-    constexpr Color kTextoSuave{188, 169, 153, 255};
+-    constexpr Color kTextoTenue{127, 109, 96, 255};
+-    constexpr Color kBorde{94, 61, 38, 255};
++    constexpr Color kOro{224, 64, 47, 255};
++    constexpr Color kOroClaro{255, 138, 117, 255};
++    constexpr Color kTexto{238, 240, 244, 255};
++    constexpr Color kTextoSuave{169, 175, 186, 255};
++    constexpr Color kTextoTenue{151, 158, 171, 255};
++    constexpr Color kBorde{58, 64, 76, 255};
+ 
+     struct EstadoMenu
+     {
+         int pestana = PGraficos;
++        bool modal=false, padBindings=false, restoreExit=false;
++        int capture=-1, scroll=0;
++        bool captureReady=false;
++        double captureUntil=0;
++        std::string bindingStatus;
++
+         std::array<int, kNumPestanas> elegido{};
+         int teclaCierre = 0;
+         bool cursorOculto = false;
+@@ -561,9 +573,64 @@
+     constexpr int kFpsOpciones[] = {60, 120, 144, 0};
+     constexpr int kNumFps = 4;
+ 
+-    int filas(int pestana)
+-    {
+-        return pestana == PGraficos ? static_cast<int>(kNumGraficos) : pestana == PTrucos ? static_cast<int>(kNumTrucos) : 1;
++    const char* tr(const char *pt,const char *en) { return idiomaMenu()==3?pt:en; }
++    constexpr int dockOrder[]={PGraficos,PControles,PAudio,PMods,PTrucos,PSave};
++    const char* category(int p) {
++        if(p<3) return textosMenu().pestanas[p];
++        return p==PControles?tr("Controles","Controls"):p==PAudio?tr("Áudio","Audio"):"Mods";
++    }
++    constexpr const char *actions[]={"up","down","left","right","cross","circle","square","triangle",
++        "l1","r1","l2","r2","l3","r3","start","select","poseidon","medusa","zeus","hades","artemisa","furia",
++        "li_arriba","li_abajo","li_izq","li_der","ld_arriba","ld_abajo","ld_izq","ld_der","ld_mod","qte_stick"};
++    constexpr const char *actionPt[]={"Direcional: cima","Direcional: baixo","Direcional: esquerda","Direcional: direita",
++        "Pular / Cruz","Agarrar / Círculo","Ataque leve / Quadrado","Ataque forte / Triângulo","Defender / L1","Interagir / R1",
++        "L2","R2","L3","R3","Start / Pausa","Select","Poseidon","Medusa","Zeus","Hades","Artemis","Fúria",
++        "Mover: frente","Mover: trás","Mover: esquerda","Mover: direita","Esquivar: frente","Esquivar: trás","Esquivar: esquerda","Esquivar: direita","Modificador de esquiva","Assistência do analógico"};
++    constexpr const char *actionEn[]={"D-pad: up","D-pad: down","D-pad: left","D-pad: right","Jump / Cross","Grab / Circle",
++        "Light attack / Square","Heavy attack / Triangle","Block / L1","Interact / R1","L2","R2","L3","R3","Start / Pause","Select",
++        "Poseidon","Medusa","Zeus","Hades","Artemis","Rage","Move: forward","Move: backward","Move: left","Move: right",
++        "Evade: forward","Evade: backward","Evade: left","Evade: right","Evade modifier","Stick assist"};
++    std::string bindingName(int code,bool pad) {
++        if(code<=0) return "—";
++        if(pad) {
++            static const char *names[]={"—","D-pad ↑","D-pad →","D-pad ↓","D-pad ←","Y / Triangle","B / Circle","A / Cross","X / Square","LB / L1","LT / L2","RB / R1","RT / R2","Back / Share","Guide","Start / Options","L3","R3"};
++            return code<18?names[code]:"?";
++        }
++        if(code>=1000) return std::string("Mouse ")+std::to_string(code-999);
++        if(code>=KEY_F1 && code<=KEY_F12) return "F"+std::to_string(code-KEY_F1+1);
++        switch(code) {
++        case KEY_SPACE:return tr("Espaço","Space"); case KEY_ENTER:return "Enter"; case KEY_TAB:return "Tab";
++        case KEY_LEFT_SHIFT:case KEY_RIGHT_SHIFT:return "Shift"; case KEY_LEFT_ALT:case KEY_RIGHT_ALT:return "Alt";
++        case KEY_LEFT_CONTROL:case KEY_RIGHT_CONTROL:return "Ctrl";case KEY_ESCAPE:return "Esc";
++        case KEY_UP:return "↑";case KEY_DOWN:return "↓";case KEY_LEFT:return "←";case KEY_RIGHT:return "→";
++        default:return code>=32 && code<127?std::string(1,char(code)):"Key "+std::to_string(code);
++        }
++    }
++    const std::vector<std::string>& activeMods() {
++        static const auto mods=[] {
++            std::vector<std::string> out;
++            if(const char *v=std::getenv("GOW_ACTIVE_MODS")) {
++                std::string value(v,std::min<size_t>(std::strlen(v),4096));
++                size_t start=0;
++                while(start<value.size() && out.size()<32) {
++                    size_t end=value.find(';',start); if(end==std::string::npos) end=value.size();
++                    if(end>start) out.push_back(value.substr(start,std::min<size_t>(end-start,160)));
++                    start=end+1;
++                }
++            }
++            if(const char *v=std::getenv("GOW_TEXTURE_PACK");v && *v)
++            {
++                std::string path(v);size_t slash=path.find_last_of("/\\");
++                out.push_back(std::string("Texture pack: ")+path.substr(slash==std::string::npos?0:slash+1));
++            }
++            return out;
++        }(); return mods;
++    }
++    int filas(int p) {
++        if(p==PControles) return (g_menu.padBindings?22:32)+2;
++        if(p==PAudio) return 2;
++        if(p==PMods) return std::max(1,int(activeMods().size()));
++        return p==PGraficos?int(kNumGraficos):p==PTrucos?int(kNumTrucos)+1:1;
+     }
+ 
+     struct Geometria
+@@ -575,19 +642,29 @@
+     {
+         const float sw = static_cast<float>(GetScreenWidth()), sh = static_cast<float>(GetScreenHeight());
+         Geometria g{};
+-        g.escala = std::clamp(sh / 1080.0f, 0.8f, 2.0f); // readable descriptions at 720p
+-        g.w = std::min(sw - 32.0f, 860.0f * g.escala);
+-        g.pestanas = 50.0f * g.escala;
+-        g.cabecera = 96.0f * g.escala + g.pestanas;
+-        g.fila = 62.0f * g.escala;
+-        g.pie = 52.0f * g.escala;
+-        const int maximo = std::max(static_cast<int>(kNumGraficos), static_cast<int>(kNumTrucos));
+-        g.h = std::min(sh - 32.0f, g.cabecera + g.fila * static_cast<float>(maximo) + g.pie);
+-        g.x = std::floor((sw - g.w) * 0.5f);
+-        g.y = std::floor((sh - g.h) * 0.5f);
++        g.escala = std::clamp(std::min(sw/1280.f,sh/720.f), .45f, 2.f);
++        g.w = std::min(sw-32.f, 860.f*g.escala);
++        g.pestanas = 0;
++        g.cabecera = 88.f*g.escala;
++        g.fila = 58.f*g.escala;
++        g.pie = 50.f*g.escala;
++        g.h = std::min(sh-160.f*g.escala, g.cabecera+g.fila*std::min(7,filas(g_menu.pestana))+g.pie);
++        g.x = std::floor((sw-g.w)*.5f);
++        g.y = 60.f*g.escala;
+         return g;
+     }
+ 
++    int visibleRows() { auto g=geometria(); return std::max(1,int((g.h-g.cabecera-g.pie)/g.fila)); }
++    Rectangle dockRect(int index) {
++        auto g=geometria(); float w=116*g.escala,gap=8*g.escala;
++        return Rectangle{(GetScreenWidth()-(w*6+gap*5))*.5f+index*(w+gap),GetScreenHeight()-76*g.escala,w,52*g.escala};
++    }
++    bool anyHeld() {
++        for(int k=32;k<=348;++k) if(IsKeyDown(k)) return true;
++        for(int b=0;b<7;++b) if(IsMouseButtonDown(b)) return true;
++        for(int p=0;p<4;++p) if(IsGamepadAvailable(p)) for(int b=1;b<18;++b) if(IsGamepadButtonDown(p,b)) return true;
++        return false;
++    }
+     void alternar(int indice)
+     {
+         const bool nuevo = !g_activo[indice].load(std::memory_order_relaxed);
+@@ -624,6 +701,26 @@
+     Fila fila(int pestana, int i)
+     {
+         const TextosMenu &m = textosMenu();
++        if(pestana==PControles) {
++            if(i==0) return {tr("Dispositivo","Device"),tr("Remapeamento nesta sessão; os ícones acompanham a alteração.","Session bindings; prompts follow your changes."),Opcion,false,g_menu.padBindings?tr("Controle","Controller"):tr("Teclado e mouse","Keyboard / mouse"),true};
++            if(i==filas(pestana)-1) return {tr("Restaurar mapeamento","Restore bindings"),tr("Voltar às configurações recebidas do launcher.","Restore the bindings supplied by the launcher."),Accion,false,{},true};
++            int code[8],n=tobiichiCodigosAccion(actions[i-1],code,8); std::string label;
++            if(g_menu.padBindings) label=bindingName(tobiichiBotonMandoAccion(actions[i-1]),true);
++            else { for(int j=0;j<n;++j) {if(j)label+=" / ";label+=bindingName(code[j],false);} if(label.empty())label="—"; }
++            return {idiomaMenu()==3?actionPt[i-1]:actionEn[i-1],g_menu.bindingStatus.empty()?tr("Selecionar para atribuir; Delete remove.","Select to bind; Delete clears."):g_menu.bindingStatus,Accion,false,label,true};
++        }
++        if(pestana==PAudio) {
++            const char *v=std::getenv("GOW_AUDIO"); bool enabled=!(v && v[0]=='0');
++            const char *desc=enabled?tr("Volume geral do jogo, aplicado imediatamente.","Game master volume, applied immediately."):tr("Saída desativada no launcher; reinicie com áudio ligado.","Audio disabled at launch; restart with audio enabled.");
++            if(i==0)return {tr("Volume","Volume"),desc,Opcion,false,std::to_string(gow_menu_live::volume.load())+"%",enabled};
++            return {tr("Silenciar","Mute"),desc,Interruptor,gow_menu_live::mute.load(),{},enabled};
++        }
++        if(pestana==PMods) {
++            if(activeMods().empty())return {tr("Nenhum mod ativo","No active mods"),tr("Ative os packs no launcher antes de iniciar.","Activate packs in the launcher before starting."),Opcion,false,"—",false};
++            return {activeMods()[i].c_str(),tr("Selecionado para esta sessão; alterações exigem reiniciar.","Selected for this session; changes require a restart."),Opcion,false,tr("Ativo","Active"),false};
++        }
++        if(pestana==PTrucos && i==kNumTrucos)
++            return {tr("QTEs automáticos","Automatic QTEs"),tr("Pressiona botões reconhecidos. Movimentos do analógico continuam manuais.","Presses recognized buttons. Stick gestures remain manual."),Interruptor,gow_menu_live::autoQte().load(),{},true};
+         if (pestana == PTrucos)
+             return {textos().nombre[i], textos().descripcion[i], Interruptor, g_activo[i].load(std::memory_order_relaxed), {}, true};
+         if (pestana == PSave)
+@@ -664,6 +761,20 @@
+     // dir: +1 / -1 from the arrow keys, 0 from Enter / click (switches toggle, choices advance, actions run).
+     void cambiar(int pestana, int i, int dir)
+     {
++        if(!fila(pestana,i).habilitada) return;
++        if(pestana==PControles) {
++            if(i==0) {g_menu.padBindings=!g_menu.padBindings;g_menu.scroll=0;}
++            else if(i==filas(pestana)-1) {gowMenuResetBindings();g_menu.bindingStatus.clear();}
++            else if(!dir) {g_menu.capture=i-1;g_menu.captureReady=false;g_menu.captureUntil=GetTime()+15;}
++            return;
++        }
++        if(pestana==PAudio) {
++            if(i==0) gow_menu_live::volume.store(std::clamp(gow_menu_live::volume.load()+(dir<0?-5:5),0,100));
++            else gow_menu_live::mute.store(!gow_menu_live::mute.load());
++            return;
++        }
++        if(pestana==PMods) return;
++        if(pestana==PTrucos && i==kNumTrucos) {gow_menu_live::autoQte().store(!gow_menu_live::autoQte().load());return;}
+         if (pestana == PTrucos)
+         {
+             alternar(i);
+@@ -731,6 +842,7 @@
+             const char *v = std::getenv("TOBIICHI_VSYNC");
+             g_menu.vsync = v && v[0] == '1';
+         }
++        g_menu.modal=pestana>=0; g_menu.capture=-1; g_menu.scroll=0;
+         if (pestana >= 0)
+             g_menu.pestana = pestana;
+         g_menu.saveEstado.clear();
+@@ -745,9 +857,8 @@
+     {
+         g_menuAbierto.store(false, std::memory_order_release);
+         g_menu.teclaCierre = tecla;
+-        g_bloqueoTrasCerrar.store(tecla != 0, std::memory_order_release);
+-        if (escCierraJuego)
+-            SetExitKey(KEY_ESCAPE);
++        g_bloqueoTrasCerrar.store(true, std::memory_order_release);
++        g_menu.restoreExit=escCierraJuego;
+         if (g_menu.cursorOculto)
+             HideCursor();
+     }
+@@ -854,6 +965,7 @@
+ // hasta que se suelta la tecla que lo cerró (Esc es el círculo con el teclado clásico).
+ bool gowTrucosEntradaBloqueada()
+ {
++    if (gow_brand::inputGuard.load(std::memory_order_relaxed)) return true;
+     if (g_menuAbierto.load(std::memory_order_acquire))
+         return true;
+     return g_bloqueoTrasCerrar.load(std::memory_order_acquire);
+@@ -866,97 +978,81 @@
+ {
+     if (!g_instalado.load(std::memory_order_relaxed))
+         return;
+-    if (g_bloqueoTrasCerrar.load(std::memory_order_relaxed) && (g_menu.teclaCierre == 0 || !IsKeyDown(g_menu.teclaCierre)) &&
+-        !IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+-        g_bloqueoTrasCerrar.store(false, std::memory_order_release);
+-
+-    // Pruebas (capturas sin teclado): TOBIICHI_TRUCOS_ABRIR_EN=<segundos> abre el menú a esa hora,
+-    // TOBIICHI_MENU_PESTANA=<0..2> en esa pestaña (por defecto los trucos).
+-    static double abrirEn = []
+-    {
+-        const char *valor = std::getenv("TOBIICHI_TRUCOS_ABRIR_EN");
+-        return valor ? std::atof(valor) : -1.0;
+-    }();
+-    const bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+-    const bool f1 = IsKeyPressed(KEY_F1) && !control;
+-    const bool abierto = g_menuAbierto.load(std::memory_order_relaxed);
+-    if (!abierto)
+-    {
+-        if (abrirEn >= 0.0 && GetTime() >= abrirEn)
+-        {
+-            abrirEn = -1.0;
+-            const char *p = std::getenv("TOBIICHI_MENU_PESTANA");
+-            abrir(p ? std::clamp(std::atoi(p), 0, kNumPestanas - 1) : static_cast<int>(PTrucos));
+-        }
+-        else if (f1)
+-            abrir(-1);
+-        else if (IsKeyPressed(KEY_F2))
+-            abrir(PTrucos);
++    if(gow_brand::inputGuard.load() && !anyHeld()) gow_brand::inputGuard.store(false);
++    if (g_bloqueoTrasCerrar.load() && !anyHeld()) {
++        g_bloqueoTrasCerrar.store(false); if(g_menu.restoreExit)SetExitKey(KEY_ESCAPE);
++    }
++    int pad=gowPromptGamepad();
++    if(pad<0 || !IsGamepadAvailable(pad)) {pad=-1;for(int i=0;i<4;++i)if(IsGamepadAvailable(i)){pad=i;break;}}
++    const auto pressed=[&](int b){return pad>=0 && IsGamepadButtonPressed(pad,b);};
++    bool chord=false;
++    for(int i=0;i<4;++i) if(IsGamepadAvailable(i))
++        chord|=IsGamepadButtonDown(i,GAMEPAD_BUTTON_MIDDLE_LEFT)&&IsGamepadButtonDown(i,GAMEPAD_BUTTON_MIDDLE_RIGHT);
++    static bool lastChord=false; bool openChord=chord&&!lastChord;lastChord=chord;
++    const bool f1=IsKeyPressed(KEY_F1)&&!IsKeyDown(KEY_LEFT_CONTROL)&&!IsKeyDown(KEY_RIGHT_CONTROL);
++    static double openAt=[] {const char *v=std::getenv("TOBIICHI_TRUCOS_ABRIR_EN");return v?std::atof(v):-1.;}();
++    if(!g_menuAbierto.load()) {
++        if(openAt>=0 && GetTime()>=openAt) {openAt=-1;const char *p=std::getenv("TOBIICHI_MENU_PESTANA");abrir(p?std::clamp(std::atoi(p),0,kNumPestanas-1):-1);}
++        else if(f1||openChord) abrir(-1);
++        else if(IsKeyPressed(KEY_F2)) abrir(PTrucos);
+         return;
+     }
+-    if (f1 || IsKeyPressed(KEY_F2) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE))
+-    {
+-        cerrar(escCierraJuego, f1 ? KEY_F1 : IsKeyPressed(KEY_F2) ? KEY_F2 : IsKeyPressed(KEY_ESCAPE) ? KEY_ESCAPE : KEY_BACKSPACE);
++    if(g_menu.capture>=0) {
++        if(IsKeyPressed(KEY_ESCAPE)||openChord||GetTime()>g_menu.captureUntil||!IsWindowFocused()) {g_menu.capture=-1;return;}
++        if(!g_menu.captureReady) {
++            while(GetKeyPressed()) {} // Discard navigation events queued before the capture dialog.
++            g_menu.captureReady=!anyHeld();return;
++        }
++        int code=0;
++        if(g_menu.padBindings) {for(int p=0;p<4;++p)if(IsGamepadAvailable(p))for(int b=1;b<18;++b)if(b!=14&&IsGamepadButtonPressed(p,b))code=b;}
++        else {code=GetKeyPressed();for(int b=0;b<7;++b)if(IsMouseButtonPressed(b))code=1000+b;}
++        if(code) {
++            if(!g_menu.padBindings && (code==KEY_F1||code==KEY_F2||code==KEY_F11)) {g_menu.bindingStatus=tr("Tecla reservada ao menu/janela.","Key reserved for menu/window.");return;}
++            bool shared=false;
++            for(int a=0;a<(g_menu.padBindings?22:32);++a)if(a!=g_menu.capture) {
++                int codes[8],n=g_menu.padBindings?1:tobiichiCodigosAccion(actions[a],codes,8);
++                if(g_menu.padBindings)codes[0]=tobiichiBotonMandoAccion(actions[a]);
++                for(int j=0;j<n;++j)shared|=codes[j]==code;
++            }
++            if(gowMenuBind(actions[g_menu.capture],code,g_menu.padBindings)) {
++                g_menu.bindingStatus=shared?tr("Atribuído; este comando também está em outra ação.","Assigned; this input is also bound to another action."):tr("Mapeamento atualizado nesta sessão.","Binding updated for this session.");g_menu.capture=-1;
++            }
++        }
+         return;
+     }
+-    const bool mando = IsGamepadAvailable(0);
+-    if (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+-    {
+-        cerrar(escCierraJuego, 0);
+-        g_bloqueoTrasCerrar.store(true, std::memory_order_release);
+-        return;
+-    }
+-
+-    int &pestana = g_menu.pestana;
+-    if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_E) || (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)))
+-        pestana = (pestana + 1) % kNumPestanas;
+-    if (IsKeyPressed(KEY_Q) || (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1)))
+-        pestana = (pestana + kNumPestanas - 1) % kNumPestanas;
+-    const int n = filas(pestana);
+-    int &elegido = g_menu.elegido[pestana];
+-    elegido = std::clamp(elegido, 0, n - 1);
+-    if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP) || IsKeyPressed(KEY_W) ||
+-        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP)))
+-        elegido = (elegido + n - 1) % n;
+-    if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN) || IsKeyPressed(KEY_S) ||
+-        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN)))
+-        elegido = (elegido + 1) % n;
+-    if (IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT) || IsKeyPressed(KEY_A) ||
+-        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT)))
+-        cambiar(pestana, elegido, -1);
+-    if (IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT) || IsKeyPressed(KEY_D) ||
+-        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT)))
+-        cambiar(pestana, elegido, 1);
+-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE) ||
+-        (mando && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)))
+-        cambiar(pestana, elegido, 0);
+-
+-    const Geometria g = geometria();
+-    const Vector2 raton = GetMousePosition();
+-    const float pestanasY = g.y + g.cabecera - g.pestanas;
+-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && raton.y >= pestanasY && raton.y < pestanasY + g.pestanas &&
+-        raton.x >= g.x && raton.x < g.x + g.w)
+-    {
+-        pestana = std::clamp(static_cast<int>((raton.x - g.x) / (g.w / kNumPestanas)), 0, kNumPestanas - 1);
+-        return;
+-    }
+-    const float filasY = g.y + g.cabecera;
+-    if (raton.x >= g.x && raton.x < g.x + g.w && raton.y >= filasY && raton.y < filasY + g.fila * static_cast<float>(n))
+-    {
+-        const int sobre = std::clamp(static_cast<int>((raton.y - filasY) / g.fila), 0, n - 1);
+-        const Vector2 delta = GetMouseDelta();
+-        if (delta.x != 0.0f || delta.y != 0.0f)
+-            elegido = sobre;
+-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+-        {
+-            elegido = sobre;
+-            cambiar(pestana, sobre, 0);
+-        }
+-        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+-        {
+-            elegido = sobre;
+-            cambiar(pestana, sobre, -1);
+-        }
++    if(f1||openChord||IsKeyPressed(KEY_F2)) {cerrar(escCierraJuego,f1?KEY_F1:0);return;}
++    const auto mouse=GetMousePosition();const float scale=geometria().escala;
++    if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&CheckCollisionPointRec(mouse,Rectangle{GetScreenWidth()-180*scale,12*scale,164*scale,36*scale})) {cerrar(escCierraJuego,0);return;}
++    if(IsKeyPressed(KEY_ESCAPE)||IsKeyPressed(KEY_BACKSPACE)||pressed(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
++        if(g_menu.modal)g_menu.modal=false;else cerrar(escCierraJuego,IsKeyPressed(KEY_ESCAPE)?KEY_ESCAPE:0);return;
++    }
++    int dock=0;while(dock<5 && dockOrder[dock]!=g_menu.pestana)++dock;
++    int step=0;
++    if(IsKeyPressed(KEY_TAB)||IsKeyPressed(KEY_E)||pressed(GAMEPAD_BUTTON_RIGHT_TRIGGER_1))step=1;
++    if(IsKeyPressed(KEY_Q)||pressed(GAMEPAD_BUTTON_LEFT_TRIGGER_1))step=-1;
++    bool left=IsKeyPressed(KEY_LEFT)||IsKeyPressedRepeat(KEY_LEFT)||IsKeyPressed(KEY_A)||pressed(GAMEPAD_BUTTON_LEFT_FACE_LEFT);
++    bool right=IsKeyPressed(KEY_RIGHT)||IsKeyPressedRepeat(KEY_RIGHT)||IsKeyPressed(KEY_D)||pressed(GAMEPAD_BUTTON_LEFT_FACE_RIGHT);
++    bool up=IsKeyPressed(KEY_UP)||IsKeyPressedRepeat(KEY_UP)||IsKeyPressed(KEY_W)||pressed(GAMEPAD_BUTTON_LEFT_FACE_UP);
++    bool down=IsKeyPressed(KEY_DOWN)||IsKeyPressedRepeat(KEY_DOWN)||IsKeyPressed(KEY_S)||pressed(GAMEPAD_BUTTON_LEFT_FACE_DOWN);
++    static double repeatAt=0;static int previousAxis=0;
++    int axis=0;
++    if(pad>=0) {float x=GetGamepadAxisMovement(pad,GAMEPAD_AXIS_LEFT_X),y=GetGamepadAxisMovement(pad,GAMEPAD_AXIS_LEFT_Y);axis=std::fabs(y)>.55f?(y>0?2:-2):std::fabs(x)>.55f?(x>0?1:-1):0;}
++    if(axis && (axis!=previousAxis||GetTime()>repeatAt)) {left|=axis==-1;right|=axis==1;up|=axis==-2;down|=axis==2;repeatAt=GetTime()+(axis==previousAxis?.16:.4);}previousAxis=axis;
++    bool confirm=IsKeyPressed(KEY_ENTER)||IsKeyPressed(KEY_KP_ENTER)||IsKeyPressed(KEY_SPACE)||pressed(GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
++    if(!g_menu.modal) {if(left)step=-1;if(right)step=1;}
++    if(step) {g_menu.pestana=dockOrder[(dock+step+6)%6];g_menu.scroll=0;}
++    for(int i=0;i<6;++i)if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&CheckCollisionPointRec(mouse,dockRect(i))) {g_menu.pestana=dockOrder[i];g_menu.modal=true;g_menu.scroll=0;return;}
++    if(!g_menu.modal) {if(confirm)g_menu.modal=true;return;}
++    int &selected=g_menu.elegido[g_menu.pestana];int n=filas(g_menu.pestana);selected=std::clamp(selected,0,n-1);
++    if(up)selected=(selected+n-1)%n;if(down)selected=(selected+1)%n;
++    const int wheel=int(GetMouseWheelMove());if(wheel)selected=std::clamp(selected-wheel,0,n-1);
++    if(left)cambiar(g_menu.pestana,selected,-1);if(right)cambiar(g_menu.pestana,selected,1);if(confirm)cambiar(g_menu.pestana,selected,0);
++    if(g_menu.pestana==PControles && selected>0 && selected<filas(PControles)-1 && IsKeyPressed(KEY_DELETE))gowMenuBind(actions[selected-1],0,g_menu.padBindings);
++    int count=visibleRows();g_menu.scroll=std::clamp(g_menu.scroll,std::max(0,selected-count+1),selected);
++    auto g=geometria();Rectangle rows{g.x,g.y+g.cabecera,g.w,count*g.fila};
++    if(CheckCollisionPointRec(mouse,rows)) {
++        int row=g_menu.scroll+int((mouse.y-rows.y)/g.fila);
++        if(row<n && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)||IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))) {selected=row;cambiar(g_menu.pestana,row,IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)?-1:0);}
+     }
+ }
+ 
+@@ -1000,52 +1096,43 @@
+     const float s = g.escala;
+     const int pestana = g_menu.pestana;
+ 
+-    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{6, 3, 2, 160});
+-    const Rectangle panel{g.x, g.y, g.w, g.h};
+-    DrawRectangleRec(panel, Color{20, 12, 9, 240});
+-    DrawRectangleGradientV(static_cast<int>(g.x), static_cast<int>(g.y), static_cast<int>(g.w), static_cast<int>(g.cabecera),
+-                           Color{90, 13, 9, 190}, Color{20, 12, 9, 0});
+-    DrawRectangleLinesEx(panel, std::max(1.0f, 1.5f * s), kBorde);
+-    DrawRectangle(static_cast<int>(g.x), static_cast<int>(g.y), static_cast<int>(g.w), std::max(2, static_cast<int>(3.0f * s)), kOro);
+-
+-    const float margen = 28.0f * s;
+-    const float tamTitulo = 30.0f * s, tamSub = 15.0f * s;
+-    texto(f.negrita, m.titulo, g.x + margen, g.y + 22.0f * s, tamTitulo, kOroClaro);
+-    texto(f.normal, m.subtitulo, g.x + margen, g.y + 22.0f * s + tamTitulo + 6.0f * s, tamSub, kTextoTenue);
+-
+-    // tabs
+-    const float pestanasY = g.y + g.cabecera - g.pestanas;
+-    const float anchoPestana = g.w / static_cast<float>(kNumPestanas);
+-    const float tamPestana = 18.0f * s;
+-    for (int p = 0; p < kNumPestanas; ++p)
+-    {
+-        const float px = g.x + anchoPestana * static_cast<float>(p);
+-        const bool activa = p == pestana;
+-        const Font &fuente = activa ? f.negrita : f.normal;
+-        const float tw = ancho(fuente, m.pestanas[p], tamPestana);
+-        texto(fuente, m.pestanas[p], px + (anchoPestana - tw) * 0.5f, pestanasY + (g.pestanas - tamPestana) * 0.5f - 2.0f * s,
+-              tamPestana, activa ? kOroClaro : kTextoSuave);
+-        if (activa)
+-            DrawRectangleRec(Rectangle{px + anchoPestana * 0.2f, pestanasY + g.pestanas - 3.0f * s, anchoPestana * 0.6f,
+-                                       std::max(2.0f, 3.0f * s)},
+-                             kOro);
+-    }
+-    DrawLineEx(Vector2{g.x + margen, g.y + g.cabecera - 1.0f}, Vector2{g.x + g.w - margen, g.y + g.cabecera - 1.0f},
+-               std::max(1.0f, s), kBorde);
+-
++    DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),Color{7,8,11,205});
++    texto(f.negrita,tr("Menu do jogo","Game menu"),24*s,12*s,22*s,kTexto);
++    texto(f.normal,"F1 / Back + Start",24*s,37*s,13*s,kTextoSuave);
++    texto(f.normal,tr("Retomar jogo  ×","Resume game  ×"),GetScreenWidth()-176*s,22*s,18*s,kTexto);
++    static Texture2D brand=gow_brand::load();
++    if(brand.id) DrawTexturePro(brand,Rectangle{0,0,float(brand.width),float(brand.height)*.41f},Rectangle{18*s,GetScreenHeight()-104*s,108*s,88*s},Vector2{},0,Fade(WHITE,.18f));
++    for(int i=0;i<6;++i) {
++        Rectangle rect=dockRect(i);bool active=dockOrder[i]==pestana;
++        DrawRectangleRounded(rect,.14f,8,active?Color{49,29,31,255}:Color{20,22,27,245});
++        DrawRectangleRoundedLinesEx(rect,.14f,8,active?2.f:1.f,active?kOro:kBorde);
++        const char *label=category(dockOrder[i]);float tw=ancho(f.negrita,label,17*s);
++        texto(f.negrita,label,rect.x+(rect.width-tw)*.5f,rect.y+16*s,17*s,active?kTexto:kTextoSuave);
++    }
++    if(!g_menu.modal) {
++        const char* hint=tr("Escolha uma categoria para ajustar sua sessão.","Choose a category to adjust your session.");
++        texto(f.normal,hint,(GetScreenWidth()-ancho(f.normal,hint,20*s))*.5f,GetScreenHeight()*.46f,20*s,kTextoSuave);
++        return;
++    }
++    DrawRectangleRounded(Rectangle{g.x,g.y,g.w,g.h},.025f,8,Color{18,20,25,250});
++    DrawRectangleRoundedLinesEx(Rectangle{g.x,g.y,g.w,g.h},.025f,8,1,kBorde);
++    const float margen=26*s;
++    texto(f.negrita,category(pestana),g.x+margen,g.y+18*s,27*s,kTexto);
++    texto(f.normal,tr("Nesta sessão • O jogo continua • Esc / B volta","Session settings • Game continues • Esc / B goes back"),g.x+margen,g.y+53*s,15*s,kTextoSuave);
++    DrawLineEx(Vector2{g.x+margen,g.y+g.cabecera-1},Vector2{g.x+g.w-margen,g.y+g.cabecera-1},1,kBorde);
+     const float tamNombre = 20.0f * s, tamDesc = 14.5f * s, tamValor = 17.0f * s;
+     const float interruptorW = 52.0f * s, interruptorH = 26.0f * s, valorW = 190.0f * s;
+     const int n = filas(pestana);
+-    for (int i = 0; i < n; ++i)
+-    {
+-        const float fy = g.y + g.cabecera + g.fila * static_cast<float>(i);
++    for (int i = g_menu.scroll; i < n; ++i)
++    {
++        const float fy = g.y + g.cabecera + g.fila * static_cast<float>(i-g_menu.scroll);
+         if (fy + g.fila > g.y + g.h - g.pie + 1.0f)
+             break;
+         const Fila fl = fila(pestana, i);
+         const bool sel = i == g_menu.elegido[pestana];
+         if (sel)
+         {
+-            DrawRectangleRec(Rectangle{g.x + 1.0f, fy, g.w - 2.0f, g.fila}, Color{58, 30, 18, 200});
++            DrawRectangleRec(Rectangle{g.x + 1.0f, fy, g.w - 2.0f, g.fila}, Color{42, 31, 35, 255});
+             DrawRectangleRec(Rectangle{g.x + 1.0f, fy, std::max(3.0f, 4.0f * s), g.fila}, kOro);
+         }
+         const float controlW = fl.tipo == Interruptor ? interruptorW : valorW;
+@@ -1054,24 +1141,24 @@
+         const float bloque = tamNombre + 6.0f * s + tamDesc;
+         const float ty = fy + (g.fila - bloque) * 0.5f;
+         const Color colorNombre = !fl.habilitada ? kTextoTenue : fl.encendido ? kOroClaro : (sel ? kTexto : kTextoSuave);
+-        texto(f.negrita, fl.nombre, textoX, ty, tamNombre, colorNombre);
++        texto(f.negrita, ajustar(f.negrita,fl.nombre,tamNombre,textoMax).c_str(), textoX, ty, tamNombre, colorNombre);
+         const std::string desc = ajustar(f.normal, fl.descripcion.c_str(), tamDesc, textoMax);
+         texto(f.normal, desc.c_str(), textoX, ty + tamNombre + 6.0f * s, tamDesc, kTextoTenue);
+ 
+         if (fl.tipo == Interruptor)
+         {
+             const Rectangle pista{g.x + g.w - margen - interruptorW, fy + (g.fila - interruptorH) * 0.5f, interruptorW, interruptorH};
+-            DrawRectangleRounded(pista, 1.0f, 12, fl.encendido ? Color{212, 168, 87, 255} : Color{45, 30, 22, 255});
++            DrawRectangleRounded(pista, 1.0f, 12, fl.encendido ? kOro : Color{37,41,50,255});
+             DrawRectangleRoundedLinesEx(pista, 1.0f, 12, std::max(1.0f, s), fl.encendido ? kOroClaro : kBorde);
+             const float radio = interruptorH * 0.5f - 3.0f * s;
+             const float cx = fl.encendido ? pista.x + pista.width - interruptorH * 0.5f : pista.x + interruptorH * 0.5f;
+-            DrawCircleV(Vector2{cx, pista.y + interruptorH * 0.5f}, radio, fl.encendido ? Color{29, 15, 7, 255} : kTextoSuave);
++            DrawCircleV(Vector2{cx, pista.y + interruptorH * 0.5f}, radio, fl.encendido ? kTexto : kTextoSuave);
+         }
+         else
+         {
+             const float altoCaja = 34.0f * s;
+             const Rectangle caja{g.x + g.w - margen - valorW, fy + (g.fila - altoCaja) * 0.5f, valorW, altoCaja};
+-            DrawRectangleRounded(caja, 0.3f, 8, Color{34, 21, 15, 255});
++            DrawRectangleRounded(caja, 0.3f, 8, Color{21,23,28,255});
+             DrawRectangleRoundedLinesEx(caja, 0.3f, 8, std::max(1.0f, s), sel && fl.habilitada ? kOro : kBorde);
+             const Color colorValor = fl.habilitada ? (sel ? kOroClaro : kTexto) : kTextoTenue;
+             const float vy = caja.y + (caja.height - tamValor) * 0.5f - 1.0f * s;
+@@ -1080,22 +1167,23 @@
+                 texto(f.normal, "‹", caja.x + 10.0f * s, vy, tamValor, kTextoSuave);
+                 texto(f.normal, "›", caja.x + caja.width - 18.0f * s, vy, tamValor, kTextoSuave);
+             }
+-            const char *valor = fl.tipo == Opcion ? fl.valor.c_str() : "Enter";
++            const std::string fitted=ajustar(f.negrita,fl.valor.empty()?"Enter":fl.valor.c_str(),tamValor,valorW-34*s);
++            const char *valor=fitted.c_str();
+             const float vw = ancho(f.negrita, valor, tamValor);
+             texto(f.negrita, valor, caja.x + (caja.width - vw) * 0.5f, vy, tamValor, colorValor);
+         }
+         if (i + 1 < n)
+-            DrawLineEx(Vector2{g.x + margen, fy + g.fila}, Vector2{g.x + g.w - margen, fy + g.fila}, 1.0f, Color{61, 38, 25, 160});
+-    }
+-    if (pestana != PTrucos)
+-    {
+-        const float notaY = g.y + g.cabecera + g.fila * static_cast<float>(n) + 14.0f * s;
+-        if (notaY + tamDesc < g.y + g.h - g.pie)
+-            texto(f.normal, ajustar(f.normal, m.nota, tamDesc, g.w - margen * 2.0f).c_str(), g.x + margen, notaY, tamDesc,
+-                  kTextoTenue);
+-    }
+-
++            DrawLineEx(Vector2{g.x + margen, fy + g.fila}, Vector2{g.x + g.w - margen, fy + g.fila}, 1.0f, Color{37,41,50,160});
++    }
+     const float pieY = g.y + g.h - g.pie;
+     DrawLineEx(Vector2{g.x + margen, pieY}, Vector2{g.x + g.w - margen, pieY}, std::max(1.0f, s), kBorde);
+-    texto(f.normal, m.ayuda, g.x + margen, pieY + (g.pie - tamDesc) * 0.5f, tamDesc, kTextoSuave);
++    const std::string footer=std::to_string(g_menu.elegido[pestana]+1)+" / "+std::to_string(n)+tr("    ↑↓ navegar   ←→ ajustar   Enter / A selecionar","    ↑↓ navigate   ←→ adjust   Enter / A select");
++    texto(f.normal,footer.c_str(),g.x+margen,pieY+(g.pie-tamDesc)*.5f,tamDesc,kTextoSuave);
++    if(g_menu.capture>=0) {
++        DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),Color{0,0,0,210});
++        Rectangle box{g.x,g.y+g.h*.35f,g.w,150*s};DrawRectangleRounded(box,.04f,8,Color{28,31,38,255});
++        texto(f.negrita,tr("Pressione o novo comando","Press the new input"),box.x+26*s,box.y+24*s,24*s,kTexto);
++        texto(f.normal,tr("Esc cancela • Solte os botões antes de atribuir","Esc cancels • Release held inputs before binding"),box.x+26*s,box.y+67*s,17*s,kTextoSuave);
++        texto(f.normal,g_menu.bindingStatus.c_str(),box.x+26*s,box.y+104*s,15*s,kOroClaro);
++    }
+ }
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,3 +1,5 @@
++#include "runtime/gow_menu_live.h"
++#include <memory>
+ #include "runtime/ps2_pad.h"
+ #include "runtime/gow_qte_hold.h"
+ #include "runtime/gow_qte_prompt.h"
+@@ -67,12 +69,15 @@
+     struct MapaTeclas
+     {
+         bool activo = false;
++        bool modifierAliases = true;
+         std::array<std::vector<int>, NumAcciones> codigos;
+     };
+ 
+-    const MapaTeclas &mapaTeclas()
+-    {
+-        static const MapaTeclas mapa = []
++    std::shared_ptr<const MapaTeclas> liveMapaTeclas;
++    std::shared_ptr<const MapaTeclas> mapaTeclas()
++    {
++        if (auto live = std::atomic_load(&liveMapaTeclas)) return live;
++        static const auto mapa = std::make_shared<const MapaTeclas>([]
+         {
+             MapaTeclas m;
+             const char *valor = std::getenv("TOBIICHI_TECLAS");
+@@ -111,14 +116,15 @@
+                 pos = fin + 1;
+             }
+             return m;
+-        }();
++        }());
+         return mapa;
+     }
+ 
+-    bool codigoPulsado(int codigo)
++    bool codigoPulsado(int codigo, bool aliases=true)
+     {
+         if (codigo >= 1000)
+             return IsMouseButtonDown(codigo - 1000);
++        if (!aliases) return IsKeyDown(codigo);
+         switch (codigo)
+         {
+         case KEY_LEFT_SHIFT:
+@@ -138,7 +144,7 @@
+     bool accionPulsada(const MapaTeclas &m, size_t accion)
+     {
+         for (const int codigo : m.codigos[accion])
+-            if (codigoPulsado(codigo))
++            if (codigoPulsado(codigo,m.modifierAliases))
+                 return true;
+         return false;
+     }
+@@ -157,7 +163,7 @@
+     {
+         for (const int modifier : map.codigos[AccLdMod])
+         {
+-            if (!codigoPulsado(modifier)) continue;
++            if (!codigoPulsado(modifier,map.modifierAliases)) continue;
+             bool shared = false;
+             for (size_t action = 0; action <= AccFuria; ++action)
+                 for (const int code : map.codigos[action])
+@@ -182,9 +188,11 @@
+         std::array<std::vector<int>, AccFuria + 1> botones;
+     };
+ 
+-    const MapaMando &mapaMando()
+-    {
+-        static const MapaMando mapa = []
++    std::shared_ptr<const MapaMando> liveMapaMando;
++    std::shared_ptr<const MapaMando> mapaMando()
++    {
++        if (auto live = std::atomic_load(&liveMapaMando)) return live;
++        static const auto mapa = std::make_shared<const MapaMando>([]
+         {
+             MapaMando m;
+             const char *valor = std::getenv("TOBIICHI_MANDO");
+@@ -223,7 +231,7 @@
+                 pos = fin + 1;
+             }
+             return m;
+-        }();
++        }());
+         return mapa;
+     }
+ 
+@@ -307,7 +315,8 @@
+ // envoltorio de la lectura del mando de God of War (ps2_runtime.cpp), porque gowPad2Read pone sus propios sticks fijos.
+ bool tobiichiSticksTeclado(uint8_t (&sticks)[4])
+ {
+-    const MapaTeclas &m = mapaTeclas();
++    const auto snapshot = mapaTeclas();
++    const MapaTeclas &m = *snapshot;
+     if (!m.activo)
+         return false;
+     // Match the backend's four-slot selection; never replace a connected pad's sticks.
+@@ -394,12 +403,12 @@
+         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+             clearBit(PAD_RIGHT);
+ 
+-        if (const MapaMando &mando = mapaMando(); mando.activo)
++        if (const auto snapshot = mapaMando(); snapshot->activo)
+         {
+             // gow-native-pc: the launcher's controller layout replaces the fixed ones for every button (d-pad included)
+             btns = 0xFFFFu;
+             for (size_t accion = 0; accion <= AccFuria; ++accion)
+-                for (const int boton : mando.botones[accion])
++                for (const int boton : snapshot->botones[accion])
+                     if (IsGamepadButtonDown(kGamepad, boton))
+                         clearBit(kBitAccion[accion]);
+         }
+@@ -446,7 +455,7 @@
+                 clearBit(PAD_R2);
+         }
+ 
+-        if (!mapaMando().activo)
++        if (!mapaMando()->activo)
+         {
+             if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+                 clearBit(PAD_START);
+@@ -467,10 +476,11 @@
+         data[4] = static_cast<uint8_t>(128 + rx * 127);
+         data[5] = static_cast<uint8_t>(128 + ry * 127);
+     }
+-    else if (mapaTeclas().activo)
++    else if (mapaTeclas()->activo)
+     {
+         // GOW-Port: teclado configurable (lanzador).
+-        const MapaTeclas &m = mapaTeclas();
++        const auto snapshot = mapaTeclas();
++    const MapaTeclas &m = *snapshot;
+         for (size_t accion = 0; accion <= AccFuria; ++accion)
+             if (accionPulsada(m, accion))
+                 clearBit(kBitAccion[accion]);
+@@ -563,12 +573,11 @@
+     const bool moving = data[4] < 96 || data[4] > 160 || data[5] < 96 || data[5] > 160 ||
+                         data[6] < 96 || data[6] > 160 || data[7] < 96 || data[7] > 160;
+     btns = repetirMantenidos(btns, moving);
+-    static const bool automaticQte = [] {
+-        const char *v = std::getenv("GOW_QTE_AUTO");
+-        const char *test = std::getenv("GOW_PAD_TEST");
+-        return v && std::strcmp(v,"1") == 0 && !(test && std::strcmp(test,"1") == 0);
+-    }();
+-    if (automaticQte) btns = gow_qte_prompt::apply(btns, true, IsWindowFocused());
++    static const bool scripted = [] { const char *v=std::getenv("GOW_PAD_TEST"); return v && !std::strcmp(v,"1"); }();
++    const bool autoEnabled = !scripted && gow_menu_live::autoQte().load();
++    static thread_local bool wasAutoEnabled=false;
++    if(autoEnabled || wasAutoEnabled) btns = gow_qte_prompt::apply(btns, autoEnabled, IsWindowFocused());
++    wasAutoEnabled=autoEnabled;
+ 
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+@@ -627,7 +636,8 @@
+     static gow_prompt::Tracker tracker;
+     gow_prompt::Input input;
+     input.focused = IsWindowFocused();
+-    const auto &map = mapaTeclas();
++    const auto snapshot = mapaTeclas();
++    const auto &map = *snapshot;
+     if (map.activo) {
+         for (const auto &codes : map.codigos)
+             for (int code : codes) {
+@@ -661,7 +671,8 @@
+             a = i;
+     if (a == NumAcciones || max <= 0)
+         return 0;
+-    const MapaTeclas &m = mapaTeclas();
++    const auto snapshot = mapaTeclas();
++    const MapaTeclas &m = *snapshot;
+     int n = 0;
+     if (m.activo)
+     {
+@@ -712,6 +723,17 @@
+     }
+     if (c >= 0)
+         codigos[n++] = c;
++    if (!dmc5 && n<max) {
++        int alias=-1;
++        switch(a) {
++        case AccArriba:alias=KEY_W;break;case AccAbajo:alias=KEY_S;break;
++        case AccIzquierda:alias=KEY_A;break;case AccDerecha:alias=KEY_D;break;
++        case AccCruz:alias=KEY_SPACE;break;case AccCirculo:alias=KEY_ESCAPE;break;
++        case AccCuadrado:alias=KEY_KP_0;break;case AccTriangulo:alias=KEY_KP_1;break;
++        default:break;
++        }
++        if(alias>=0)codigos[n++]=alias;
++    }
+     return n;
+ }
+ 
+@@ -719,7 +741,8 @@
+ 
+ int tobiichiBotonMandoAccion(const char *accion)
+ {
+-    const auto &map = mapaMando();
++    const auto snapshot = mapaMando();
++    const auto &map = *snapshot;
+     if (map.activo) {
+         for (size_t a = 0; a <= AccFuria; ++a)
+             if (std::strcmp(kNombresAccion[a], accion) == 0) {
+@@ -768,3 +791,35 @@
+             return dmc5 ? p.dmc5 : p.clasico;
+     return -1;
+ }
++
++// Host menu writes immutable snapshots; the EE reader retains ownership for its whole read.
++bool gowMenuBind(const char *action, int code, bool pad) {
++    size_t a=0; while(a<NumAcciones && std::strcmp(action,kNombresAccion[a])) ++a;
++    if(a==NumAcciones || (pad && (a>AccFuria || code<0 || code>17 || code==14)) ||
++       (!pad && code!=0 && !((code>=32 && code<=348) || (code>=1000 && code<=1006)))) return false;
++    if(pad) {
++        auto m=std::make_shared<MapaMando>(*mapaMando());
++        if(!m->activo) for(size_t i=0;i<=AccFuria;++i) {
++            int b=tobiichiBotonMandoAccion(kNombresAccion[i]); if(b>0) m->botones[i]={b};
++        }
++        m->activo=true; m->botones[a].clear(); if(code) m->botones[a].push_back(code);
++        std::atomic_store(&liveMapaMando,std::shared_ptr<const MapaMando>(m));
++    } else {
++        auto m=std::make_shared<MapaTeclas>(*mapaTeclas());
++        if(!m->activo) {
++            const char *classic=std::getenv("TOBIICHI_DMC5_CONTROLS");
++            m->modifierAliases=!(classic && !std::strcmp(classic,"0"));
++            for(size_t i=0;i<NumAcciones;++i) {
++                int codes[8]; int n=tobiichiCodigosAccion(kNombresAccion[i],codes,8);
++                m->codigos[i].assign(codes,codes+n);
++            }
++        }
++        m->activo=true; m->codigos[a].clear(); if(code) m->codigos[a].push_back(code);
++        std::atomic_store(&liveMapaTeclas,std::shared_ptr<const MapaTeclas>(m));
++    }
++    return true;
++}
++void gowMenuResetBindings() {
++    std::atomic_store(&liveMapaTeclas,std::shared_ptr<const MapaTeclas>{});
++    std::atomic_store(&liveMapaMando,std::shared_ptr<const MapaMando>{});
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/gow_menu_live.h"
+ #include "ps2_runtime.h"
+ #include "runtime/gs/gs_stage.h"
+ #include "vu_pcsx2/pcsx2_vu1_bridge.h"
+@@ -90,6 +91,7 @@
+             std::fwrite(out, sizeof(int16_t) * 2u, produced, pcm);
+             std::fflush(pcm);
+         }
++        gow_menu_live::applyVolume(out, produced * 2u);
+         std::fill(out + produced * 2u, out + static_cast<size_t>(frames) * 2u, int16_t{0}); // sin datos: silencio
+     }
+ 

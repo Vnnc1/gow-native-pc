@@ -636,7 +636,7 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
 
     // Mod manager (launcher patch 73): apply the staged plan last so the mod's texture pack replaces the manual one,
     // and remove every mod variable when nothing is enabled (an inherited or previously saved value must not leak).
-    for (const char *nombre : {"GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_MOD_VFS_LOG"})
+    for (const char *nombre : {"GOW_ACTIVE_MODS", "GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE", "GOW_MOD_VFS_LOG"})
         entorno.remove(QString::fromLatin1(nombre));
     for (auto it = entornoMods.begin(); it != entornoMods.end(); ++it) {
         if (it.value().toString().isEmpty())

@@ -1,0 +1,62 @@
+#include "raylib.h"
+#include <cassert>
+#include <array>
+#include <string>
+std::array<bool,512> testKeys{},heldKeys{};
+std::array<bool,18> testButtons{},heldButtons{};
+int typed=0, boundCode=-1;bool padConnected=false;double clockNow=0;
+bool keyPressed(int k){return testKeys[k];}bool keyDown(int k){return heldKeys[k];}
+bool padAvailable(int p){return padConnected && p==3;}
+bool padPressed(int p,int b){return p==3 && testButtons[b];}
+bool padDown(int p,int b){return p==3 && heldButtons[b];}
+float padAxis(int,int){return 0;}int keyTyped(){int v=typed;typed=0;return v;}
+double testTime(){return clockNow;}
+#define IsKeyPressed keyPressed
+#define IsKeyPressedRepeat keyPressed
+#define IsKeyDown keyDown
+#define IsGamepadAvailable padAvailable
+#define IsGamepadButtonPressed padPressed
+#define IsGamepadButtonDown padDown
+#define GetGamepadAxisMovement padAxis
+#define GetKeyPressed keyTyped
+#define GetTime testTime
+#include "@MENU_SOURCE@"
+bool PS2Runtime::hasFunction(uint32_t) const{return false;}
+PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t){return nullptr;}
+bool PS2Runtime::replaceFunction(uint32_t,RecompiledFunction){return false;}
+int gowVentanaFps(){return 60;}
+int gowPromptGamepad(){return padConnected?3:-1;}
+bool gowMenuBind(const char*,int c,bool){boundCode=c;return true;}
+void gowMenuResetBindings(){}
+int tobiichiCodigosAccion(const char*,int *c,int){*c=KEY_W;return 1;}
+int tobiichiBotonMandoAccion(const char*){return 7;}
+void key(int k){testKeys[k]=true;gowTrucosMenuEntrada(false);testKeys.fill(false);}
+int main(int argc,char**argv){
+    if(argc!=3)return 2;
+    SetTraceLogLevel(LOG_NONE);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Menu regression");SetExitKey(KEY_NULL);
+    g_instalado.store(true);
+    key(KEY_F1);assert(g_menuAbierto.load()&&!g_menu.modal);assert(gowTrucosEntradaBloqueada());
+    key(KEY_ENTER);assert(g_menu.modal);bool fxaa=gow_vivo::fxaa.load();cambiar(PGraficos,GFxaa,0);assert(gow_vivo::fxaa.load()!=fxaa);
+    key(KEY_ESCAPE);assert(!g_menu.modal&&g_menuAbierto.load());key(KEY_ESCAPE);assert(!g_menuAbierto.load());
+    padConnected=true;heldButtons[13]=heldButtons[15]=true;gowTrucosMenuEntrada(false);assert(g_menuAbierto.load());
+    heldButtons.fill(false);gowTrucosMenuEntrada(false);testButtons[6]=true;gowTrucosMenuEntrada(false);testButtons.fill(false);assert(!g_menuAbierto.load());
+    assert(g_bloqueoTrasCerrar.load());gowTrucosMenuEntrada(false);assert(!g_bloqueoTrasCerrar.load());padConnected=false;
+    abrir(PControles);cambiar(PControles,1,0);assert(g_menu.capture==0);
+    typed=KEY_ENTER;gowTrucosMenuEntrada(false);assert(g_menu.captureReady&&typed==0&&boundCode==-1);
+    typed=KEY_T;gowTrucosMenuEntrada(false);assert(boundCode==KEY_T&&g_menu.capture==-1);
+    cambiar(PAudio,0,-1);assert(gow_menu_live::volume.load()==95);cambiar(PAudio,1,0);assert(gow_menu_live::mute.load());
+    cambiar(PTrucos,kNumTrucos,0);assert(gow_menu_live::autoQte().load());
+    Texture2D background=LoadTexture(argv[1]);
+    for(int p=-1;p<6;++p){
+        abrir(p);g_menu.pestana=p<0?0:p;g_menu.bindingStatus.clear();
+        for(int frame=0;frame<2;++frame) {BeginDrawing();ClearBackground(Color{20,20,20,255});
+        if(background.id)DrawTexturePro(background,Rectangle{0,0,float(background.width),float(background.height)},Rectangle{0,0,1280,720},Vector2{},0,WHITE);
+        gowTrucosMenuDibujar();EndDrawing();}
+        Image shot=LoadImageFromScreen();assert(ExportImage(shot,(std::string(argv[2])+"/menu-"+std::to_string(p)+".png").c_str()));UnloadImage(shot);
+    }
+    SetWindowSize(640,480);auto g=geometria();assert(g.x>=0&&g.y>=0&&g.x+g.w<=640&&g.y+g.h<=480);assert(visibleRows()>=1);
+    SetWindowSize(320,224);for(int i=0;i<6;++i){auto rect=dockRect(i);assert(rect.x>=0&&rect.x+rect.width<=320);}
+    assert(bindingName(0,false)=="Sem comando");
+    if(background.id)UnloadTexture(background);CloseWindow();
+    std::puts("PASS: production menu navigation, slot-3 shortcut, release guard, capture, graphics, audio, QTE assist, small layout");
+}

@@ -114,7 +114,8 @@ class Pipeline:
         return Path(json.loads((self.data / 'languages.json').read_text(encoding='utf-8'))['recompile_elf'])
 
     def configure(self):
-        extra = []
+        brand = self.profile['runtime'].get('branding_image')
+        extra = [f'-DGOW_BRAND_IMAGE={self.root / "games" / self.args.game / brand if brand else ""}']
         captures = self.data / 'vu1_capture'
         if any(captures.glob('*.bin')):
             sources = [captures / 'vu1n_heads_seen.txt']

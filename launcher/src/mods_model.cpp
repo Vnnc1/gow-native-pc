@@ -1,3 +1,4 @@
+#include <QRegularExpression>
 #include "mods_model.h"
 
 #include "installer_backend.h"
@@ -19,7 +20,7 @@
 
 namespace
 {
-    const char *kVariablesDeMods[] = {"GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE",
+    const char *kVariablesDeMods[] = {"GOW_ACTIVE_MODS", "GOW_MOD_VFS_TABLE", "GOW_MOD_VFS_STATS", "GOW_MOD_VFS_TRACE",
                                       "GOW_MOD_VFS_LOG", "GOW_MOD_PATCH_TABLE", "GOW_MOD_PATCH_LOG"};
 
     QString recortar(const QString &texto, int maximo = 220)
@@ -736,6 +737,15 @@ QVariantMap ModsModel::prepararEntorno(const QString &pacoteManual, const QStrin
         entorno.insert(clave, valor);
     }
 
+    QStringList activeNames;
+    for (const auto &entry : mods) {
+        const auto mod = entry.toObject();
+        QString label = mod.value(QStringLiteral("id")).toString() + QStringLiteral(" @ ") + mod.value(QStringLiteral("version")).toString();
+        label.replace(QRegularExpression(QStringLiteral("[;\\r\\n\\t]")), QStringLiteral(" "));
+        activeNames.append(label.left(120));
+        if (activeNames.size() == 32) break;
+    }
+    entorno.insert(QStringLiteral("GOW_ACTIVE_MODS"), activeNames.join(QLatin1Char(';')));
     salida.insert(QStringLiteral("env"), entorno);
     salida.insert(QStringLiteral("ok"), true);
     salida.insert(QStringLiteral("applied"), int(mods.size()));
