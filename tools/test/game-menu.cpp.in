@@ -28,6 +28,7 @@ int gowVentanaFps(){return 60;}
 int gowPromptGamepad(){return padConnected?3:-1;}
 bool gowMenuBind(const char*,int c,bool){boundCode=c;return true;}
 void gowMenuResetBindings(){}
+std::string gowMenuBindingsJson(bool){return "{}";}
 int tobiichiCodigosAccion(const char*,int *c,int){*c=KEY_W;return 1;}
 int tobiichiBotonMandoAccion(const char*){return 7;}
 void key(int k){testKeys[k]=true;gowTrucosMenuEntrada(false);testKeys.fill(false);}
@@ -35,11 +36,13 @@ int main(int argc,char**argv){
     if(argc!=3)return 2;
     SetTraceLogLevel(LOG_NONE);SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1280,720,"Menu regression");SetExitKey(KEY_NULL);
     g_instalado.store(true);
-    key(KEY_F1);assert(g_menuAbierto.load()&&!g_menu.modal);assert(gowTrucosEntradaBloqueada());
+    for(int i=0;i<2;++i) { BeginDrawing();ClearBackground(Color{20,20,20,255});gowTrucosMenuDibujar();EndDrawing(); }
+    Image notice=LoadImageFromScreen();assert(ExportImage(notice,(std::string(argv[2])+"/accessibility-notice.png").c_str()));UnloadImage(notice);
+    key(KEY_F1);assert(g_menuAbierto.load()&&!g_menu.modal);assert(gow_menu_live::pauseRequested.load());assert(gowTrucosEntradaBloqueada());
     key(KEY_ENTER);assert(g_menu.modal);bool fxaa=gow_vivo::fxaa.load();cambiar(PGraficos,GFxaa,0);assert(gow_vivo::fxaa.load()!=fxaa);
-    key(KEY_ESCAPE);assert(!g_menu.modal&&g_menuAbierto.load());key(KEY_ESCAPE);assert(!g_menuAbierto.load());
+    key(KEY_ESCAPE);assert(!g_menu.modal&&g_menuAbierto.load());key(KEY_ESCAPE);assert(!g_menuAbierto.load());assert(!gow_menu_live::pauseRequested.load());
     padConnected=true;heldButtons[13]=heldButtons[15]=true;gowTrucosMenuEntrada(false);assert(g_menuAbierto.load());
-    heldButtons.fill(false);gowTrucosMenuEntrada(false);testButtons[6]=true;gowTrucosMenuEntrada(false);testButtons.fill(false);assert(!g_menuAbierto.load());
+    heldButtons.fill(false);gowTrucosMenuEntrada(false);testButtons[6]=true;gowTrucosMenuEntrada(false);testButtons.fill(false);assert(!g_menuAbierto.load());assert(!gow_menu_live::pauseRequested.load());
     assert(g_bloqueoTrasCerrar.load());gowTrucosMenuEntrada(false);assert(!g_bloqueoTrasCerrar.load());padConnected=false;
     abrir(PControles);cambiar(PControles,1,0);assert(g_menu.capture==0);
     typed=KEY_ENTER;gowTrucosMenuEntrada(false);assert(g_menu.captureReady&&typed==0&&boundCode==-1);

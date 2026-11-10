@@ -88,6 +88,8 @@ ENV_ALLOWED: dict[str, str] = {
     "GOW_QTE_HOLD": "behaviour",
     "GOW_QTE_STICK": "behaviour",
     "GOW_QTE_AUTO": "behaviour",
+    "GOW_AUDIO_VOLUME": "behaviour",
+    "GOW_AUDIO_MUTE": "behaviour",
     "GOW_EE_FPU_NEAREST": "behaviour",
     "GOW_AUDIO": "behaviour",
     "GOW_AUDIO_DEVICE": "behaviour",
@@ -125,6 +127,7 @@ ENV_ALLOWED: dict[str, str] = {
 # Manager-owned: staging paths, the test harness and diagnostics that write files.  A mod must not touch them, or
 # activation would stop being reversible and a package could redirect the game's own evidence.
 ENV_RESERVED = {
+    "GOW_MENU_SETTINGS",
     "GOW_ACTIVE_MODS",
     "GOW_MOD_VFS_TABLE",
     "GOW_MOD_VFS_STATS",

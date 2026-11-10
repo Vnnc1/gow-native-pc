@@ -1,3 +1,4 @@
+#include "runtime/gow_menu_settings.h"
 // Production input and label regression, with a fake host backend.
 #include "raylib.h"
 #include "runtime/ps2_pad.h"
@@ -43,6 +44,19 @@ void env(const char *k,const char *v) {
 #endif
 }
 int main(int argc,char **argv) {
+    if(argc>1 && (!std::strcmp(argv[1],"explicit") || !std::strcmp(argv[1],"empty"))) {
+        const bool empty=!std::strcmp(argv[1],"empty");
+        env("TOBIICHI_TECLAS",empty?"_modifierAliases=1":"_modifierAliases=0;l2=340");
+        env("TOBIICHI_MANDO","_custom=1");
+        PSPadBackend pad;uint8_t data[32]{};
+        keys[KEY_RIGHT_SHIFT]=true;keys[KEY_SPACE]=true;
+        pad.readState(0,0,data,32);assert(data[2]==255 && data[3]==255);
+        keys.fill(false);keys[KEY_LEFT_SHIFT]=true;pad.readState(0,0,data,32);
+        assert(empty?(data[2]==255 && data[3]==255):(data[2]!=255 || data[3]!=255));
+        keys.fill(false);connected[0]=true;buttons[0][7]=true;pad.readState(0,0,data,32);assert(data[2]==255 && data[3]==255);
+        if(!empty)assert(gowMenuBindingsJson(false).find("\"_modifierAliases\":false")!=std::string::npos);
+        std::puts("PASS: explicit modifier aliases and completely unbound maps survive startup");return 0;
+    }
     bool autoMode=argc>1 && std::strcmp(argv[1],"auto")==0;
     if(autoMode) env("GOW_QTE_AUTO","1");
     using gow_qte_prompt::sequence;
@@ -171,6 +185,8 @@ int main(int argc,char **argv) {
     assert(!gowMenuBind("cross",99999,false));
     assert(!gowMenuBind("li_arriba",5,true));
     assert(gowMenuBind("li_arriba",KEY_I,false));
+    assert(gowMenuBindingsJson(false).find(classic?"\"_modifierAliases\":false":"\"_modifierAliases\":true")!=std::string::npos);
+    assert(gowMenuBindingsJson(false).find("\"li_arriba\":[73]")!=std::string::npos);
     assert(rotulo(ETeclado,BMoveUp)=="I");
     connected.fill(false); keys.fill(false); mouse.fill(false); keys[KEY_I]=true;
     assert(tobiichiSticksTeclado(sticks)); assert(sticks[3]==0);

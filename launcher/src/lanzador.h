@@ -50,6 +50,7 @@ public:
     // environment overrides). An empty value removes the variable, so a disabled mod never leaks into the runner.
     Q_INVOKABLE bool iniciar(const QVariantMap &ajustes, const QVariantMap &entornoMods);
     Q_INVOKABLE void detener();
+    Q_INVOKABLE QVariantMap sincronizarMenu();
     Q_INVOKABLE void abrirCarpeta(const QString &ruta) const;
     Q_INVOKABLE void abrirRegistro() const;
     Q_INVOKABLE void exportDiagnostics();

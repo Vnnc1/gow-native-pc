@@ -1,0 +1,44 @@
+Persist cleared bindings; match the hold-assist shorthand and disabled value; provide a scripted-pad-only menu resume regression gate.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -1015,6 +1015,14 @@
+         else if(IsKeyPressed(KEY_F2)) abrir(PTrucos);
+         return;
+     }
++    static double testResumeAt=[] {
++        const char *test=std::getenv("GOW_PAD_TEST"),*at=std::getenv("GOW_MENU_TEST_RESUME_AT");
++        const double value=at?std::atof(at):-1;
++        return test && !std::strcmp(test,"1") && value>0 && value<=300?value:-1;
++    }();
++    if(testResumeAt>0 && GetTime()>=testResumeAt) {
++        testResumeAt=-1;cerrar(escCierraJuego,0);std::fprintf(stderr,"[menu:test] resumed\n");return;
++    }
+     if(g_menu.capture>=0) {
+         if(IsKeyPressed(KEY_ESCAPE)||openChord||GetTime()>g_menu.captureUntil||!IsWindowFocused()) {g_menu.capture=-1;return;}
+         if(!g_menu.captureReady) {
+@@ -1065,7 +1073,10 @@
+     if(up)selected=(selected+n-1)%n;if(down)selected=(selected+1)%n;
+     const int wheel=int(GetMouseWheelMove());if(wheel)selected=std::clamp(selected-wheel,0,n-1);
+     if(left)cambiar(g_menu.pestana,selected,-1);if(right)cambiar(g_menu.pestana,selected,1);if(confirm)cambiar(g_menu.pestana,selected,0);
+-    if(g_menu.pestana==PControles && selected>0 && selected<filas(PControles)-1 && IsKeyPressed(KEY_DELETE))gowMenuBind(actions[selected-1],0,g_menu.padBindings);
++    if(g_menu.pestana==PControles && selected>0 && selected<filas(PControles)-1 && IsKeyPressed(KEY_DELETE)) {
++        if(gowMenuBind(actions[selected-1],0,g_menu.padBindings))
++            persist(std::string(g_menu.padBindings?"\"mando\":":"\"teclas\":")+gowMenuBindingsJson(g_menu.padBindings));
++    }
+     int count=visibleRows();g_menu.scroll=std::clamp(g_menu.scroll,std::max(0,selected-count+1),selected);
+     auto g=geometria();Rectangle rows{g.x,g.y+g.cabecera,g.w,count*g.fila};
+     if(CheckCollisionPointRec(mouse,rows)) {
+@@ -1079,9 +1090,9 @@
+     if(GetTime()-noticeBegan<14.0 && !g_menuAbierto.load()) {
+         std::vector<std::string> lines;
+         if(gow_menu_live::autoQte().load()) lines.push_back(tr("QTE automático: botões","Automatic QTE: buttons"));
+-        if(const char *hold=std::getenv("GOW_QTE_HOLD");hold && *hold) {
++        if(const char *hold=std::getenv("GOW_QTE_HOLD");hold && *hold && std::strcmp(hold,"0")) {
+             lines.push_back(tr("QTE: segurar para repetir","QTE: hold to repeat"));
+-            std::string list(hold,std::min<size_t>(std::strlen(hold),256));size_t begin=0;
++            std::string list=std::strcmp(hold,"1")==0?"circle":std::string(hold,std::min<size_t>(std::strlen(hold),256));size_t begin=0;
+             while(begin<list.size() && lines.size()<10) {
+                 size_t end=list.find(',',begin);if(end==std::string::npos)end=list.size();
+                 std::string action=list.substr(begin,end-begin);begin=end+1;

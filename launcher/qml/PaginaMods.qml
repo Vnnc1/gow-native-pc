@@ -9,6 +9,7 @@ import QtQuick.Layouts
 Item {
     id: raiz
     required property var modelo
+    required property var settings
     signal aviso(string texto)
     signal fallo(string texto, string detalle)
 
@@ -101,6 +102,37 @@ Item {
                 font.pixelSize: 14
                 wrapMode: Text.WordWrap
             }
+
+        Text { text: Tema.t("textureMods"); Layout.fillWidth: true; Layout.topMargin: 14; Layout.bottomMargin: 6; color: Tema.oroClaro; font.family: Tema.fuenteTitulo; font.pixelSize: 18; font.bold: true; wrapMode: Text.WordWrap }
+        // Texture pack in PCSX2's format (runtime patch 52): replaces the game's textures while playing, no rebuild
+        Fila {
+            titulo: Tema.t("pacoteTexturas")
+            descripcion: raiz.settings.pacoteTexturas.length > 0 ? Tema.tf("pacoteTexturasPasta", raiz.settings.pacoteTexturas)
+                                                                : Tema.t("pacoteTexturasDesc")
+            RowLayout {
+                anchors.right: parent.right
+                spacing: 10
+                BotonSecundario {
+                    text: Tema.t("pacoteTexturasEscolher")
+                    onClicked: dialogoPacote.open()
+                }
+                Interruptor {
+                    anchors.right: undefined
+                    Layout.alignment: Qt.AlignRight
+                    enabled: raiz.settings.pacoteTexturas.length > 0
+                    checked: raiz.settings.usarPacoteTexturas
+                    onToggled: raiz.settings.usarPacoteTexturas = checked
+                }
+            }
+            FolderDialog {
+                id: dialogoPacote
+                title: Tema.t("pacoteTexturas")
+                onAccepted: {
+                    raiz.settings.pacoteTexturas = lanzador.rutaDesdeUrl(selectedFolder)
+                    raiz.settings.usarPacoteTexturas = true
+                }
+            }
+        }
 
             // Named mod sets: switch a whole selection at once.
             RowLayout {

@@ -68,6 +68,7 @@ function leer(texto) {
         return base
     try {
         var guardado = JSON.parse(texto)
+        if (typeof guardado._modifierAliases === "boolean") base._modifierAliases = guardado._modifierAliases
         // Maps from before the per-magic actions: 1-4 were on the d-pad (1 up, 2 right, 3 down,
         // 4 left). They now go to the magics by default; they are removed from the d-pad so they do not press two
         // directions at once.
@@ -80,12 +81,12 @@ function leer(texto) {
         for (var i = 0; i < acciones.length; ++i) {
             var id = acciones[i].id
             if (Array.isArray(guardado[id]))
-                base[id] = guardado[id].slice(0, 2).filter(function (c) { return typeof c === "number" && c > 0 })
+                base[id] = guardado[id].slice(0, typeof base._modifierAliases === "boolean" ? 8 : 2).filter(function (c) { return typeof c === "number" && c > 0 })
         }
     } catch (e) {
     }
     // Migrate the old shared Ctrl default: R2 must remain held while moving/interacting.
-    if (base.ld_mod.length === 1 && normal(base.ld_mod[0]) === 341 &&
+    if (typeof base._modifierAliases !== "boolean" && base.ld_mod.length === 1 && normal(base.ld_mod[0]) === 341 &&
             base.r2.some(function (code) { return normal(code) === 341 }))
         base.ld_mod = conflictos(base, "ld_mod", 342).length === 0 ? [342] : []
     // A newly introduced gesture must not steal a custom gameplay binding.
@@ -96,7 +97,7 @@ function leer(texto) {
 }
 
 function cadena(mapa) {
-    var partes = []
+    var partes = typeof mapa._modifierAliases === "boolean" ? ["_modifierAliases=" + (mapa._modifierAliases ? "1" : "0")] : []
     for (var i = 0; i < acciones.length; ++i) {
         var id = acciones[i].id
         var codigos = mapa[id] || []
@@ -262,7 +263,7 @@ function leerMando(texto, moderno) {
 }
 
 function cadenaMando(mapa) {
-    var partes = []
+    var partes = ["_custom=1"] // An explicitly empty map must not select the fixed layout.
     for (var i = 0; i < accionesMando.length; ++i) {
         var id = accionesMando[i].id
         var botones = mapa[id] || []

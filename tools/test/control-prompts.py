@@ -23,7 +23,7 @@ a.output.mkdir(parents=True,exist_ok=True)
 cpp=a.output/'control-prompts.cpp'
 cpp.write_text(Path(__file__).with_name('control-prompts.cpp.in').read_text(encoding='utf-8').replace('@LABELS@',labels),encoding='utf-8')
 env=os.environ.copy(); env['PATH']=str(a.compiler.resolve().parent)+os.pathsep+env.get('PATH','')
-for source,modes in ((cpp,['default','classic','custom','auto']),(Path(__file__).with_name('qte_input_test.cpp'),['off','shake','rotate','smoke'])):
+for source,modes in ((cpp,['default','classic','custom','auto','explicit','empty']),(Path(__file__).with_name('qte_input_test.cpp'),['off','shake','rotate','smoke'])):
     exe=a.output/(source.stem+'.exe')
     subprocess.run([str(a.compiler.resolve()),'-std=c++20','-O2','-static',
                     '-I'+str(a.runtime.resolve()/'include'),'-I'+str(a.raylib.resolve()),

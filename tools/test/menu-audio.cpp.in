@@ -1,0 +1,26 @@
+#include "runtime/gow_menu_live.h"
+#include <cassert>
+#include <cstdio>
+#include <atomic>
+#include <iostream>
+namespace ps2x::iop {
+struct IopSubsystem {
+    unsigned calls=0;
+    size_t drainAudio(int16_t *out,unsigned frames,size_t) {++calls;std::fill(out,out+(frames-1)*2,int16_t(12000));return frames-1;}
+};
+}
+std::atomic<ps2x::iop::IopSubsystem*> g_spu2AudioSource{nullptr};
+std::atomic<uint64_t> g_gowAudioFramesPlayed{0},g_gowAudioFramesProduced{0},g_gowAudioFramesMissing{0};
+constexpr size_t kSpu2MaxLatencyFrames=4800;
+@CALLBACK@
+int main() {
+ ps2x::iop::IopSubsystem source;g_spu2AudioSource=&source;int16_t out[16];
+ gow_menu_live::paused=true;std::fill(out,out+16,99);spu2AudioCallback(out,8);
+ assert(source.calls==0 && g_gowAudioFramesPlayed==0 && g_gowAudioFramesProduced==0 && g_gowAudioFramesMissing==0);
+ for(auto v:out)assert(v==0);
+ gow_menu_live::paused=false;gow_menu_live::volume=50;spu2AudioCallback(out,8);
+ assert(source.calls==1 && g_gowAudioFramesPlayed==8 && g_gowAudioFramesProduced==7 && g_gowAudioFramesMissing==1);
+ assert(out[0]==6000 && out[13]==6000 && out[14]==0 && out[15]==0);
+ gow_menu_live::paused=true;spu2AudioCallback(out,8);assert(source.calls==1 && g_gowAudioFramesPlayed==8);
+ std::cout<<"PASS: production audio callback freezes queue/clocks, silences pause and resumes volume\n";
+}

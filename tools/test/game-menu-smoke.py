@@ -4,6 +4,9 @@ from pathlib import Path
 p=argparse.ArgumentParser(description=__doc__)
 for n in ('runner','collector','disc','output'):p.add_argument('--'+n,type=Path,required=True)
 p.add_argument('--startup',action='store_true')
+p.add_argument('--duration',type=int)
+p.add_argument('--pause-trace',action='store_true')
+p.add_argument('--resume-at',type=int)
 a=p.parse_args();root=Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('ab',root/'tools/test/gs-run-ab.py');ab=importlib.util.module_from_spec(spec);spec.loader.exec_module(ab)
 profile=json.loads(subprocess.check_output([sys.executable,'-I',str(root/'tools/pipeline/profile.py'),'gow1']))
@@ -15,10 +18,15 @@ if a.startup:
     env.pop('GOW_PAD_TEST');env.pop('GOW_FAST_BOOT');env.pop('GOW_SKIP_FMV');env.pop('GOW_PAD_GUION')
 else:
     env.update(TOBIICHI_TRUCOS_ABRIR_EN='42',TOBIICHI_MENU_PESTANA='3',GOW_HOST_SHOT='3000',TOBIICHI_TECLAS='li_arriba=87;li_abajo=83;li_izq=65;li_der=68;cross=32;circle=70;square=1000;triangle=1001;start=257;select=258')
+if a.pause_trace:
+    env['GOW_PLAYER_TRACE']='1'
+    (run/'menu-settings').mkdir()
+    env['GOW_MENU_SETTINGS']=str(run/'menu-settings')
+if a.resume_at:env['GOW_MENU_TEST_RESUME_AT']=str(a.resume_at)
 session=run/'session';session.mkdir();(session/'session.json').write_text(json.dumps({'schema':1,'id':run.name,'state':'prepared'}))
 proc=subprocess.Popen([str(a.collector.resolve()),str(session),str(a.runner.resolve()),str(run/'disc'/profile['executable']['name']),str(run)],cwd=run,env=env)
 try:
-    until=time.monotonic()+(25 if a.startup else 65)
+    until=time.monotonic()+(a.duration or (25 if a.startup else 65))
     while time.monotonic()<until and proc.poll() is None:time.sleep(.25)
     (session/'stop.request').write_text('stop');assert proc.wait(timeout=30)==0
 finally:

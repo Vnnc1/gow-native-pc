@@ -173,9 +173,9 @@ Audio gain/mute applies after diagnostic PCM in the common SPU2 callback (both d
 Patch `zzz-319` keeps the dock inside the minimum window width and labels unbound
 inputs explicitly; retain the 320-pixel layout check in the GPU menu suite.
 Mods supply bounded manager-owned `GOW_ACTIVE_MODS`, reserved and cleared on deactivation.
-Changes are session-only and the menu does not pause simulation. Run the existing
+Patches `zzz-320..322` pause EE execution at scheduler boundaries, rebase host deadlines, and freeze audio queue consumption/sample clocks. Host polling and normal shutdown remain active. Settings edits publish bounded atomic per-session transactions under launcher app data; `menu_settings.h` validates and imports only changed fields, including bindings and audio, into the existing QSettings category. Never put the private bridge path in reusable boot files or diagnostic exports. Run `menu-state.py`, `game-menu-smoke.py --pause-trace` and `menu-pause-report.py`, as well as the existing
 control-prompts suite and explicit GPU `tools/test/game-menu.py` when changing this UI.
-See `docs/research/ratone-game-menu-2026-11-10.md` for acceptance limits and evidence.
+See `docs/research/menu-pause-settings-2026-11-10.md` for acceptance limits, evidence and the still-pending native save-slot work.
 
 Patch `zzz-310` restores USA Flash button prompts with last-active input and the
 production keyboard/controller mappings. Input selection is shared by buttons,
@@ -339,10 +339,10 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
 - **In-game menu (patch 39, redesigned by zzz-318)**: F1 or Back+Start opens the category dock in `gow_trucos.cpp`
   (Graphics, Controls, Audio, Mods, Cheats, Save); F2 opens cheats, Ctrl+F1 opens the ImGui runtime debugger.
-  Remapping, master volume/mute and supported graphics changes are live for the session; the menu blocks input,
-  not simulation. Graphics changes use the header-only
+  Remapping, master volume/mute and supported graphics changes are live and persist through the launcher settings bridge.
+  The menu pauses simulation and audio consumption; it keeps host input/rendering active. Graphics changes use the header-only
   `runtime/gow_ajustes_vivo.h` (read once from GOW_SCALER, GOW_SHARPEN, TOBIICHI_FXAA, GOW_ANISO, TOBIICHI_ASPECTO,
-  TOBIICHI_FPS_GOSTER); the launcher stays the place that saves settings.   TOBIICHI_PANTALLA = completa | sin_bordes |
+  TOBIICHI_FPS_GOSTER); the launcher imports durable edits on its next poll/open.   TOBIICHI_PANTALLA = completa | sin_bordes |
   ventana (sin_bordes: borderless over the monitor, for capture/scaling tools). Every launcher variable must have a
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
 - **GS primitive grouping (patch 66)**: since the PR 26 integration the PR's patch 66 is in the chain and grouping

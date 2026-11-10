@@ -33,6 +33,17 @@ ApplicationWindow {
     // The Settings object for the pages: inside their Components "ajustes" names the page's own property.
     readonly property var ajustesGuardados: ajustes
 
+    function sincronizarAjustesMenu() {
+        const changes = lanzador.sincronizarMenu()
+        for (const key in changes) ajustes[key] = changes[key]
+        if (Object.keys(changes).length) ajustes.sync()
+    }
+
+    Timer {
+        interval: 500; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: ventana.sincronizarAjustesMenu()
+    }
+
     Settings {
         id: ajustes
         category: "ajustes"
@@ -45,6 +56,8 @@ ApplicationWindow {
         property bool estirar: false
         property string filtro: "bilineal" // soft image by default
         property real nitidez: 0.8
+        property int audioVolume: 100
+        property bool audioMute: false
         property bool fxaa: true
         property string anisotropico: "1" // anisotropic texture filtering: 1 = off, 2..16 (GOW_ANISO)
         property string resolucionInterna: "2" // "auto" (from the display) or "1".."8" (PS2X_GS_HW_SCALE)
@@ -238,6 +251,8 @@ ApplicationWindow {
         ajustes.usarPacoteTexturas = false
         ajustes.arranqueRapido = false
         ajustes.controlesDmc5 = true
+        ajustes.audioVolume = 100
+        ajustes.audioMute = false
         ajustes.mando = ""
         ajustes.cancelarAnimaciones = true
         ajustes.qteAuto = false
@@ -367,6 +382,7 @@ ApplicationWindow {
             qteHoldL1: ajustes.qteHoldL1, qteHoldL2: ajustes.qteHoldL2,
             qteHoldR1: ajustes.qteHoldR1, qteHoldR2: ajustes.qteHoldR2,
             qteStickMode: ajustes.qteStickMode,
+            audioVolume: ajustes.audioVolume, audioMute: ajustes.audioMute,
             qteAuto: ajustes.qteAuto,
             qteHold: ajustes.qteHold, qteHoldButtons: ajustes.qteHoldButtons, qteHoldRate: ajustes.qteHoldRate,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
@@ -1208,6 +1224,7 @@ ApplicationWindow {
     Component {
         id: paginaMods
         PaginaMods {
+            settings: ventana.ajustesGuardados
             modelo: modeloMods
             onAviso: (texto) => ventana.aviso(texto)
             onFallo: (texto, detalle) => {

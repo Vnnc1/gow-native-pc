@@ -204,7 +204,9 @@ var tabla = {
     tTrucos: { tr: "Hile menüsü", en: "Cheat menu", es: "Menú de trucos", pt: "Menu de trapaças" },
 
     // Mod manager (launcher patch 73). Files, textures and runtime variables; no code execution.
-    pestMods: { tr: "Modlar", en: "Mods", es: "Mods", pt: "Mods" },
+    menuAudioVolume: { tr: "Ses", en: "Game volume", es: "Volumen del juego", pt: "Volume do jogo" },
+    menuAudioMute: { tr: "Sessiz", en: "Mute game", es: "Silenciar juego", pt: "Silenciar jogo" },
+    pestMods: { tr: "Modlar / Dokular", en: "Mods / Textures", es: "Mods / Texturas", pt: "Mods / Texturas" },
     modsIntro: { tr: "Bir .zip veya açılmış klasörü mods klasörüne bırakın (Klasörü aç). Otomatik kurulur ve etkinleşir; kaldırmak için dosyayı silin. Anahtarı kapatmak modu kurulu ama etkisiz tutar.", en: "Drop a .zip or an unpacked folder into the mods folder (Open folder). It is installed and enabled automatically; delete the file to uninstall. Turn a mod off to keep it installed but inactive.", es: "Suelta un .zip o una carpeta descomprimida en la carpeta mods (Abrir carpeta). Se instala y activa automáticamente; borra el archivo para desinstalar. Apaga el interruptor para conservar el mod instalado pero inactivo.", pt: "Solte um .zip ou uma pasta descompactada na pasta mods (Abrir pasta). Ele é instalado e ativado automaticamente; apague o arquivo para desinstalar. Desligue o interruptor para manter o mod instalado, mas inativo." },
     modsCount: { tr: "%2 moddan %1 etkin", en: "%1 of %2 enabled", es: "%1 de %2 activos", pt: "%1 de %2 ativos" },
     modsActive: { tr: "Hazır", en: "Staged", es: "Preparado", pt: "Preparado" },

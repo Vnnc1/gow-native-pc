@@ -36,6 +36,15 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.process.wait(timeout=20), 0)
         self.assertEqual(self.metadata()["runtime_environment"]["GOW_QTE_AUTO"], "1")
 
+    def test_menu_audio_report_and_private_bridge(self):
+        self.env.update(GOW_AUDIO_VOLUME="65", GOW_AUDIO_MUTE="1", GOW_MENU_SETTINGS=str(self.root/"PRIVATE_BRIDGE"))
+        self.start("pass\n")
+        self.assertEqual(self.process.wait(timeout=20), 0)
+        env=self.metadata()["runtime_environment"]
+        self.assertEqual(env["GOW_AUDIO_VOLUME"], "65")
+        self.assertEqual(env["GOW_AUDIO_MUTE"], "1")
+        self.assertNotIn("GOW_MENU_SETTINGS", env)
+
     def tearDown(self):
         if self.process and self.process.poll() is None:
             (self.session / "stop.request").write_text("stop")

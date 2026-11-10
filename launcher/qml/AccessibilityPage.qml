@@ -115,35 +115,5 @@ ScrollView {
                 onClicked: root.openControls()
             }
         }
-        SectionTitle { text: Tema.t("textureMods") }
-        // Texture pack in PCSX2's format (runtime patch 52): replaces the game's textures while playing, no rebuild
-        Fila {
-            titulo: Tema.t("pacoteTexturas")
-            descripcion: root.settings.pacoteTexturas.length > 0 ? Tema.tf("pacoteTexturasPasta", root.settings.pacoteTexturas)
-                                                                : Tema.t("pacoteTexturasDesc")
-            RowLayout {
-                anchors.right: parent.right
-                spacing: 10
-                BotonSecundario {
-                    text: Tema.t("pacoteTexturasEscolher")
-                    onClicked: dialogoPacote.open()
-                }
-                Interruptor {
-                    anchors.right: undefined
-                    Layout.alignment: Qt.AlignRight
-                    enabled: root.settings.pacoteTexturas.length > 0
-                    checked: root.settings.usarPacoteTexturas
-                    onToggled: root.settings.usarPacoteTexturas = checked
-                }
-            }
-            FolderDialog {
-                id: dialogoPacote
-                title: Tema.t("pacoteTexturas")
-                onAccepted: {
-                    root.settings.pacoteTexturas = lanzador.rutaDesdeUrl(selectedFolder)
-                    root.settings.usarPacoteTexturas = true
-                }
-            }
-        }
     }
 }

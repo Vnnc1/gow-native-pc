@@ -1,3 +1,5 @@
+#include "menu_settings.h"
+#include <QUuid>
 #include "lanzador.h"
 #include "regional_installations.h"
 #include "session_diagnostics.h"
@@ -527,6 +529,8 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
         entorno.insert(QStringLiteral("GOW_GL_MAX_MINOR"), QString::number(glMenor));
     // Sharpness 0..1 in the interface -> GOW_SHARPEN below.
     const double nitidez = std::clamp(a.value(QStringLiteral("nitidez"), 0.8).toDouble(), 0.0, 1.0);
+    entorno.insert("GOW_AUDIO_VOLUME", QString::number(qBound(0,a.value("audioVolume",100).toInt(),100)));
+    bandera("GOW_AUDIO_MUTE", a.value("audioMute",false).toBool());
     bandera("TOBIICHI_FXAA", a.value(QStringLiteral("fxaa")).toBool());
     // Anisotropic filtering of the game's textures (gs_hw_backend.cpp, from the God of War II port): 1 = off.
     const int aniso = std::clamp(a.value(QStringLiteral("anisotropico"), 1).toInt(), 1, 16);
@@ -645,6 +649,7 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
             entorno.insert(it.key(), it.value().toString());
     }
 
+    entorno.remove("GOW_MENU_SETTINGS"); // Per-session bridge must never survive in the reusable boot file.
     // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
     QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
     if (boot.open(QIODevice::WriteOnly))
@@ -679,6 +684,9 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
     // A separate collector keeps draining and sampling if the launcher window is closed.
     m_proceso->setProgram(helper);
     m_proceso->setArguments({m_session, ejecutable, elf, root});
+    const QString menuDirectory = carpetaDatos() + "/menu-settings/" + QDateTime::currentDateTimeUtc().toString("yyyyMMddHHmmsszzz") + "-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (QDir().mkpath(menuDirectory)) entorno.insert("GOW_MENU_SETTINGS", menuDirectory);
+    else entorno.remove("GOW_MENU_SETTINGS");
     m_proceso->setProcessEnvironment(entorno);
     m_proceso->setWorkingDirectory(carpetaDatos());
     m_proceso->setProcessChannelMode(QProcess::MergedChannels);
@@ -980,4 +988,8 @@ bool Lanzador::esRecorte(const QString &ruta) const
         mirar(imagen.width() - 1, y);
     }
     return total > 0 && transparentes * 10 >= total * 7;
+}
+
+QVariantMap Lanzador::sincronizarMenu() {
+    return MenuSettings::consume(carpetaDatos()+"/menu-settings");
 }

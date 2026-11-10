@@ -1,0 +1,308 @@
+Pause the guest at scheduler boundaries, freeze audio consumption, preserve host deadlines; publish bounded setting transactions and show accessibility/texture selection.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/gow_menu_live.h"
+ #include "runtime/ee_scheduler.h"
+ 
+ #include "ps2_log.h"
+@@ -1878,6 +1879,12 @@
+ void EeScheduler::processPendingEvents()
+ {
+     assertExecutor();
++    const auto pausedFor=gow_menu_live::pauseAtBoundary(m_stopRequested,m_eventMutex,m_eventCv);
++    if(pausedFor!=std::chrono::steady_clock::duration{}) {
++        std::lock_guard lock(m_eventMutex);
++        for(auto &event:m_deadlines) event.hostDeadline+=pausedFor;
++    }
++    if (m_stopRequested.load(std::memory_order_acquire)) return;
+     processDueDeadlines();
+     const uint32_t timerInterrupts = m_pendingEeTimerInterrupts;
+     m_pendingEeTimerInterrupts = 0u;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -72,6 +72,16 @@
+     void spu2AudioCallback(void *buffer, unsigned int frames)
+     {
+         int16_t *out = static_cast<int16_t *>(buffer);
++        if (gow_menu_live::paused.load(std::memory_order_acquire))
++        {
++            std::fill(out, out + static_cast<size_t>(frames) * 2u, int16_t{0});
++            return; // Keep queued audio and movie sample clocks frozen with the guest.
++        }
++        if (gow_menu_live::paused.load(std::memory_order_acquire))
++        {
++            std::fill(out, out + static_cast<size_t>(frames) * 2u, int16_t{0});
++            return; // Preserve queued audio and movie sample clocks while the guest is paused.
++        }
+         size_t produced = 0u;
+         if (ps2x::iop::IopSubsystem *source = g_spu2AudioSource.load(std::memory_order_acquire))
+             produced = source->drainAudio(out, frames, kSpu2MaxLatencyFrames);
+@@ -97,6 +107,7 @@
+ 
+     void startSpu2Audio(ps2x::iop::IopSubsystem *source)
+     {
++        gow_menu_live::loadAudio();
+         // GOW_AUDIO=0 mutes: no stream, except with GOW_AUDIO_PCM, where the stream runs at volume 0 so the recording is
+         // paced and drained exactly as when it is heard (tools/movies.py)
+         const char *setting = std::getenv("GOW_AUDIO");
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/gow_menu_settings.h"
+ #include "runtime/gow_brand.h"
+ #include "runtime/gow_menu_live.h"
+ #include "runtime/gow_prompt_input.h"
+@@ -577,7 +578,7 @@
+     constexpr int dockOrder[]={PGraficos,PControles,PAudio,PMods,PTrucos,PSave};
+     const char* category(int p) {
+         if(p<3) return textosMenu().pestanas[p];
+-        return p==PControles?tr("Controles","Controls"):p==PAudio?tr("Áudio","Audio"):"Mods";
++        return p==PControles?tr("Controles","Controls"):p==PAudio?tr("Áudio","Audio"):tr("Mods / Texturas","Mods / Textures");
+     }
+     constexpr const char *actions[]={"up","down","left","right","cross","circle","square","triangle",
+         "l1","r1","l2","r2","l3","r3","start","select","poseidon","medusa","zeus","hades","artemisa","furia",
+@@ -703,7 +704,7 @@
+     {
+         const TextosMenu &m = textosMenu();
+         if(pestana==PControles) {
+-            if(i==0) return {tr("Dispositivo","Device"),tr("Remapeamento nesta sessão; os ícones acompanham a alteração.","Session bindings; prompts follow your changes."),Opcion,false,g_menu.padBindings?tr("Controle","Controller"):tr("Teclado e mouse","Keyboard / mouse"),true};
++            if(i==0) return {tr("Dispositivo","Device"),tr("Os ícones acompanham o remapeamento.","Prompts follow your bindings."),Opcion,false,g_menu.padBindings?tr("Controle","Controller"):tr("Teclado e mouse","Keyboard / mouse"),true};
+             if(i==filas(pestana)-1) return {tr("Restaurar mapeamento","Restore bindings"),tr("Voltar às configurações recebidas do launcher.","Restore the bindings supplied by the launcher."),Accion,false,{},true};
+             int code[8],n=tobiichiCodigosAccion(actions[i-1],code,8); std::string label;
+             if(g_menu.padBindings) label=bindingName(tobiichiBotonMandoAccion(actions[i-1]),true);
+@@ -759,26 +760,34 @@
+         }
+     }
+ 
++    bool settingsSaved = true;
++    void persist(const std::string &fields) { settingsSaved = gow_menu_settings::publish(fields); }
++    void persistBindings() {
++        persist("\"teclas\":"+gowMenuBindingsJson(false)+",\"mando\":"+gowMenuBindingsJson(true));
++    }
+     // dir: +1 / -1 from the arrow keys, 0 from Enter / click (switches toggle, choices advance, actions run).
+     void cambiar(int pestana, int i, int dir)
+     {
+         if(!fila(pestana,i).habilitada) return;
+         if(pestana==PControles) {
+             if(i==0) {g_menu.padBindings=!g_menu.padBindings;g_menu.scroll=0;}
+-            else if(i==filas(pestana)-1) {gowMenuResetBindings();g_menu.bindingStatus.clear();}
++            else if(i==filas(pestana)-1) {gowMenuResetBindings();persistBindings();g_menu.bindingStatus.clear();}
+             else if(!dir) {g_menu.capture=i-1;g_menu.captureReady=false;g_menu.captureUntil=GetTime()+15;}
+             return;
+         }
+         if(pestana==PAudio) {
+             if(i==0) gow_menu_live::volume.store(std::clamp(gow_menu_live::volume.load()+(dir<0?-5:5),0,100));
+             else gow_menu_live::mute.store(!gow_menu_live::mute.load());
++            persist("\"audioVolume\":"+std::to_string(gow_menu_live::volume.load())+",\"audioMute\":"+(gow_menu_live::mute.load()?"true":"false"));
+             return;
+         }
+         if(pestana==PMods) return;
+-        if(pestana==PTrucos && i==kNumTrucos) {gow_menu_live::autoQte().store(!gow_menu_live::autoQte().load());return;}
++        if(pestana==PTrucos && i==kNumTrucos) {gow_menu_live::autoQte().store(!gow_menu_live::autoQte().load());persist(std::string("\"qteAuto\":")+(gow_menu_live::autoQte().load()?"true":"false"));return;}
+         if (pestana == PTrucos)
+         {
+             alternar(i);
++            std::string cheats; for(int c=0;c<kNumTrucos;++c) if(g_activo[c].load()) {if(!cheats.empty()) cheats+=",";cheats+=kIds[c];}
++            persist("\"trucos\":\""+cheats+"\"");
+             return;
+         }
+         if (pestana == PSave)
+@@ -828,6 +837,11 @@
+             gow_vivo::estirar.store(!gow_vivo::estirar.load());
+             break;
+         }
++        const char *keys[]={"filtro","nitidez","fxaa","anisotropico","fpsLimite","vsync","mostrarFps","estirar"};
++        const std::string values[]={gow_vivo::nitido.load()?"\"fsr\"":"\"bilineal\"", std::to_string(gow_vivo::nitidez.load()*2),
++            gow_vivo::fxaa.load()?"true":"false", "\""+std::to_string(gow_vivo::aniso.load())+"\"",std::to_string(g_menu.fps),
++            g_menu.vsync?"true":"false",gow_vivo::mostrarFps.load()?"true":"false",gow_vivo::estirar.load()?"true":"false"};
++        persist("\""+std::string(keys[i])+"\":"+values[i]);
+         std::fprintf(stderr, "[menu] graphics: filter=%s sharpen=%.2f fxaa=%d aniso=%d fps=%d vsync=%d counter=%d stretch=%d\n",
+                      gow_vivo::nitido.load() ? "sharp" : "soft", gow_vivo::nitidez.load(), int(gow_vivo::fxaa.load()),
+                      gow_vivo::aniso.load(), g_menu.fps, int(g_menu.vsync), int(gow_vivo::mostrarFps.load()),
+@@ -837,6 +851,7 @@
+     void abrir(int pestana)
+     {
+         gow_vivo::cargar();
++        gow_menu_live::loadAudio();
+         if (g_menu.fps < 0)
+         {
+             g_menu.fps = gowVentanaFps();
+@@ -847,6 +862,7 @@
+         if (pestana >= 0)
+             g_menu.pestana = pestana;
+         g_menu.saveEstado.clear();
++        gow_menu_live::pauseRequested.store(true, std::memory_order_release);
+         g_menuAbierto.store(true, std::memory_order_release);
+         SetExitKey(KEY_NULL);
+         g_menu.cursorOculto = IsCursorHidden();
+@@ -856,6 +872,7 @@
+ 
+     void cerrar(bool escCierraJuego, int tecla)
+     {
++        gow_menu_live::pauseRequested.store(false, std::memory_order_release);
+         g_menuAbierto.store(false, std::memory_order_release);
+         g_menu.teclaCierre = tecla;
+         g_bloqueoTrasCerrar.store(true, std::memory_order_release);
+@@ -1016,7 +1033,7 @@
+                 for(int j=0;j<n;++j)shared|=codes[j]==code;
+             }
+             if(gowMenuBind(actions[g_menu.capture],code,g_menu.padBindings)) {
+-                g_menu.bindingStatus=shared?tr("Atribuído; este comando também está em outra ação.","Assigned; this input is also bound to another action."):tr("Mapeamento atualizado nesta sessão.","Binding updated for this session.");g_menu.capture=-1;
++                g_menu.bindingStatus=shared?tr("Atribuído; este comando também está em outra ação.","Assigned; this input is also bound to another action."):tr("Mapeamento atualizado nesta sessão.","Binding updated for this session.");g_menu.capture=-1;persist(std::string(g_menu.padBindings?"\"mando\":":"\"teclas\":")+gowMenuBindingsJson(g_menu.padBindings));
+             }
+         }
+         return;
+@@ -1057,9 +1074,47 @@
+     }
+ }
+ 
++static void drawAccessibilityNotice() {
++    static const double noticeBegan=GetTime();
++    if(GetTime()-noticeBegan<14.0 && !g_menuAbierto.load()) {
++        std::vector<std::string> lines;
++        if(gow_menu_live::autoQte().load()) lines.push_back(tr("QTE automático: botões","Automatic QTE: buttons"));
++        if(const char *hold=std::getenv("GOW_QTE_HOLD");hold && *hold) {
++            lines.push_back(tr("QTE: segurar para repetir","QTE: hold to repeat"));
++            std::string list(hold,std::min<size_t>(std::strlen(hold),256));size_t begin=0;
++            while(begin<list.size() && lines.size()<10) {
++                size_t end=list.find(',',begin);if(end==std::string::npos)end=list.size();
++                std::string action=list.substr(begin,end-begin);begin=end+1;
++                for(size_t i=0;i<std::size(actions);++i) if(action==actions[i]) {
++                    int codes[8];int n=tobiichiCodigosAccion(action.c_str(),codes,8);
++                    lines.push_back(std::string("  ")+(idiomaMenu()==3?actionPt[i]:actionEn[i])+": "+(n?bindingName(codes[0],false):tr("Sem tecla","Unbound"))+" / "+bindingName(tobiichiBotonMandoAccion(action.c_str()),true));
++                    break;
++                }
++            }
++        }
++        if(const char *stick=std::getenv("GOW_QTE_STICK");stick && (!std::strcmp(stick,"rotate")||!std::strcmp(stick,"shake"))) {
++            int codes[8];int n=tobiichiCodigosAccion("qte_stick",codes,8);
++            lines.push_back(std::string(tr("Analógico assistido: ","Stick assist: "))+(n?bindingName(codes[0],false):"?")+" ("+stick+")");
++        }
++        const char *cancel=std::getenv("GOW_CANCELAR");
++        if(!cancel || std::strcmp(cancel,"0")) lines.push_back(tr("Cancelamento de animações","Animation cancelling"));
++        if(!lines.empty()) {
++            auto &font=fuentes().normal; const float size=std::clamp(GetScreenWidth()/80.0f,12.0f,17.0f);
++            const float width=std::min(450.0f,GetScreenWidth()-24.0f),x=GetScreenWidth()-width-12,y=80;
++            DrawRectangleRec({x,y,width,48+float(lines.size())*(size+8)},Color{20,15,16,235});
++            texto(font,tr("Acessibilidades ativas","Active accessibility"),x+14,y+12,size,kTexto);
++            for(size_t i=0;i<lines.size();++i) {
++                const auto line=ajustar(font,lines[i].c_str(),size,width-28);
++                texto(font,line.c_str(),x+14,y+40+i*(size+8),size,kTextoSuave);
++            }
++        }
++    }
++}
++
+ // Hilo principal, dentro de BeginDrawing.
+ void gowTrucosMenuDibujar()
+ {
++    drawAccessibilityNotice();
+     static int backupNotice = 0;
+     static double backupNoticeUntil = 0;
+     if (const int notice = gow_saves::notification.exchange(0, std::memory_order_acquire))
+@@ -1120,7 +1175,7 @@
+     DrawRectangleRoundedLinesEx(Rectangle{g.x,g.y,g.w,g.h},.025f,8,1,kBorde);
+     const float margen=26*s;
+     texto(f.negrita,category(pestana),g.x+margen,g.y+18*s,27*s,kTexto);
+-    texto(f.normal,tr("Nesta sessão • O jogo continua • Esc / B volta","Session settings • Game continues • Esc / B goes back"),g.x+margen,g.y+53*s,15*s,kTextoSuave);
++    texto(f.normal,!settingsSaved?tr("Falha ao salvar ajustes • válidos só nesta sessão","Settings could not be saved • session only"):gow_menu_live::paused.load()?tr("Jogo pausado • Ajustes salvos • Esc / B volta","Game paused • Settings saved • Esc / B goes back"):tr("Pausando...","Pausing..."),g.x+margen,g.y+53*s,15*s,kTextoSuave);
+     DrawLineEx(Vector2{g.x+margen,g.y+g.cabecera-1},Vector2{g.x+g.w-margen,g.y+g.cabecera-1},1,kBorde);
+     const float tamNombre = 20.0f * s, tamDesc = 14.5f * s, tamValor = 17.0f * s;
+     const float interruptorW = 52.0f * s, interruptorH = 26.0f * s, valorW = 190.0f * s;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -823,3 +823,21 @@
+     std::atomic_store(&liveMapaTeclas,std::shared_ptr<const MapaTeclas>{});
+     std::atomic_store(&liveMapaMando,std::shared_ptr<const MapaMando>{});
+ }
++
++std::string gowMenuBindingsJson(bool pad) {
++    std::string json="{";
++    const auto keys=mapaTeclas(); const auto buttons=mapaMando();
++    for(size_t a=0;a<(pad?size_t(AccFuria)+1:NumAcciones);++a) {
++        if(a) json+=",";
++        json+="\""; json+=kNombresAccion[a]; json+="\":[";
++        std::vector<int> codes;
++        if(pad) {
++            if(buttons->activo) codes=buttons->botones[a];
++            else {int b=tobiichiBotonMandoAccion(kNombresAccion[a]); if(b>0) codes.push_back(b);}
++        } else if(keys->activo) codes=keys->codigos[a];
++        else {int values[8];int n=tobiichiCodigosAccion(kNombresAccion[a],values,8);codes.assign(values,values+n);}
++        for(size_t i=0;i<codes.size();++i) {if(i) json+=",";json+=std::to_string(codes[i]);}
++        json+="]";
++    }
++    return json+"}";
++}
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_live.h
+@@ -4,9 +4,34 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <cstring>
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
+ namespace gow_menu_live {
++// The scheduler acknowledges only at a guest execution boundary. The host keeps polling.
++inline std::atomic<bool> pauseRequested{false};
++inline std::atomic<bool> paused{false};
++inline std::chrono::steady_clock::duration pauseAtBoundary(std::atomic<bool> &stop,
++        std::mutex &mutex, std::condition_variable &cv) {
++    if (!pauseRequested.load(std::memory_order_acquire)) return {};
++    std::unique_lock lock(mutex);
++    const auto began=std::chrono::steady_clock::now();
++    paused.store(true,std::memory_order_release);
++    while(pauseRequested.load(std::memory_order_acquire) && !stop.load(std::memory_order_acquire))
++        cv.wait_for(lock,std::chrono::milliseconds(8));
++    const auto elapsed=std::chrono::steady_clock::now()-began;
++    paused.store(false,std::memory_order_release);
++    return elapsed;
++}
+ inline std::atomic<int> volume{100};
+ inline std::atomic<bool> mute{false};
++inline void loadAudio() {
++    static const bool loaded=[] {
++        if(const char *v=std::getenv("GOW_AUDIO_VOLUME")) volume.store(std::clamp(std::atoi(v),0,100));
++        const char *m=std::getenv("GOW_AUDIO_MUTE");mute.store(m && !std::strcmp(m,"1"));
++        return true;
++    }(); (void)loaded;
++}
+ inline std::atomic<bool>& autoQte() {
+     static std::atomic<bool> enabled{[] { const char *v=std::getenv("GOW_QTE_AUTO"); return v && !std::strcmp(v,"1"); }()};
+     return enabled;
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_settings.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_settings.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_menu_settings.h
+@@ -0,0 +1,24 @@
++#pragma once
++#include <filesystem>
++#include <fstream>
++#include <cstdlib>
++#include <string>
++namespace gow_menu_settings {
++inline bool publish(const std::string &fields) {
++    const char *root = std::getenv("GOW_MENU_SETTINGS");
++    if (!root || !*root) return false;
++    static unsigned sequence = 0;
++    if (sequence >= 4096 || fields.size() > 32768) return false;
++    try {
++        const auto dir = std::filesystem::u8path(root);
++        const auto path = dir / (std::to_string(++sequence) + ".json");
++        const auto temp = dir / (std::to_string(sequence) + ".tmp");
++        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
++        file << "{" << fields << "}"; file.close();
++        if (!file) return false;
++        std::filesystem::rename(temp, path);
++        return true;
++    } catch (...) { return false; }
++}
++}
++std::string gowMenuBindingsJson(bool pad);

@@ -72,6 +72,8 @@ Item {
         function esRecorte(path) { return false }
         function urlDesdeRuta(path) { return "" }
         function iniciar(args) { lastPlay = args; return false }
+        property var pendingMenu: ({})
+        function sincronizarMenu() { const result = pendingMenu; pendingMenu = ({}); return result }
         function partidas(path) { lastSaves = path; return [] }
     }
     QtObject { id: mando; property bool conectado: false; signal boton(string name) }
@@ -170,7 +172,16 @@ Item {
                       "texture, presentation and renderer switches were not forwarded by jugar()")
                 page.ajustesGuardados.textoJuego = "region:missing"
                 check(!page.selectedGame && page.carpetaPartidas === "", "missing regional build must not silently select USA saves")
-                console.log("PASS: real Main.qml region routing and save isolation")
+                const untouched = page.ajustesGuardados.resolucionInterna
+                lanzador.pendingMenu = ({audioVolume:35, audioMute:true, fxaa:false, teclas:'{"_modifierAliases":false,"li_arriba":[84],"ld_mod":[341],"r2":[341]}'})
+                page.sincronizarAjustesMenu()
+                check(page.ajustesGuardados.audioVolume === 35 && page.ajustesGuardados.audioMute, "menu audio not synchronized")
+                check(page.ajustesGuardados.teclas.indexOf("84") >= 0 && !page.ajustesGuardados.fxaa, "menu bindings/graphics not synchronized")
+                check(page.ajustesGuardados.resolucionInterna === untouched, "menu overwrote unrelated graphics")
+                page.ajustesGuardados.textoJuego = "en"; page.jugar()
+                check(lanzador.lastPlay.audioVolume === 35 && lanzador.lastPlay.audioMute, "menu audio not forwarded on next launch")
+                check(lanzador.lastPlay.teclas.indexOf("_modifierAliases=0") >= 0 && lanzador.lastPlay.teclas.indexOf("ld_mod=341") >= 0, "native menu aliases or explicit chord changed on restart")
+                console.log("PASS: real Main.qml region routing and save isolation; persisted menu settings on next launch")
                 Qt.exit(0)
             } catch (error) { console.error(error); Qt.exit(1) }
         }

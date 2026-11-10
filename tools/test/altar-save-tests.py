@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='altar-save-') as temporary:
     subprocess.run([str(exe.resolve()),temporary],check=True,env=env,timeout=30)
 menu=(a.runtime/'src/lib/gow_trucos.cpp').read_text(encoding='utf-8')
 body=m.extract(menu,'void gowTrucosMenuDibujar()')
-notice=body[:body.index('    if (!g_menuAbierto.load')].replace('gowTrucosMenuDibujar','drawNotification')+'}\n'
+notice=body[:body.index('    if (!g_menuAbierto.load')].replace('gowTrucosMenuDibujar','drawNotification').replace('    drawAccessibilityNotice();\n','')+'}\n'
 cpp=a.output/'save-notification.cpp'; exe=a.output/'save-notification.exe'
 cpp.write_text(Path(__file__).with_name('save-notification.cpp.in').read_text(encoding='utf-8').replace('@NOTIFICATION@',notice),encoding='utf-8')
 subprocess.run([str(a.compiler.resolve()),'-std=c++17','-O2','-static','-I'+str(a.runtime.resolve()/'include'),str(cpp),'-o',str(exe)],check=True,env=env,timeout=120)

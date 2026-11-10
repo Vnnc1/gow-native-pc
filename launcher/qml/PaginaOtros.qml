@@ -21,6 +21,18 @@ ScrollView {
         spacing: 0
 
         Fila {
+            titulo: Tema.t("menuAudioVolume")
+            Slider { anchors.right: parent.right; width: 240; from: 0; to: 100; stepSize: 5
+                value: raiz.ajustes.audioVolume
+                onMoved: raiz.ajustes.audioVolume = Math.round(value)
+                Accessible.name: Tema.t("menuAudioVolume")
+            }
+        }
+        Fila {
+            titulo: Tema.t("menuAudioMute")
+            Interruptor { checked: raiz.ajustes.audioMute; onToggled: raiz.ajustes.audioMute = checked }
+        }
+        Fila {
             titulo: Tema.t("idioma")
             Selector {
                 opciones: Textos.idiomas.map((i) => ({ texto: i.nombre, valor: i.codigo }))
