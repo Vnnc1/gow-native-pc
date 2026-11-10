@@ -49,6 +49,16 @@ def frame_summary(rows, warmup):
     return result
 
 
+def copy_private_card(source, target, expected_hash):
+    if worker.sha(source) != expected_hash:
+        raise RuntimeError("Source card changed before copy")
+    if source.resolve() == target.resolve() or target.exists():
+        raise RuntimeError("Card target must be a new private file")
+    shutil.copyfile(source, target)
+    if worker.sha(target) != expected_hash or worker.sha(source) != expected_hash:
+        raise RuntimeError("Card changed during copy")
+
+
 def save_inventory(data, disc):
     files = {disc / "Mcd001.ps2"}
     for directory in (data / "mc0", data / "saves", disc / "mc0", disc / "mc1"):
@@ -193,6 +203,11 @@ def completed_child(meta, events, helper_code):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runner", required=True, type=Path)
+    p.add_argument("--elf", type=Path, help="Prepared disc ELF; source card remains untouched")
+    p.add_argument("--collector", type=Path, help="Deployed gow-session executable")
+    p.add_argument("--card", type=Path, help="Copy this card into each private run; never writes the source")
+    p.add_argument("--scale", type=int, choices=(1, 2, 3, 4), default=1, help="Fixed internal scale except for --compare scale")
+    p.add_argument("--fxaa", action="store_true", help="Enable FXAA in both variants")
     p.add_argument("--reference-runner", type=Path, help="Reference binary for --compare vu1; all other settings stay fixed")
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--game", default="gow1")
@@ -230,25 +245,32 @@ def main():
     scene = profile.get("diagnostics", {}).get("scenes", {}).get(a.scene) if a.scene else None
     if a.scene and not scene:
         p.error("Unknown profile scene")
+    if scene and scene.get("requires_card") and not a.card:
+        p.error("This scene requires --card with the documented first-slot location")
+    if a.compare == "scale" and a.scale != 1:
+        p.error("--compare scale already selects 1x/2x; omit --scale")
     if a.compare == "logic-rate" and scene and "frame_begin" in scene:
         p.error("Logic-rate comparisons require real-time input/windows, not equal frame numbers")
     if scene and "frame_begin" in scene:
         begin, end = scene["frame_begin"], scene.get("frame_end", 0)
         if not (0 <= begin < end <= 1000000 and end - begin <= 4096):
             p.error("Frame scene requires 1-4096 intervals and ordered boundaries up to 1000000")
-    elf = Path(json.loads((root / "data" / a.game / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"]).resolve()
-    helper = root / "launcher/build-clang/deploy/gow-session.exe"
+    elf = (a.elf or Path(json.loads((root / "data" / a.game / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"])).resolve()
+    helper = (a.collector or root / "launcher/build-clang/deploy/gow-session.exe").resolve()
     candidate = a.runner.resolve()
     reference = a.reference_runner.resolve() if a.reference_runner else candidate
     runner = candidate
     for path in (runner, reference, elf, helper):
         if not path.is_file(): p.error(f"Missing {path}")
+    card = a.card.resolve() if a.card else None
+    if card and not card.is_file(): p.error(f"Missing {card}")
     output = a.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     identity = {"runner_sha256": worker.sha(runner), "reference_sha256": worker.sha(reference), "elf_sha256": worker.sha(elf),
                 "toc_sha256": worker.sha(elf.parent / profile["disc"]["toc"]), "helper_sha256": worker.sha(helper)}
+    if card: identity["source_card_sha256"] = worker.sha(card)
     report = {"schema": 1, "identity": identity, "mode": "task-capture" if a.task_capture else "capture" if a.capture else "timing" if a.timing else "frames-only",
-              "scope": "Audio enabled, private blank cards. Recorded binary identities, profile input; scene bounds are checked when selected, animation is not a frame-identical replay. Percentiles are medians of complete-window percentiles, not pooled percentiles.",
+              "scope": "Audio enabled, private cards (blank unless --card supplied). Recorded binary identities, profile input; scene bounds are checked when selected, animation is not a frame-identical replay. Percentiles are medians of complete-window percentiles, not pooled percentiles.",
               "visible": not a.hidden,
               "compare": a.compare, "gpu_samples": a.gpu_samples, "jit_only": a.compare == "vu1-inline",
               "logic_fps": a.logic_fps if a.compare == "logic-rate" else None,
@@ -268,14 +290,16 @@ def main():
         run.mkdir()
         disc = run / "disc"
         private_disc(elf.parent, disc, profile)
+        if card: copy_private_card(card, disc / "Mcd001.ps2", identity["source_card_sha256"])
         private_elf = disc / elf.name
         if worker.sha(private_elf) != identity["elf_sha256"]: raise RuntimeError("ELF identity changed")
         if worker.sha(disc / profile["disc"]["toc"]) != identity["toc_sha256"]: raise RuntimeError("TOC identity changed")
         session = run / "session"
         session.mkdir()
-        a.mode, a.scale = "timing" if a.timing else "fps", (variant + 1 if a.compare == "scale" else 1)
+        a.mode, a.scale = "timing" if a.timing else "fps", (variant + 1 if a.compare == "scale" else a.scale)
         (session / "session.json").write_text(json.dumps({"schema": 1, "id": run.name, "state": "prepared", "settings": {"primitive_grouping": grouped, "visible": not a.hidden, "audio": True, "scale": a.scale, "private_cards": True}}))
         env = worker.environment(profile, run, a, 0)
+        env["TOBIICHI_FXAA"] = str(int(a.fxaa))
         env.update(PS2X_GS_RUN=str(grouped), GOW_GS_EARLY_FINISH="1", GOW_GS_HW_RING="0", GOW_GS_TEXREUSE="0",
                    GOW_VU1_FAST="0", GOW_MC0=str(disc / "Mcd001.ps2"), GOW_SAVES_DIR=str(disc / "saves"),
                    TOBIICHI_PANTALLA="ventana", GOW_AUDIO_STATS="1")
@@ -397,6 +421,7 @@ def main():
                   "queue_healthy": "[gs-run] dropped a queue record:" not in log and "[gs-run] queue record issue:" not in log,
                   "player_saves_unchanged": save_inventory(root / "data" / a.game, elf.parent) == original_saves}
         stats["helper_exit_code"] = proc.returncode
+        if card: checks["source_card_unchanged"] = worker.sha(card) == identity["source_card_sha256"]
         stats["exit_metadata_recovered"] = "exit_code" not in meta and checks["exit_zero"]
         if a.compare == "wrap-group":
             checks["effective_wrap_group"] = f"[gs-wrap-config] group={variant}" in log

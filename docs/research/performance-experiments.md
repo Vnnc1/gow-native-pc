@@ -339,3 +339,91 @@ Patch `zzz-308` keeps host polling active using `FLAG_WINDOW_ALWAYS_RUN`.
 This is lifecycle correctness, not a new FPS experiment or proof of the original
 control's unrecorded window state. Background rendering remains active; no power
 or GPU performance improvement is claimed. See the investigation's follow-up.
+
+## PERF-06 / 2026-11-09 — current native-build release readiness
+
+New request: investigate stable 60 FPS before a public test release. First inspect
+existing player sessions (latest runner through zzz-314), then GAIN-11's missing
+local frame-aligned renderer comparison. Unlike GPU-05's unaligned JIT-only /
+interpreter-IOP controls, this uses the actual installed AOT/native-IOP Release
+runner, exact VU, no PGO, private blank cards and `ship_arrival_frames` (0..360).
+The materially different execution tier and mandatory trajectory gate address
+those earlier controls' limitations. This is a short arrival acceptance probe,
+not a reproduction of rain/combat or notebook acceptance. Use two alternating
+PR26 off/on pairs, visible 1280x720, 1x, FXAA off, AF off, audio enabled, frames-only
+metrics and optional PDH GPU counters; no captures/profiler/concurrent builds.
+Keep all failed gates and do not change defaults from an invalid comparison.
+Evidence: `data/experiments/release-readiness-20261109/`; results will be appended.
+
+Result: four visible, frame-aligned arrival runs passed all ten functional gates.
+Off/on/on/off: 59.909 / 59.996 / 59.996 / 59.996 guest Hz; p99 18.446 / 17.815 /
+17.819 / 18.028 ms, no missing audio in the measured 360-frame intervals.
+This capped six-second workload establishes no useful speedup. p95 did not
+improve in both pairs; no default change. Startup audio counters, two-sample GPU
+estimates and varying background CPU activity remain limitations. Current player
+reports have lower-rate windows with large scoped VU time, which includes waits;
+no confirmed pure-CPU cause, stable-combat-60 or notebook acceptance. Added explicit
+installed ELF/collector CLI paths to the harness; regression suite passed.
+See [full method, numbers and priorities](release-performance-2026-11-09.md).
+
+## VU-09 / 2026-11-09 — distinguish VU wall time from thread CPU
+
+Follow-up to PERF-06's high scoped VU time. New measurement: the existing Windows
+sampler gains a counter-only mode with no thread suspension, symbols or timer
+resolution change. Read actual CPU time separately from scoped wall time and
+bounded queue waits on the installed native build. A separate intrusive sample
+may locate executed addresses; it is not an FPS run. Use a private copy of the
+player card, scripted load, bounded local task recording and preserve hashes.
+This addresses a missing attribution criterion, not a retest of VU-01..08's
+rejected chain/branch/layout candidates. No runtime optimization is accepted
+without parity and a matched heavy-workload comparison. Evidence will remain in
+`data/experiments/vu1-waits-20261109/`.
+
+VU-09 result: private-card Athn01D altar load reproduced high VU cost. Windows
+thread CPU counters without suspension measured 99.75% of one core with detailed
+probes and 98.09% with basic metrics only. The latter's separate instruction
+sample attributed approximately 33.8% of wall samples to chain; this is not CPU
+self time. GS-stage producer capacity waits after capture were only 1.956 ms over
+36.318 s. This local workload is predominantly execution, not blocked waiting.
+Basic-metric windows averaged 59.403 guest Hz, median window p99 21.866 ms;
+detailed probe windows 50.423 / 34.367 ms. These are different instrumentation
+conditions, not a candidate FPS A/B or stable-60 acceptance.
+
+Found and retained zzz-315: the enabled task recorder entered its large temporary
+interpreter frame even for delayed/strided/completed captures. Move selection
+checks outside that frame while retaining the mutex and all gates. Three pinned
+synthetic pairs (one million calls, limit three) reduced median elapsed time
+0.730440 -> 0.648603 s (11.20%), with identical digests and corpus hashes. The
+recording-disabled path is unchanged: no ordinary-play FPS gain claimed. All 32
+real tasks passed JIT/exact replay against their respective baselines; native/
+exact baselines still differ. Initial identical-binary build controls were rejected
+before timing and retained. No launcher runner/save/configuration was replaced.
+See [full VU-09 report](vu1-waits-2026-11-09.md) for method, tests and limitations.
+
+## VU-10 / 2026-11-09 — chain diagnostic-path specialization
+
+New hypothesis after VU-09's heavy Athn01D capture: compile the no-diagnostics
+chain path separately so its per-block body has no cost/opcode/self-counter
+instrumentation checks. One entry selection retains the existing detailed path.
+This is not VU-04's timing/scalar outlining, VU-06's block-edge inlining or
+OPEN-01's removal of emulated timing: all cycle/flag/lane/history/stop behavior
+stays intact. Start with the identical 32-task corpus, alternating pinned replay
+and baseline-specific digest checks. Only a passing replay candidate proceeds to
+isolated normal-build gameplay with private cards. No installed runner/settings
+or user saves are replaced. Evidence: `data/experiments/vu1-chain-20261109/`.
+
+VU-10 result: retained as zzz-316, default on for ordinary gameplay. Five pinned
+32-task replay pairs reduced median sum of warm execution times 599.6 -> 553.7 us
+(7.66%), all pairs favorable, unchanged signatures/digests. This is total isolated
+native task time, not a 7.66% FPS claim or removal of emulated cycle bookkeeping.
+Three alternating private-card Athn01D pairs (1800 aligned frames, 2x/AF16/FXAA,
+normal AOT/native IOP, no detailed timing/recording/profiler) passed all 11 gates.
+Candidate p95/p99 improved in all pairs. Median run FPS 59.766 -> 59.966, p95
+17.973 -> 17.785 ms, p99 19.490 -> 18.537 ms. Preserve the third reference outlier
+(58.599 Hz / p99 26.051 ms); no controlled background-load or universal-speed claim.
+Zero missing audio in all measured intervals; startup deficits remain outside them.
+Five-seed generated/JIT/SSE/special-value and self-loop budget/depth equivalence,
+32-task replay in five modes, diagnostic-path fixtures and harness/profile tests
+passed. Final rebuilt core equals the measured object except its COFF timestamp.
+The installed runner/settings/source card were not replaced. Other hardware,
+sustained combat and full-campaign acceptance remain open. [Full report](vu1-chain-2026-11-09.md).

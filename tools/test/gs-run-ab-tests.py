@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 
 spec = importlib.util.spec_from_file_location("gs_run_ab", Path(__file__).with_name("gs-run-ab.py"))
 m = importlib.util.module_from_spec(spec)
@@ -60,6 +62,18 @@ with tempfile.TemporaryDirectory() as name:
     assert not (target / "Mcd001.ps2").exists() and not list((target / "mc0").iterdir())
     assert (target / "ELF").read_bytes() == b"elf" and (target / "mods/module.irx").is_file()
     assert m.save_inventory(root, source) == before
+    card = source / "Mcd001.ps2"
+    expected = m.worker.sha(card)
+    m.copy_private_card(card, target / "Mcd001.ps2", expected)
+    assert (target / "Mcd001.ps2").read_bytes() == card.read_bytes()
+    assert m.worker.sha(card) == expected
+    for destination, digest in ((card, expected), (target / "Mcd001.ps2", expected), (target / "other.ps2", "bad")):
+        try:
+            m.copy_private_card(card, destination, digest)
+            raise AssertionError("unsafe or changed-card copy accepted")
+        except RuntimeError:
+            pass
+    assert not (target / "other.ps2").exists() and m.worker.sha(card) == expected
 print("PASS: frame windows, GPU engine accounting/unavailability, private disc excludes player cards/directories")
 
 # Reject different arenas, menus, missing samples and displacement across runs.
@@ -143,3 +157,19 @@ for mode, flag in m.SHIPPED_FLAGS.items():
     off, on = m.pr26_environment(mode, 0), m.pr26_environment(mode, 1)
     assert [k for k in off if off[k] != on[k]] == [flag] and m.grouping_for(mode, 0, 0) == 1
 print("PASS: wrap-group / chain-warm comparisons change only their own switch")
+
+# Explicit installation paths must not read this checkout's generated languages.json.
+with tempfile.TemporaryDirectory() as directory:
+    missing = Path(directory) / "missing-ELF"
+    output = Path(directory) / "output"
+    result = subprocess.run([sys.executable, "-I", str(Path(m.__file__)),
+        "--runner", __file__, "--elf", str(missing), "--collector", __file__,
+        "--output", str(output)], capture_output=True, text=True)
+    assert result.returncode == 2 and f"Missing {missing}" in result.stderr
+    assert "Traceback" not in result.stderr and not output.exists()
+    for flags, message in ((["--scene", "ship_altar_frames"], "requires --card"),
+                           (["--compare", "scale", "--scale", "2"], "omit --scale")):
+        result = subprocess.run([sys.executable, "-I", str(Path(m.__file__)),
+            "--runner", __file__, "--output", str(output), *flags], capture_output=True, text=True)
+        assert result.returncode == 2 and message in result.stderr and not output.exists()
+print("PASS: explicit installation paths bypass local metadata and reject missing inputs before writes")

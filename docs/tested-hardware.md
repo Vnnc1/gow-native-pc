@@ -1505,3 +1505,58 @@ MADD/MSUB skip the wide overflow check, matching the AOT fast blocks patch 51 co
 streaming (gs_ms up to 4.8 s/5 s) measures 33-41, where the GS side becomes the wall. Visual comparison of the title,
 logo and Chinese menu between exact and fast captures: identical. Not validated: combat, cutscenes after the title,
 AOT/JIT digest equality for the fast path, other CPUs.
+
+## Current release readiness, PERF-06 (2026-11-09, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Installed zzz-314 Release x86-64-v2 runner, native IOP/AOT VU1, no PGO, driver
+31.0.21924.61, 16 GiB. Four visible 1x/1280x720, FXAA-off, audio-on private-card
+arrival runs passed ten gates each. Exact frames 0..360, PR26 off/on/on/off:
+59.909 / 59.996 / 59.996 / 59.996 guest Hz; p99 18.446 / 17.815 / 17.819 /
+18.028 ms. Zero missing audio inside each six-second measurement, not at startup.
+No useful speedup or default change established; p95 not better in both pairs.
+Short capped scene, background activity and sparse GPU samples limit inference.
+
+A current player report at 2x/AF16 has windows down to 45.8 Hz with high scoped
+VU time; this includes waits and timed-diagnostic overhead. It is not the same
+scene/settings as the controlled test and does not prove a regression between
+builds. Stable sustained combat and other hardware remain unvalidated.
+[Full report and next investigation gates](research/release-performance-2026-11-09.md).
+
+## VU CPU/wait attribution, VU-09 (2026-11-09, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Private-card slot-1 Athn01D altar, installed zzz-314 runner, 2x/AF16/FXAA, audio,
+native IOP/AOT, no PGO. Counter-only Windows thread measurements show 99.75% of
+one core with detailed probes and 98.09% with basic metrics. Producer ring waits
+after bounded capture totalled 1.956 ms / 36.318 s. A separate intrusive sample
+located chain at approximately 33.8% of wall samples, not CPU self time. This
+points to execution/bookkeeping rather than dominant blocking in this scene.
+
+Basic-metric windows: 59.403 guest Hz, median window p95/p99 17.672/21.866 ms,
+maximum 39.568 ms, no missing/dropped audio in that interval. Detailed probe
+windows: 50.423 Hz, p95/p99 28.155/34.367 ms. Different instrumentation and no
+frame-identical animation gate: not an optimization A/B. Startup deficits remain.
+
+Patch zzz-315 removes an unnecessary large stack-frame entry from unsampled or
+completed task recording. Three pinned synthetic pairs show 11.20% lower median
+elapsed time only with this diagnostic enabled; no normal-play gain. Replay and
+capture-limit tests pass. Installed runner, source card and settings preserved.
+Not accepted: sustained-combat 60, other hardware, native-versus-exact semantic
+equivalence or a new normal-path VU optimization. [Full report](research/vu1-waits-2026-11-09.md).
+
+## Normal VU chain specialization, VU-10 (2026-11-09, Xeon E5-2666 v3 / RX 580 2048SP)
+
+Retained default-path patch zzz-316 removes diagnostic branches from ordinary
+chain execution while keeping the detailed path and all guest semantics. Pinned
+32-task replay: 599.6 -> 553.7 us median summed warm time, five favorable pairs.
+No generated-code or native-state layout change. This is not a 7.66% FPS claim.
+
+Three visible, frame-aligned private-card Athn01D altar pairs, 2x/AF16/FXAA,
+exact VU, native IOP/AOT, Release v2 without PGO: median run FPS 59.766 -> 59.966;
+median per-run p95 17.973 -> 17.785 ms and p99 19.490 -> 18.537 ms. P95/p99 improve
+in all three pairs. All six runs pass 11 gates and have no missing audio inside
+the measured 1800-frame intervals. Third reference outlier and startup deficits
+are retained; animation/background load were not locked to identical execution.
+Generated/JIT/backend equivalence and self-loop exits pass; detailed diagnostic
+modes still preserve fixture digests. Installed saves/settings/runner unchanged.
+This validates a local stationary heavy scene, not universal 60, combat or other
+hardware. [Methods, all runs and limitations](research/vu1-chain-2026-11-09.md).

@@ -1,0 +1,60 @@
+VU1 chain: specialize the ordinary path without diagnostic bookkeeping.
+Select the detailed implementation when VU cost, opcode or native counters are
+enabled. Both implementations retain the same guest cycle/flag/lane/history,
+stop and budget behavior. No environment opt-in or generated-block ABI change.
+Validation and hardware scope: docs/research/vu1-chain-2026-11-09.md.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_native.inl
+@@ -1096,13 +1096,21 @@
+ // code before one; the entry half changes nothing until every condition runNative would handle itself has passed.
+ VU1Interpreter::NativeState::Slot *VU1NativeAccess::chain(VU1NativeCtx &n, uint32_t next)
+ {
++    // Keep diagnostic branches out of the ordinary per-block body; guest timing is identical.
++    static const bool detailed = vu1op::enabled() || std::getenv("GOW_VU1_COST") != nullptr;
++    auto execute = [&]<bool Detailed>()
++#if defined(__clang__) || defined(__GNUC__)
++        __attribute__((always_inline))
++#endif
++        -> VU1Interpreter::NativeState::Slot *
++    {
+     using NS = VU1Interpreter::NativeState;
+     VU1Interpreter &vu = *n.vu;
+     NS &ns = *vu.m_native;
+-    static const bool opStatDiag = vu1op::enabled(); // patch 65: dynamic opcode mix (bucket = the run's entry PC)
++    static const bool opStatDiag = Detailed && vu1op::enabled(); // patch 65: dynamic opcode mix (bucket = the run's entry PC)
+     const bool opStatOn = opStatDiag && ns.opCats.size() == 2048u;
+     // patch 65: the per-block entry/exit bookkeeping below, timed under patch 62's GOW_VU1_COST (1/16 sample, scaled)
+-    static const bool chainCost = std::getenv("GOW_VU1_COST") != nullptr;
++    static const bool chainCost = Detailed && std::getenv("GOW_VU1_COST") != nullptr;
+     const bool chainSample = chainCost && ((vu1cost::counters.chainCalls & (vu1cost::kChainSampleStride - 1u)) == 0u);
+     const uint64_t chainStart = chainSample ? vu1cost::ticks() : 0u;
+     struct ChainScope
+@@ -1158,7 +1166,7 @@
+             commitDue(vu);
+         n.pairs += cur.pairs;
+         ++n.blocks;
+-        if (ns.diag) [[unlikely]]
++        if (Detailed && ns.diag) [[unlikely]]
+             ++ns.selfBlocks, ns.selfPairs += cur.pairs;
+         vu.m_state.pc = next & 0x3FFFu;
+         const auto &context = *static_cast<const VU1Interpreter::StepContext *>(n.context);
+@@ -1175,7 +1183,7 @@
+         commitDue(vu);
+     n.pairs += cur.pairs;
+     ++n.blocks;
+-    if (ns.diag && pc == n.pc)
++    if (Detailed && ns.diag && pc == n.pc)
+         ++ns.selfBlocks, ns.selfPairs += cur.pairs;
+     vu.m_state.pc = next & 0x3FFFu;
+     if (!n.chain || n.depth >= kMaxDepth)
+@@ -1243,6 +1251,9 @@
+     if (opStatOn) // patch 65: this block runs inside the chain, runNative will not count it
+         vu1op::account(n.pc, ns.opCats[n.pc >> 3], sl.tail != nullptr);
+     return &sl;
++
++    };
++    return detailed || n.vu->m_native->diag ? execute.template operator()<true>() : execute.template operator()<false>();
+ }
+ 
+ void VU1Interpreter::commitEverythingNow()

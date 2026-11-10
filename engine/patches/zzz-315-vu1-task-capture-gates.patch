@@ -1,0 +1,27 @@
+VU1 task recording: gate before allocating the isolated interpreter frame.
+The old delayed/strided/completed capture path entered a large cold stack frame
+on every VU program even when no record was needed. Preserve locked state and
+all capture gates. This fixes diagnostic overhead, not normal gameplay FPS.
+
+--- a/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
++++ b/PS2Recomp/ps2xRuntime/src/lib/vu/ps2_vu1_tasks.inl
+@@ -89,15 +89,15 @@
+ {
+     static gow_vu_tasks::Recorder out;
+     if (!out.path || !*out.path || codeSize != 16384 || dataSize != 16384 || !code || !data) return;
+-    // gow-native-pc: recording in its own frame (it holds a whole VU1Interpreter): called for every VU1 program, this function
+-    // would otherwise probe that frame's stack pages (___chkstk_ms) on every call, recording or not
+-    [&]() VU1N_COLD_FRAME
+-    {
++    // Reject unsampled/completed recording before entering the large interpreter-copy frame.
++    // Keep all recorder state under the same lock, including delay/stride/limit checks.
+     std::lock_guard<std::mutex> lock(out.mutex);
+     if (out.failed || out.written >= out.limit || maxCycles == 0 || maxCycles > gow_vu_tasks::MaxCycles) return;
+     if (out.delay && std::chrono::steady_clock::now() - out.start < std::chrono::seconds(out.delay)) return;
+     const auto index = out.seen++;
+     if (index < out.skip || (index - out.skip) % out.stride) return;
++    [&]() VU1N_COLD_FRAME
++    {
+     if (!out.file) {
+         out.file = std::fopen(out.path, "wbx"); // Never overwrite an earlier corpus.
+         if (!out.file) { out.failed = true; std::fprintf(stderr, "[gow-vu1-task] write_error=1\n"); return; }

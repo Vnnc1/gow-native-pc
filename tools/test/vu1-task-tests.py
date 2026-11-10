@@ -11,8 +11,8 @@ exe = Path(sys.argv[1]).resolve()
 env = {k: v for k, v in os.environ.items() if not k.upper().startswith(("GOW_", "PS2X_", "TOBIICHI_"))}
 
 
-def run(*args, code=0):
-    p = subprocess.run([str(exe), *map(str, args)], env=env, capture_output=True, timeout=45)
+def run(*args, code=0, extra_env=None):
+    p = subprocess.run([str(exe), *map(str, args)], env=env | (extra_env or {}), capture_output=True, timeout=45)
     text = (p.stdout + p.stderr).decode(errors="replace")
     assert p.returncode == code, (p.returncode, text)
     return text
@@ -22,6 +22,11 @@ with tempfile.TemporaryDirectory(prefix="gow-vu1-tasks-") as tmp:
     root = Path(tmp)
     corpus = root / "tasks.bin"
     plain = run("--fixture", "none")
+    for settings in ({"GOW_VU1_COST": "1"}, {"GOW_VU1_OPSTAT": "1"},
+                     {"GOW_VU1N_DIAG": "1"}, {"GOW_VU1_CHAIN_WARM": "0"},
+                     {"GOW_VU1_COST": "0", "GOW_VU1N_DIAG": "0"}):
+        detailed = run("--fixture", "none", extra_env=settings)
+        assert re.search(r"fixture_digest=\w+", plain)[0] == re.search(r"fixture_digest=\w+", detailed)[0]
     recorded = run("--fixture", corpus)
     assert re.search(r"fixture_digest=\w+", plain)[0] == re.search(r"fixture_digest=\w+", recorded)[0]
     original = corpus.read_bytes()
@@ -33,6 +38,14 @@ with tempfile.TemporaryDirectory(prefix="gow-vu1-tasks-") as tmp:
             assert any(int(n) > 0 for n in re.findall(r"native_blocks=(\d+)", result)), result
     duplicate = run("--fixture", corpus)
     assert "write_error=1" in duplicate and corpus.read_bytes() == original
+    # Keep executing after the recording limit; only three tasks may be published.
+    extended = root / "extended.bin"
+    plain_extended = run("--fixture", "none", "16")
+    recorded_extended = run("--fixture", extended, "16")
+    assert re.search(r"fixture_digest=\w+", plain_extended)[0] == re.search(r"fixture_digest=\w+", recorded_extended)[0]
+    assert extended.read_bytes() == original
+    run("--fixture", "none", "0", code=2)
+    run("--fixture", "none", "1000001", code=2)
     for name, content in (("empty", b""), ("short", original[:-1]), ("magic", b"BAD!" + original[4:]),
                           ("payload", original[:-1] + bytes([original[-1] ^ 1])), ("extra", original + b"x")):
         bad = root / (name + ".bin")

@@ -196,6 +196,23 @@ Default/custom labels and composite leaves are covered by `gow_control_prompts`.
 Aphrodite's reported silence remains unproven despite successful asset/mixer
 checks; see `docs/research/aphrodite-and-keyboard-qte-2026-11-09.md`.
 
+Patch `zzz-315` moves task-recording delay/stride/limit checks before the large
+interpreter-copy frame, retaining the mutex across selection and publication.
+This fixes diagnostic overhead only; the recording-disabled gameplay path is
+unchanged. Run `tools/test/vu1-task-tests.py` and captured-task replay after edits.
+`tools/profile/sampler.cpp` supports `SAMPLER_CPU_ONLY=1` for thread CPU counters
+without suspension; instruction sampling remains intrusive and separate from
+FPS measurements. See `docs/research/vu1-waits-2026-11-09.md` (VU-09).
+
+Patch `zzz-316` specializes `chain` for ordinary versus diagnostic execution,
+without changing guest timing/flags/history or the AOT/JIT ABI. Keep the detailed
+path selected for cost, opcode or native counters. VU-10 records pinned replay
+and three visible private-card Athn01D pairs; this is not universal 60 FPS.
+`ship_altar_frames` requires an explicit card with that first-slot location;
+`gs-run-ab.py --card` must copy/hash it and never launch against the source card.
+Run task replay and `vu1-equivalence.py` after chain edits, including self-loop
+budget/depth exits and diagnostic modes. See `docs/research/vu1-chain-2026-11-09.md`.
+
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
 written. Keep entry/resume, caller, primary-slot and size/result gates; do not use

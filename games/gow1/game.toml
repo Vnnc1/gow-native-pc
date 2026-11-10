@@ -80,6 +80,18 @@ frame_begin = 0
 frame_end = 360
 trajectory_tolerance = 25.0
 
+[diagnostics.scenes.ship_altar_frames]
+# Requires a private copy of a card whose first slot is the Athn01D ship altar.
+# Stationary heavy scene, not combat. Wrong locations/trajectory drift must fail.
+requires_card = true
+pad_script = "5:start,12:abajo*0.15,18:x,24:x,30:x,f0:l1*0"
+god_mode = false
+position_tolerance = 5.0
+zones = ["Athn01D"]
+frame_begin = 600
+frame_end = 2400
+trajectory_tolerance = 5.0
+
 # Known discs: the game as released. Fan translations are not listed: any disc whose .text matches text_sha1 is
 # accepted as a translation, and its language is guessed from the words below.
 [[editions]]
