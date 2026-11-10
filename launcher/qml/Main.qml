@@ -61,6 +61,7 @@ ApplicationWindow {
         property bool controlesDmc5: true
         property bool cancelarAnimaciones: true // snappier evade and input buffer (GOW_CANCELAR)
         // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
+        property bool qteAuto: false
         property bool qteHold: false
         property string qteHoldButtons: "circle" // Base group; shoulders are independent opt-ins.
         property bool qteHoldL1: false
@@ -239,6 +240,7 @@ ApplicationWindow {
         ajustes.controlesDmc5 = true
         ajustes.mando = ""
         ajustes.cancelarAnimaciones = true
+        ajustes.qteAuto = false
         ajustes.qteHold = false
         ajustes.qteHoldButtons = "circle"
         ajustes.qteHoldL1 = false
@@ -365,6 +367,7 @@ ApplicationWindow {
             qteHoldL1: ajustes.qteHoldL1, qteHoldL2: ajustes.qteHoldL2,
             qteHoldR1: ajustes.qteHoldR1, qteHoldR2: ajustes.qteHoldR2,
             qteStickMode: ajustes.qteStickMode,
+            qteAuto: ajustes.qteAuto,
             qteHold: ajustes.qteHold, qteHoldButtons: ajustes.qteHoldButtons, qteHoldRate: ajustes.qteHoldRate,
             teclas: Teclas.cadena(Teclas.leer(ajustes.teclas)),
             mando: ajustes.mando ? Teclas.cadenaMando(Teclas.leerMando(ajustes.mando, ajustes.controlesDmc5)) : "",

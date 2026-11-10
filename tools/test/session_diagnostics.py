@@ -30,6 +30,12 @@ class DiagnosticsTests(unittest.TestCase):
         self.child = self.root / "child.py"
         self.process = None
 
+    def test_qte_auto_environment_reported(self):
+        self.env["GOW_QTE_AUTO"] = "1"
+        self.start("pass\n")
+        self.assertEqual(self.process.wait(timeout=20), 0)
+        self.assertEqual(self.metadata()["runtime_environment"]["GOW_QTE_AUTO"], "1")
+
     def tearDown(self):
         if self.process and self.process.poll() is None:
             (self.session / "stop.request").write_text("stop")

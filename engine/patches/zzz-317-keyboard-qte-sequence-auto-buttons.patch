@@ -1,0 +1,296 @@
+USA QTE prompts: show mapped, numbered keyboard sequences from named sprite ancestry and displayed arrow transforms. Add default-off automatic presses for uniquely recognized Greek button prompts; preserve manual input for unknown/world prompts, stale frames and focus loss.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -4,6 +4,7 @@
+ #include "raylib.h"
+ #include "rlgl.h"
+ #include "runtime/gow_prompt_input.h"
++#include "runtime/gow_qte_prompt.h"
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -97,6 +98,8 @@
+         uint32_t cabecera = 0u, caracteres = 0u, numCaracteres = 0u, formas = 0u, numFormas = 0u, sprites = 0u,
+                  numSprites = 0u, cadenas = 0u, numCadenas = 0u;
+         std::map<uint32_t, std::pair<Boton, Variante>> formasBoton;
++        std::map<uint32_t, int> namedForms;
++        std::map<uint32_t, int> namedSprites;
+ 
+         struct Fuente
+         {
+@@ -194,6 +197,12 @@
+                     vecino |= y.simbolo != x.simbolo && (y.direccion > x.direccion ? y.direccion - x.direccion : x.direccion - y.direccion) < 64u;
+                 if (!vecino || !hechos.insert({x.simbolo, x.caracter}).second)
+                     continue;
++                const uint32_t sprite = leer32(rdram, p.caracteres + 4u*x.caracter) >> 16;
++                if (sprite < p.numSprites) {
++                    const uint32_t address = p.sprites + 24u*sprite;
++                    auto [it, inserted] = p.namedSprites.emplace(address, x.simbolo);
++                    if (!inserted && it->second != x.simbolo) it->second = -1;
++                }
+                 std::set<uint32_t> formas, vistos;
+                 formasDe(rdram, p, x.caracter, formas, vistos, 0);
+                 for (uint32_t f : formas)
+@@ -202,6 +211,9 @@
+ 
+             for (auto &[f, lista] : candidatos)
+             {
++                // Shared leaves cannot identify a gesture: never choose CW over CCW by table order.
++                if (std::all_of(lista.begin(), lista.end(), [&](const auto &c) { return c.second == lista[0].second; }))
++                    p.namedForms[f] = lista[0].second;
+                 std::sort(lista.begin(), lista.end());
+                 bool unico = true;
+                 for (const auto &[tam, s] : lista)
+@@ -241,8 +253,9 @@
+                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - inicio).count());
+     }
+ 
+-    bool botonDeForma(const uint8_t *rdram, uint32_t entrada, Boton &b, Variante &v)
+-    {
++    bool botonDeForma(const uint8_t *rdram, uint32_t entrada, Boton &b, Variante &v, int *identity = nullptr)
++    {
++        if (identity) *identity = -1;
+         static bool scanPending = false;
+         for (int intento = 0; intento < 2; ++intento)
+         {
+@@ -256,6 +269,10 @@
+                     const auto it = p.formasBoton.find(entrada);
+                     if (it == p.formasBoton.end())
+                         return false;
++                    if (identity) {
++                        const auto named = p.namedForms.find(entrada);
++                        if (named != p.namedForms.end()) *identity = named->second;
++                    }
+                     b = it->second.first;
+                     v = it->second.second;
+                     return true;
+@@ -273,6 +290,31 @@
+                 break;
+         }
+         return false;
++    }
++
++    int symbolFromInstance(const uint8_t *rdram, const R5900Context *ctx, uint32_t shape)
++    {
++        // USA Flash leaf from the 0x147520 traversal, called by sprite renderer 0x146FB8.
++        // Read the saved instance, not a C++ hook stack: generated guest functions can yield/resume.
++        const uint32_t sp = GPR_U32(ctx,29);
++        if (GPR_U32(ctx,31) != 0x1478A0u || !valida(sp,0x170u) || leer32(rdram,sp+0xD0u) != 0x1474F0u)
++            return -1;
++        for (const auto &p : g_peliculas) {
++            if (shape < p.formas || shape >= p.formas+8u*p.numFormas ||
++                leer32(rdram,p.cabecera+0x18u) != p.formas || leer32(rdram,p.cabecera+8u) != 0x25803200u) continue;
++            uint32_t node = leer32(rdram,sp+0xB4u);
++            for (unsigned depth=0; depth<16 && valida(node,0x58u); ++depth) {
++                if (leer32(rdram,node+4u) != 0x2BF4C0u) break; // Sprite instance vtable, never other Flash objects.
++                const uint32_t movie = leer32(rdram,node+0x20u);
++                if (!valida(movie,0xCD4u) || leer32(rdram,movie+0xCD0u) != p.cabecera) break;
++                const auto found = p.namedSprites.find(leer32(rdram,node+0x1Cu));
++                if (found != p.namedSprites.end() && found->second >= 0) return found->second;
++                const uint32_t parent = leer32(rdram,node);
++                if (parent == node) break;
++                node = parent;
++            }
++        }
++        return -1;
+     }
+ 
+     struct Forma
+@@ -441,6 +483,8 @@
+         float r, g, b, a;
+         bool worldSpace = false;
+         std::array<float, 8> worldCorners{};
++        unsigned guideStep = 0, guideCount = 0;
++        uint16_t autoButton = 0;
+     };
+     std::mutex g_mutex;
+ 
+@@ -673,6 +717,10 @@
+         Boton b = BCruz;
+         Variante v = VNormal;
+         bool esBoton = false;
++        Boton namedButton = BCruz; Variante namedVariant = VNormal; int identity = -1;
++        const bool named = botonDeForma(rdram, entrada, namedButton, namedVariant, &identity);
++        const int instanceIdentity = symbolFromInstance(rdram, ctx, entrada);
++        if (instanceIdentity >= 0) identity = instanceIdentity;
+         Anterior fondo = g_anterior;
+         float fx = 0.0f, fy = 0.0f, fr = 0.0f;
+         centroYRadio(fondo, fx, fy, fr);
+@@ -683,8 +731,9 @@
+             esBoton = true;
+             g_buttonBackgrounds.insert(fondo.entrada);
+         }
+-        else if (botonDeForma(rdram, entrada, b, v) && b != BCruz && b != BCirculo && b != BCuadrado && b != BTriangulo)
+-        {
++        else if (named && namedButton != BCruz && namedButton != BCirculo && namedButton != BCuadrado && namedButton != BTriangulo)
++        {
++            b = namedButton; v = namedVariant;
+             esBoton = true;
+             if (!dentro)
+                 fondo = actual;
+@@ -706,20 +755,20 @@
+             leerCxform(rdram, GPR_U32(ctx, 8), g_rotulo.r, g_rotulo.g, g_rotulo.b, g_rotulo.a);
+         }
+ 
+-        // Keep the directional animation; add the actual movement bindings below it for keyboard input.
+-        // shortcut: one guide per guest frame; add symbol identities if simultaneous diagrams need separate guides.
+-        if (esBoton && b == BStickIzq && v == VGriego && g_construyendo.size() <= 124 &&
+-            std::none_of(g_construyendo.begin(), g_construyendo.end(),
+-                         [](const Icono &i) { return i.boton == BMoveUp; })) {
++        // Exact symbol identity carries direction and starting position, unlike a generic stick leaf.
++        const auto sequence = gow_qte_prompt::sequence(identity >= 0 ? kSimbolos[identity].nombre : nullptr, actual.m0, actual.m1, actual.m4, actual.m5);
++        if (sequence.count && esBoton && b == BStickIzq && v == VGriego &&
++            g_construyendo.size() + sequence.count <= 128 &&
++            std::none_of(g_construyendo.begin(), g_construyendo.end(), [](const Icono &i) { return i.guideStep != 0; })) {
+             centroYRadio(fondo, fx, fy, fr);
+-            const float size = std::clamp(fr * 0.24f, 18.0f, 24.0f);
+-            const float centerX = 320.0f + fx * 0.5f;
+-            const float top = 240.0f - fy * 0.5f + fr * 0.5f + size * 0.5f + 4.0f;
+-            const Boton keys[] = {BMoveUp, BMoveLeft, BMoveDown, BMoveRight};
+-            for (unsigned key = 0; key < 4; ++key) {
+-                const float offset = key == 1 ? -1.0f : key == 3 ? 1.0f : 0.0f;
+-                Icono hint{keys[key], VNormal, centerX + offset * (size + 2),
+-                           top + (key ? size + 2 : 0), size, 1, 1, 1, 1};
++            const float size = 28.0f, spacing = 52.0f;
++            const float centerX = std::clamp(320.0f + fx * 0.5f, 140.0f, 500.0f);
++            const float top = std::clamp(240.0f - fy * 0.5f + fr * 0.5f + size + 8.0f, 48.0f, 440.0f);
++            const Boton keys[] = {BMoveUp, BMoveRight, BMoveDown, BMoveLeft};
++            for (unsigned key = 0; key < sequence.count; ++key) {
++                Icono hint{keys[sequence.keys[key]], VNormal, centerX + (float(key) - (sequence.count-1)*0.5f)*spacing,
++                           top, size, 1, 1, 1, 1};
++                hint.guideStep = key + 1; hint.guideCount = sequence.count;
+                 leerCxform(rdram, GPR_U32(ctx, 8), hint.r, hint.g, hint.b, hint.a);
+                 anotar(hint);
+             }
+@@ -745,6 +794,10 @@
+             if (vistos[entrada]++ % 60 == 0)
+                 std::fprintf(stderr, "[gow-iconos] t=%.2f %s (%d) en %.1f,%.1f radio %.1f forma %08X alfa %.2f\n", segundos(), kAccion[b], int(v),
+                              i.x, i.y, i.escala * 0.5f, entrada, i.a);
++        }
++        if (identity >= 0 && namedVariant == VGriego && namedButton == b && i.a > 0.25f) {
++            const uint16_t bits[] = {0x4000,0x2000,0x8000,0x1000,0x0400,0x0800,0x0100,0x0200};
++            if (b <= BR2) i.autoButton = bits[b];
+         }
+         anotar(i);
+         if (g_replacementsReady.load(std::memory_order_relaxed) && g_construyendo.size() < 128)
+@@ -1176,9 +1229,25 @@
+     if (!g_activo) return;
+     cerrarRotulo();
+     std::lock_guard<std::mutex> lock(g_mutex);
++    uint16_t automatic = 0;
++    for (const auto &i : g_construyendo) automatic |= i.autoButton;
++    gow_qte_prompt::publish(automatic);
+     g_publicados.swap(g_construyendo);
+     g_construyendo.clear();
+     g_anterior = {};
++}
++
++void drawGuideMarkers(const Icono &i, float cx, float cy, float dw, float dh, Color tinte)
++{
++        if (i.guideStep) {
++            const float unit = dh / 480.0f;
++            DrawText(TextFormat("%u", i.guideStep), int(cx-3*unit), int(cy-26*unit), std::max(10,int(10*unit)), tinte);
++            if (i.guideStep < i.guideCount) {
++                const float next = cx + 26.0f / 640.0f * dw;
++                DrawLineEx({next-4*unit,cy-4*unit},{next,cy},std::max(1.0f,unit),tinte);
++                DrawLineEx({next,cy},{next-4*unit,cy+4*unit},std::max(1.0f,unit),tinte);
++            }
++        }
+ }
+ 
+ void gowIconosDibujar(float dx, float dy, float dw, float dh)
+@@ -1217,6 +1286,7 @@
+         const Rectangle origen{0.0f, 0.0f, float(t.rt.texture.width), -float(t.rt.texture.height)};
+         const Color tinte{static_cast<unsigned char>(255.0f * i.r), static_cast<unsigned char>(255.0f * i.g),
+                           static_cast<unsigned char>(255.0f * i.b), static_cast<unsigned char>(255.0f * i.a)};
++        drawGuideMarkers(i, cx, cy, dw, dh, tinte);
+         if (i.worldSpace && e == EXbox)
+             drawWorldBadge(t.rt.texture, i, dx, dy, dw, dh, ajuste, tinte);
+         else
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/ps2_pad.h"
+ #include "runtime/gow_qte_hold.h"
++#include "runtime/gow_qte_prompt.h"
+ #include "ps2_host_backend.h"
+ #include <array>
+ #include "runtime/gow_prompt_input.h"
+@@ -562,6 +563,12 @@
+     const bool moving = data[4] < 96 || data[4] > 160 || data[5] < 96 || data[5] > 160 ||
+                         data[6] < 96 || data[6] > 160 || data[7] < 96 || data[7] > 160;
+     btns = repetirMantenidos(btns, moving);
++    static const bool automaticQte = [] {
++        const char *v = std::getenv("GOW_QTE_AUTO");
++        const char *test = std::getenv("GOW_PAD_TEST");
++        return v && std::strcmp(v,"1") == 0 && !(test && std::strcmp(test,"1") == 0);
++    }();
++    if (automaticQte) btns = gow_qte_prompt::apply(btns, true, IsWindowFocused());
+ 
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+@@ -0,0 +1,57 @@
++#pragma once
++// Named Flash gestures only: never infer a requested input from a decorative circle.
++#include <array>
++#include <cmath>
++#include <chrono>
++#include <cstdint>
++#include <cstring>
++#include <mutex>
++namespace gow_qte_prompt {
++struct Sequence { std::array<unsigned,5> keys{}; unsigned count=0; };
++// Indices are up/right/down/left in the displayed game view. The USA full/half
++// arrows share meshes with mirrored/rotated matrices; names alone cannot give screen direction.
++inline Sequence sequence(const char *name,float m0=1,float m1=0,float m4=0,float m5=1) {
++    if (!name) return {};
++    const float det=m0*m5-m1*m4;
++    if (!std::isfinite(det) || std::fabs(det)<0.000001f) return {};
++    if (!std::strcmp(name,"360CW") || !std::strcmp(name,"360CCW"))
++        return det>0 ? Sequence{{0,1,2,3,0},5} : Sequence{{0,3,2,1,0},5};
++    if (std::strcmp(name,"Up180CW") && std::strcmp(name,"Up180CCW") &&
++        std::strcmp(name,"Down180CW") && std::strcmp(name,"Down180CCW")) return {};
++    // Verified shared half-arrow geometry runs +X -> +Y -> -X before its Flash matrix.
++    const float xs[]={m0,m4,-m0}, ys[]={m1,m5,-m1};
++    Sequence result;result.count=3;
++    for(unsigned i=0;i<3;++i) {
++        if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) return {};
++        result.keys[i] = std::fabs(xs[i])>std::fabs(ys[i]) ? (xs[i]>0?1:3) : (ys[i]>0?0:2);
++    }
++    return result;
++}
++struct AutoButtons {
++    uint16_t previous=0;
++    double started=0;
++    uint16_t apply(uint16_t buttons,uint16_t requested,double age,double now,bool enabled,bool focused) {
++        // Only one recognized face/shoulder prompt. Empty/stale/conflicting batches fail closed.
++        if (requested & ~0xf300u) requested = 0;
++        if (!enabled || !focused || age<0 || age>0.25 || !requested || (requested&(requested-1))) {
++            previous=0; return buttons;
++        }
++        if (requested!=previous || now<started) { previous=requested;started=now; }
++        const auto phase=static_cast<uint64_t>((now-started)*1000.0)%120u;
++        return phase<60 ? uint16_t(buttons&~requested) : uint16_t(buttons|requested);
++    }
++};
++inline std::mutex mutex;
++inline uint16_t buttons=0;
++inline std::chrono::steady_clock::time_point published{};
++inline void publish(uint16_t value) {
++    std::lock_guard<std::mutex> lock(mutex);buttons=value;published=std::chrono::steady_clock::now();
++}
++inline uint16_t apply(uint16_t input,bool enabled,bool focused) {
++    static AutoButtons assist;
++    std::lock_guard<std::mutex> lock(mutex);
++    const auto now=std::chrono::steady_clock::now();
++    return assist.apply(input,buttons,std::chrono::duration<double>(now-published).count(),
++                        std::chrono::duration<double>(now.time_since_epoch()).count(),enabled,focused);
++}
++}

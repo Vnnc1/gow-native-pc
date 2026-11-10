@@ -48,7 +48,7 @@ Validation and hardware scope: docs/research/vu1-chain-2026-11-09.md.
          ++ns.selfBlocks, ns.selfPairs += cur.pairs;
      vu.m_state.pc = next & 0x3FFFu;
      if (!n.chain || n.depth >= kMaxDepth)
-@@ -1243,6 +1251,9 @@
+@@ -1243,4 +1251,7 @@
      if (opStatOn) // patch 65: this block runs inside the chain, runNative will not count it
          vu1op::account(n.pc, ns.opCats[n.pc >> 3], sl.tail != nullptr);
      return &sl;
@@ -56,5 +56,3 @@ Validation and hardware scope: docs/research/vu1-chain-2026-11-09.md.
 +    };
 +    return detailed || n.vu->m_native->diag ? execute.template operator()<true>() : execute.template operator()<false>();
  }
- 
- void VU1Interpreter::commitEverythingNow()

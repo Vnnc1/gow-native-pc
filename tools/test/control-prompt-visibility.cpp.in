@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include "runtime/gow_qte_prompt.h"
 struct R5900Context { uint32_t pc=0; uint32_t regs[32]{}; };
 struct PS2Runtime {};
 #define GPR_U32(c,n) ((c)->regs[n])
@@ -27,18 +28,22 @@ struct Rotulo {
 } g_rotulo;
 struct Forma { uint32_t malla=0,rellenos=0,color0=0,color1=0; } form;
 struct Especial { Boton boton; float dx,dy,radio; } special{BL1,0,0,1};
-struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; };
+struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; unsigned guideStep=0,guideCount=0;uint16_t autoButton=0; };
 std::vector<Icono> g_construyendo;
 std::set<uint32_t> g_buttonBackgrounds;
 std::atomic<bool> g_replacementsReady{false};
 std::atomic<float> g_estiramientoVertical{1};
 bool g_activo=true,g_diag=false,named=false,tab=false;
 Boton namedButton=BR2; Variante namedVariant=VNormal;
+struct Symbol { const char *nombre; };
+Symbol kSimbolos[]={{"Up180CCW"},{"360CW"},{"Down180CCW"}};
+int symbolIdentity=0;
+int symbolFromInstance(const uint8_t *,const R5900Context *,uint32_t) {return symbolIdentity;}
 char glyph=0; int originals=0; Boton coloredButton=BCruz;
 constexpr uint32_t kDibujarForma=0x149fa0;
 const char *kAccion[] = {"cross","circle","square","triangle","l1","r1","l2","r2","stick"};
 bool valida(uint32_t a,uint32_t n) { return a>=0x100000 && uint64_t(a)+n<=0x2000000; }
-float leerF(const uint8_t *,uint32_t) { return 0; }
+float leerF(const uint8_t *,uint32_t a) { return (a%64==4) ? 1 : (a%64==16) ? -1 : 0; }
 Forma leerForma(const uint8_t *,uint32_t) { return form; }
 Caja cajaMalla(const uint8_t *,uint32_t,uint32_t) { return {}; }
 void centroYRadio(const Anterior &,float &x,float &y,float &r) { x=0;y=0;r=10; }
@@ -48,7 +53,7 @@ const Especial *especial(uint32_t) { return tab?&special:nullptr; }
 void leerCxform(const uint8_t *,uint32_t,float &,float &,float &,float &) {}
 void anotar(const Icono &i) { if(g_construyendo.size()<128) g_construyendo.push_back(i); }
 bool colorDeBoton(uint32_t c,Boton &b) { b=coloredButton; return c==0xff9999ff; }
-bool botonDeForma(const uint8_t *,uint32_t,Boton &b,Variante &v) { b=namedButton;v=namedVariant;return named; }
+bool botonDeForma(const uint8_t *,uint32_t,Boton &b,Variante &v,int *identity=nullptr) { if(identity)*identity=-1; b=namedButton;v=namedVariant;return named; }
 double segundos() { return 0; }
 void g_dibujarForma(uint8_t *,R5900Context *c,PS2Runtime *) { ++originals;c->pc=c->regs[31]; }
 @DRAW@
@@ -81,13 +86,17 @@ int main() {
     draw();assert(originals==1); // Capacity cannot erase a prompt.
     g_construyendo.clear();form={};namedButton=BStickIzq;namedVariant=VGriego;
     g_buttonBackgrounds.insert(ctx.regs[4]);
-    draw();assert(originals==1 && g_construyendo.size()==4);
-    assert(g_construyendo[0].boton==BMoveUp && g_construyendo[3].boton==BMoveRight);
-    assert(g_construyendo[0].y<g_construyendo[2].y);
-    assert(g_construyendo[1].x<g_construyendo[2].x && g_construyendo[3].x>g_construyendo[2].x);
-    draw();assert(originals==1 && g_construyendo.size()==4); // Composite diagram leaves share one guide.
-    g_construyendo.resize(125);draw();assert(originals==1 && g_construyendo.size()==125);
-    g_construyendo.clear(); // Capacity must not create a partial direction guide.
+    draw();assert(originals==1 && g_construyendo.size()==3);
+    assert(g_construyendo[0].boton==BMoveUp && g_construyendo[1].boton==BMoveLeft && g_construyendo[2].boton==BMoveDown);
+    assert(g_construyendo[0].y==g_construyendo[2].y && g_construyendo[0].x<g_construyendo[1].x);
+    draw();assert(originals==1 && g_construyendo.size()==3);
+    g_construyendo.clear();symbolIdentity=1;draw();assert(g_construyendo.size()==5);
+    assert(g_construyendo[1].boton==BMoveRight && g_construyendo[4].boton==BMoveUp);
+    for(unsigned k=0;k<5;++k) assert(g_construyendo[k].guideStep==k+1 && g_construyendo[k].guideCount==5);
+    g_construyendo.clear();g_construyendo.resize(125);draw();assert(originals==1 && g_construyendo.size()==125);
+    g_construyendo.clear();symbolIdentity=-1;draw();assert(g_construyendo.empty()); // Never guess shared arrow direction.
+    symbolIdentity=2;draw();assert(g_construyendo.size()==3 && g_construyendo[0].boton==BMoveUp);
+    g_construyendo.clear();
     named=false;tab=true;draw();assert(originals==0); // Both pause navigation button drawings.
     g_activo=false;draw();assert(originals==1);
     std::puts("PASS: original button faces, plates, labels and tabs hidden only with a ready replacement");

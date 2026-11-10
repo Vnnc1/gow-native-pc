@@ -72,3 +72,39 @@ still byte-identical after the test. Final manifest: `validated.json`; capture:
 The existing launcher shortcut can be used for manual combat testing. No game
 process is left running. Setup/uninstall executables were not replaced in place;
 this update targets the installed source, launcher/helper and owned game build.
+
+
+## VU1 chain deployment — 2026-11-09
+
+Updated the existing `C:/Users/dzvini/Documents/gow-test` source installation
+from fix-chore (`d0b9784` plus the patch-format correction described below).
+All 458 inventoried source files were compared; 21 required copying. The launcher
+and collector source/binaries were already current and did not require replacement.
+The normal pipeline `fetch,configure,recomp,sync,build` completed successfully,
+applying patches 315 and 316, preserving all earlier changes through 314.
+Release uses the existing owned `C:/gow-build-clang` root; an unmatched local PGO
+profile was preserved and not used. EE synchronization changed/removed zero files.
+The VU core was recompiled and the runner relinked.
+
+The initial fetch failed because the two new patch files had CRLF endings.
+Normalized them to LF and verified application to the reconstructed clean chain;
+no optimization logic changed. Removed two unnecessary trailing context lines
+from patch 316 to keep `git diff --check` clean. Installed VU source text matches
+the candidate previously validated in VU-10.
+
+- Runner SHA-256: `e713a22fcf0e61c7f85944a29b50a402c3f25d9fab78eeaa45b606ff2b913009`.
+- Launcher SHA-256: `953cd958bad725ea70b9a0b52875063484c45f64da21a87b761ce0004960a5ca`.
+- Collector SHA-256: `6cba14495c4946b804ccecc1e786de5dbc5fbc39e4adb1ad4b782a16fa63647c`.
+- Read-only launcher inspection retained PT-BR and selected the owned new runner.
+- A 65-second private-card load smoke passed: first save loaded at the ship altar,
+  gameplay capture inspected, collector completed with child exit code 0.
+- All 11 protected files, save-history inventory and exported registry settings
+  remained unchanged after the build and smoke. Diagnostic preferences were retained.
+- Backup: `C:\Users\dzvini\Documents\gow-test-backup-20261109-224323`.
+- Evidence: `data/deployment-chain-20261109/` (initial failure, build retry,
+  inspection, smoke captures, preservation manifest and `validated.json`).
+
+This deployment smoke is not a new FPS benchmark, complete campaign/audio test,
+or combat QTE acceptance. VU-10 retains the earlier measured performance scope.
+Setup/uninstaller executables were not rebuilt; this updates the existing test
+installation and the runner actually used by its launcher. No commit or release.

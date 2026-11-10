@@ -411,6 +411,10 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
         entorno.remove(QStringLiteral("GOW_QTE_HOLD"));
         entorno.remove(QStringLiteral("GOW_QTE_HOLD_HZ"));
     }
+    if (a.value(QStringLiteral("qteAuto"), false).toBool())
+        entorno.insert(QStringLiteral("GOW_QTE_AUTO"), QStringLiteral("1"));
+    else
+        entorno.remove(QStringLiteral("GOW_QTE_AUTO"));
     const QString stickMode = a.value(QStringLiteral("qteStickMode"), QStringLiteral("off")).toString();
     if (stickMode == QStringLiteral("shake") || stickMode == QStringLiteral("rotate"))
         entorno.insert(QStringLiteral("GOW_QTE_STICK"), stickMode);

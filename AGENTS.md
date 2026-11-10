@@ -213,6 +213,16 @@ and three visible private-card Athn01D pairs; this is not universal 60 FPS.
 Run task replay and `vu1-equivalence.py` after chain edits, including self-loop
 budget/depth exits and diagnostic modes. See `docs/research/vu1-chain-2026-11-09.md`.
 
+Patch `zzz-317` adds numbered mapped-key sequences for six rotation QTE symbols.
+Resolve shared leaves through bounded USA Flash instance ancestry and the final
+arrow matrix; CW/CCW names alone do not determine displayed direction. Preserve
+caller/stack/vtable/movie gates, complete-guide capacity and original arrow art.
+`GOW_QTE_AUTO=1` is default-off automatic pressing of recognized Greek button
+prompts only, not world indicators, ordinary tutorials or stick gestures. Keep
+empty-frame publication, stale/focus/conflict rejection and scripted-pad exclusion.
+`gow_control_prompts` covers production recognition/input; `qte-controls.py` tests
+the actual accessibility toggle. See `docs/research/keyboard-qte-sequences-2026-11-09.md`.
+
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
 written. Keep entry/resume, caller, primary-slot and size/result gates; do not use

@@ -311,7 +311,7 @@ QString SessionDiagnostics::create(const QString &base, const QVariantMap &setti
                                "aspecto", "fxaa", "vsync", "fpsLimite", "filtro", "anisotropico",
                                "fxSinSombras", "fxSinAditivos", "fxSinFiltrado",
                                "jitInline", "finAnticipado", "vuRapida", "usarPacoteTexturas", "idioma", "saltarVideos", "arranqueRapido",
-                               "qteHold", "qteHoldButtons", "qteHoldRate",
+                               "qteHold", "qteHoldButtons", "qteHoldRate", "qteAuto",
                                // Picture / texture / renderer switches: a report must be able to prove the
                                // switch reached the runner before a "no effect" report can be interpreted.
                                "presentacion", "progresivo", "presentacionDirecta", "glMenor", "texPresupuestoMb",
@@ -445,7 +445,7 @@ int SessionDiagnostics::run(const QStringList &args)
          "GOW_VU1_EARLY_FINISH", "GOW_GS_EARLY_FINISH", "GOW_VU1_FAST", "GOW_SYNC_DIAG", "GOW_GS_STAGE_SPIN_US", "PS2X_GS_WORKER_DIAG", "PS2X_GS_PIPELINE",
          "PS2X_GS_WORKER", "PS2X_GS_HW_SCALE", "PS2X_GS_RENDERER", "GOW_SCALER", "GOW_SHARPEN",
          "TOBIICHI_FXAA", "GOW_ANISO", "GOW_FX_NO_SHADOWS", "GOW_FX_NO_ADDITIVE3D", "GOW_FX_NO_TEXTURE_FILTER",
-         "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ",
+         "TOBIICHI_VSYNC", "TOBIICHI_VENTANA_FPS", "GOW_QTE_HOLD", "GOW_QTE_HOLD_HZ", "GOW_QTE_AUTO",
          // Texture, presentation and renderer switches (path-valued GOW_TEX_PCSX2_NAMES is deliberately
          // excluded: reports must not carry a player's own directory names).
          "GOW_TEXTURE_PACK_MB", "GOW_TEXTURE_PACK_STATS", "GOW_GS_HW_TEXDUMP",

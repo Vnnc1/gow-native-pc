@@ -2,6 +2,8 @@
 
 // Launcher texts in Italian (it). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
+    qteAuto: "QTE automatici: pulsanti",
+    qteAutoDesc: "Preme automaticamente il pulsante dei QTE riconosciuti, anche ripetutamente. Disattivato inizialmente; riavvia il gioco dopo le modifiche. Non avvia le mosse finali né automatizza la levetta. Gli altri comandi restano manuali.",
     grupoTexturas: "Texture",
     usarPaquete: "Usa il pacchetto di texture",
     usarPaqueteDesc: "Sostituisce le texture del gioco con PNG dai nomi PCSX2. Disattivato lascia le originali.",

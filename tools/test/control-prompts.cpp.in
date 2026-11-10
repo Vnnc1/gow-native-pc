@@ -2,6 +2,7 @@
 #include "raylib.h"
 #include "runtime/ps2_pad.h"
 #include "runtime/gow_prompt_input.h"
+#include "runtime/gow_qte_prompt.h"
 #include <cassert>
 #include <cstring>
 #include <cstdio>
@@ -41,6 +42,30 @@ void env(const char *k,const char *v) {
 #endif
 }
 int main(int argc,char **argv) {
+    bool autoMode=argc>1 && std::strcmp(argv[1],"auto")==0;
+    if(autoMode) env("GOW_QTE_AUTO","1");
+    using gow_qte_prompt::sequence;
+    assert(sequence("360CCW").keys == (std::array<unsigned,5>{0,1,2,3,0}));
+    assert(sequence("360CW",-1,0,0,1).keys == (std::array<unsigned,5>{0,3,2,1,0}));
+    assert(sequence("Up180CW",0,1,-1,0).keys == (std::array<unsigned,5>{0,3,2}));
+    assert(sequence("Up180CCW",0,1,1,0).keys == (std::array<unsigned,5>{0,1,2}));
+    assert(sequence("Down180CW",0,-1,1,0).keys == (std::array<unsigned,5>{2,1,0}));
+    assert(sequence("Down180CCW",0,-1,-1,0).keys == (std::array<unsigned,5>{2,3,0}));
+    assert(sequence("Up180CW").count==3 && sequence("360CW").count==5);
+    assert(!sequence(nullptr).count && !sequence("WiggleStick").count && !sequence("unknown").count);
+    assert(!sequence("360CW",0,0,0,0).count);
+    gow_qte_prompt::AutoButtons automatic;
+    assert(automatic.apply(0xffff,0x2000,0,1,false,true)==0xffff);
+    assert(automatic.apply(0xffff,0x2000,0,1,true,false)==0xffff);
+    assert(automatic.apply(0xffff,0x2000,.26,1,true,true)==0xffff);
+    assert(automatic.apply(0xffff,0x6000,0,1,true,true)==0xffff);
+    assert(automatic.apply(0xffff,0x8,0,1,true,true)==0xffff); // Never Start/menu.
+    assert(automatic.apply(0xffff,0x2000,0,1,true,true)==0xdfff);
+    assert(automatic.apply(0xffff,0x2000,0,1,true,true)==0xdfff); // Repeated reads are stable.
+    assert(automatic.apply(0xffff,0x2000,0,1.08,true,true)==0xffff);
+    assert(automatic.apply(0xffff,0x2000,0,1.13,true,true)==0xdfff);
+    assert(automatic.apply(0xffff,0x4000,0,1.14,true,true)==0xbfff); // Next requested button starts immediately.
+    assert(automatic.apply(0xffef,0,0,1.15,true,true)==0xffef); // Empty frame preserves manual input.
     Boton found;
     assert(colorDeBoton(0xFF9999FF,found) && found==BCruz);
     assert(colorDeBoton(0xFFCC6400,found) && found==BCirculo);
@@ -56,6 +81,8 @@ int main(int argc,char **argv) {
     anotar(icon); anotar(icon); assert(g_construyendo.size()==1);
     gowIconosFrame(); assert(g_publicados.size()==1 && g_construyendo.empty());
     gowIconosFrame(); assert(g_publicados.empty());
+    icon.autoButton=0x2000;anotar(icon);gowIconosFrame();assert(gow_qte_prompt::buttons==0x2000);
+    gowIconosFrame();assert(gow_qte_prompt::buttons==0);icon.autoButton=0;
     icon.worldSpace=true;anotar(icon);icon.worldSpace=false;anotar(icon);
     assert(g_construyendo.size()==2); // World and Flash prompts at the same position are distinct.
     gowIconosFrame();assert(g_publicados.size()==2);
@@ -123,6 +150,13 @@ int main(int argc,char **argv) {
         assert(rotulo(EPS4,BL3)=="L3" && rotulo(EPS4,BR3)=="L3");
         assert(rotulo(EXbox,BL1)=="RT"); assert(rotulo(EPS4,BL1)=="R2");
         assert(rotulo(ETeclado,BStart)=="-"); assert(rotulo(EXbox,BR1)=="-");
+    }
+    if(autoMode) {
+        keys.fill(false);mouse.fill(false);connected.fill(false);gowPromptPoll();
+        gow_qte_prompt::publish(0x2000);backend.readState(0,0,data,32);
+        assert(!(data[3]&0x20));
+        focused=false;backend.readState(0,0,data,32);assert(data[3]&0x20);
+        focused=true;gow_qte_prompt::publish(0);backend.readState(0,0,data,32);assert(data[3]&0x20);
     }
     std::puts("PASS: active input, four slots, focus, drift, disconnect, production maps and all prompt families");
 }

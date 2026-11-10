@@ -1,4 +1,5 @@
 #include "raylib.h"
+#include "runtime/gow_qte_prompt.h"
 #include "rlgl.h"
 #include <algorithm>
 #include <array>
@@ -25,7 +26,7 @@ std::string rotulo(Estilo,Boton b) {
 @FUNCTIONS@
 int main(int argc,char**argv) {
     assert(argc==2);
-    SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1200,900,"Prompt artwork regression");
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);InitWindow(1200,1100,"Prompt artwork regression");
     assert(IsWindowReady());
     BeginDrawing();ClearBackground(BLACK);EndDrawing();
     std::vector<uint8_t> ram(PS2_RAM_SIZE);
@@ -40,7 +41,7 @@ int main(int argc,char**argv) {
     const Boton buttons[]={BCruz,BCirculo,BCuadrado,BTriangulo,BL1,BL2,BR1,BR2};
     for(auto b:buttons) for(auto v:{VNormal,VGriego}) assert(textura(EXbox,b,v).rt.texture.height==48);
     for(auto b:{BMoveUp,BMoveLeft,BMoveDown,BMoveRight}) assert(textura(ETeclado,b,VNormal).rt.texture.height==48);
-    auto target=LoadRenderTexture(1200,900);assert(target.id);
+    auto target=LoadRenderTexture(1200,1100);assert(target.id);
     BeginDrawing();BeginTextureMode(target);ClearBackground(Color{21,23,22,255});
     DrawText("XBOX  /  GAME-SIZED ARTWORK",40,28,24,Color{204,188,153,255});
     DrawText("HUD / tutorials",40,86,18,GRAY);
@@ -61,12 +62,21 @@ int main(int argc,char**argv) {
         drawWorldBadge(textura(EXbox,BCirculo,VGriego).rt.texture,icon,j*190.0f-540,65,1280,960,1,WHITE);
         DrawText(TextFormat("%.0f deg",angles[j]),65+j*190,650,18,GRAY);
     }
-    DrawText("KEYBOARD DIRECTION GUIDE / WASD",40,710,20,Color{204,188,153,255});
-    const Boton movement[]={BMoveUp,BMoveLeft,BMoveDown,BMoveRight};
-    for(int k=0;k<4;++k) {
-        const auto&t=textura(ETeclado,movement[k],VNormal);
-        float x=180+(k==1?-50:k==3?50:0),y=755+(k?50:0);
-        DrawTexturePro(t.rt.texture,{0,0,48,-48},{x,y,48,48},{0,0},0,WHITE);
+    DrawText("KEYBOARD QTE / FOLLOW THE NUMBERED ARROWS",40,710,20,Color{204,188,153,255});
+    const char *names[]={"Up180CW","Up180CCW","Down180CW","Down180CCW","360CW","360CCW"};
+    const float matrices[][4]={{0,1,-1,0},{0,1,1,0},{0,-1,1,0},{0,-1,-1,0},{-1,0,0,1},{1,0,0,1}};
+    const Boton movements[]={BMoveUp,BMoveRight,BMoveDown,BMoveLeft};
+    for(int row=0;row<6;++row) {
+        const auto *m=matrices[row];auto sequence=gow_qte_prompt::sequence(names[row],m[0],m[1],m[2],m[3]);
+        const float x0=60+(row%2)*590,y=800+(row/2)*105;
+        DrawText(names[row],int(x0),int(y-48),16,GRAY);
+        for(unsigned k=0;k<sequence.count;++k) {
+            const auto&t=textura(ETeclado,movements[sequence.keys[k]],VNormal);
+            const float x=x0+k*70;
+            DrawTexturePro(t.rt.texture,{0,0,48,-48},{x,y,38,38},{0,0},0,WHITE);
+            Icono icon{};icon.guideStep=k+1;icon.guideCount=sequence.count;
+            drawGuideMarkers(icon,x+19,y+19,640*70.0f/52.0f,480*38.0f/28.0f,Color{204,188,153,255});
+        }
     }
     EndTextureMode();EndDrawing();
     Image result=LoadImageFromTexture(target.texture);ImageFlipVertical(&result);

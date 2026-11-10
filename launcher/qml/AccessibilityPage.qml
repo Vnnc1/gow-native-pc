@@ -42,6 +42,14 @@ ScrollView {
             }
         }
         Fila {
+            titulo: Tema.t("qteAuto")
+            descripcion: Tema.t("qteAutoDesc")
+            Interruptor {
+                checked: root.settings.qteAuto
+                onToggled: root.settings.qteAuto = checked
+            }
+        }
+        Fila {
             // gow-native-pc: accessibility — holding a button instead of mashing it in the minigames (GOW_QTE_HOLD)
             titulo: Tema.t("qteHold")
             descripcion: Tema.t("qteHoldDesc")

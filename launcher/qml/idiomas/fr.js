@@ -2,6 +2,8 @@
 
 // Launcher texts in French (fr). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
+    qteAuto: "QTE automatiques : boutons",
+    qteAutoDesc: "Appuie automatiquement sur le bouton des QTE reconnus, y compris de façon répétée. Désactivé par défaut ; redémarrez le jeu après modification. Ne lance pas les coups de grâce et ne contrôle pas le stick. Les autres invites restent manuelles.",
     grupoTexturas: "Textures",
     usarPaquete: "Activer le pack de textures",
     usarPaqueteDesc: "Remplace les textures du jeu par des PNG aux noms PCSX2. Désactivé, les textures d'origine restent.",

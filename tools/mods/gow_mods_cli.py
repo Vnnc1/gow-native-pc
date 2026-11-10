@@ -87,6 +87,7 @@ ENV_ALLOWED: dict[str, str] = {
     "GOW_ESPERA_EE": "behaviour",
     "GOW_QTE_HOLD": "behaviour",
     "GOW_QTE_STICK": "behaviour",
+    "GOW_QTE_AUTO": "behaviour",
     "GOW_EE_FPU_NEAREST": "behaviour",
     "GOW_AUDIO": "behaviour",
     "GOW_AUDIO_DEVICE": "behaviour",
