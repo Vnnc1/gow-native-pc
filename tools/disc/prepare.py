@@ -38,6 +38,7 @@ import discfs  # noqa: E402
 import identify  # noqa: E402
 import chd  # noqa: E402
 import profile as profiles  # noqa: E402
+import save_slots  # noqa: E402
 
 SECTOR = discfs.SECTOR
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -302,6 +303,10 @@ def main():
             junction(os.path.join(folder, 'mc0'), card)
             quality = 'full'
             say(f'  {f["label"]}: full version on the original disc ({runs} executable data changes)')
+        try:
+            save_slots.prepare_assets(folder, prof, f['language'])
+        except (OSError, ValueError, KeyError) as error:
+            say(f'  Save previews unavailable: {error}')
         entry = {'language': f['language'], 'label': f['label'], 'edition': f['edition'], 'quality': quality,
                  'elf': os.path.abspath(os.path.join(folder, elf_name))}
         rank = {'original': 3, 'full': 2, 'standalone': 1}

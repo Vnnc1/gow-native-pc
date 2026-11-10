@@ -1293,6 +1293,7 @@ ApplicationWindow {
             carpeta: ventana.carpetaPartidas
             elf: ventana.selectedGame ? ventana.selectedGame.elf : ""
             onAviso: (t) => ventana.aviso(t)
+            onIniciarSlot: ventana.jugar()
         }
     }
 

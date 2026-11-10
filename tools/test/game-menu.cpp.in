@@ -49,6 +49,17 @@ int main(int argc,char**argv){
     typed=KEY_T;gowTrucosMenuEntrada(false);assert(boundCode==KEY_T&&g_menu.capture==-1);
     cambiar(PAudio,0,-1);assert(gow_menu_live::volume.load()==95);cambiar(PAudio,1,0);assert(gow_menu_live::mute.load());
     cambiar(PTrucos,kNumTrucos,0);assert(gow_menu_live::autoQte().load());
+    if(!gow_native_load::slots().empty()) {
+        gow_native_load::supported.store(true);
+        abrir(PSave);assert(!nativeRows.empty());
+        cambiar(PSave,0,0);assert(nativeConfirm==0);
+        key(KEY_ESCAPE);assert(nativeConfirm==-1&&g_menuAbierto.load());
+        cambiar(PSave,0,0);key(KEY_ENTER);
+        assert(!g_menuAbierto.load()&&!gow_menu_live::pauseRequested.load());
+        assert(gow_native_load::request.load()==nativeRows[0].slot+1);
+        assert(!gow_native_load::queue(nativeRows[0].slot));
+        gow_native_load::request.store(0);gow_native_load::status.store(0);
+    }
     Texture2D background=LoadTexture(argv[1]);
     for(int p=-1;p<6;++p){
         abrir(p);g_menu.pestana=p<0?0:p;g_menu.bindingStatus.clear();

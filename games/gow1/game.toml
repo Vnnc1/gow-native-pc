@@ -42,6 +42,13 @@ widescreen_placeholders = [
 [build]
 unity_batch = 16
 
+[saves]
+directory = "BASCUS-97399GodOfWar"
+preview_wad = "R_SAVEPT.WAD"
+names_wad = "R_PERM.WAD"
+names_resource = "msgs_en.txt"
+location_message_base = 600
+
 [optimize]
 # scripted run that records the VU1 microcode and IOP modules the game uses (Tobiichi's recording script)
 seconds = 240

@@ -1,4 +1,4 @@
-# Saves: automatic altar backups and launcher history
+# Saves: individual slots and automatic backup history
 
 Goal: play forward to an area once, keep that progress, and later start tests from there again (for example, the
 frame rate after the ship) without replaying the game.
@@ -8,12 +8,30 @@ frame rate after the ship) without replaying the game.
 - **No savestates.** This is a static recompilation: the guest threads run as host code on host stacks, so the state
   of the game at an exact moment (CPU registers inside recompiled functions, host stacks, GS/VU1/IOP worker threads)
   cannot be written out and loaded again. An emulator can do this; this runtime cannot.
-- **A save is a copy of the memory card.** The game itself saves at its save altars into the memory card image
+- **An individual save is an altar slot; a backup is a copy of the whole card.** The game itself saves at its save altars into the memory card image
   (`Mcd001.ps2`, PCSX2 `.ps2` format, 8 MB raw, 528-byte pages). A copy of that file holds every save slot the game
   had written when the copy was made. Loading it means loading the game's own save from the game's menu.
 
-For the USA edition and compatible translations, the workflow is: **save at an altar → automatic backup →
-later restore a copy with the game closed → load from the game's menu.** Existing builds need an updated runner.
+For the USA edition and compatible translations, **save at an altar → automatic backup → select an individual
+slot in the launcher or F1 menu**. Loading a slot works during gameplay after confirming that unsaved progress
+will be discarded. Restoring an older whole-card backup still requires the game closed. Existing builds need
+an updated runner and the preview cache produced by the normal `discs`/`sync` stages.
+
+## Individual slots (runtime patch zzz-323)
+
+Both interfaces show the occupied slots of the active card, with the location name, original altar thumbnail,
+local save date/time and play time. Names and images come from the selected disc; no game artwork is distributed
+with the project. The four index records identify the current slots: a fifth `dataN.bin` file may be obsolete.
+
+Choose **Load** and confirm. The game uses its normal return-to-menu and load routines to unload the current
+area and read the selected slot. A brief native loading screen is expected. This does not write or replace the
+memory card, does not create a savestate, and does not save progress made since the last altar. Starting a slot
+from a closed game launches the selected edition and selects that slot when its native menu is ready.
+
+The launcher uses the same bounded C++ card reader as the menu. It reads 8 MiB data-only and 8.25 MiB cards with
+spare bytes. Unknown/corrupt indexes are not presented as load targets. PS2 card dates use the RTC's Japan time;
+the interfaces convert them to the host's local timezone. Regional Europe/Japan load hooks remain unvalidated
+and are not installed by this USA patch.
 
 ## Automatic history (runtime patch zzz-309)
 
@@ -46,6 +64,7 @@ later restore a copy with the game closed → load from the game's menu.** Exist
 ## In the launcher: Saves tab
 
 - `launcher/qml/PaginaPartidas.qml`, logic in `Lanzador` (`launcher/src/lanzador.cpp`):
+  - `partidasIndividuales` / `seleccionarPartida`: active-card slots and native loading requests;
   - `partidas`: the list, newest first;
   - `guardarPartida`: a copy with the game closed;
   - `importarPartida`: a `.ps2` card from elsewhere; only files of exactly 8,650,752 bytes are accepted;
@@ -65,6 +84,10 @@ later restore a copy with the game closed → load from the game's menu.** Exist
 code with observing guest/render fixtures. `tools/test/save-history-ui.py` exercises the real Saves QML page.
 `tools/test/altar-save-smoke.py` exercises save/load/cancel/destination-failure with a private card and normal
 collector shutdown. See [the implementation and measured results](research/altar-save-backups-2026-11-09.md).
+
+`tools/test/save-slots.py --compiler <clang++>` checks the production card reader and thumbnail decoder;
+`tools/test/native-load-tests.py` checks the production guest hooks; `native-save-smoke.py` exercises startup
+selection and repeated in-game loads with a private card. See [individual slot validation](research/native-save-slots-2026-11-10.md).
 
 - **Earlier manual snapshot tests:** the functions above `drawSavesTab` built on their own with a fake 8 MB card. They were tested
   for:

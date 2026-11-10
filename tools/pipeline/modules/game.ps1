@@ -231,6 +231,7 @@ if ($Stages -contains 'recomp') {
 if ($Stages -contains 'sync') {
     Step 'generated code into the runner'
     Native $python @('-I', (Join-Path $root 'tools/pipeline/recompile.py'), 'sync', '--root', $root, '--game', $Game) 'generated code synchronization'
+    Native $python @('-I', (Join-Path $root 'tools/disc/save_slots.py'), '--prepare-data', (Join-Path $root "data/$Game"), '--game', $Game) 'native save previews'
 }
 
 # --- build ----------------------------------------------------------------------------------------------------------

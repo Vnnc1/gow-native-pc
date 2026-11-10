@@ -1,4 +1,5 @@
 #include "menu_settings.h"
+#include "native_save_slots.h"
 #include <QUuid>
 #include "lanzador.h"
 #include "regional_installations.h"
@@ -649,6 +650,10 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
             entorno.insert(it.key(), it.value().toString());
     }
 
+    entorno.remove("GOW_SAVE_ASSETS");
+    const QString saveAssets = QFileInfo(elf).absolutePath() + "/.gow-save-slots";
+    if (regional.isEmpty() && QFileInfo::exists(saveAssets + "/directory"))
+        entorno.insert("GOW_SAVE_ASSETS", saveAssets);
     entorno.remove("GOW_MENU_SETTINGS"); // Per-session bridge must never survive in the reusable boot file.
     // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
     QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
@@ -687,6 +692,18 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
     const QString menuDirectory = carpetaDatos() + "/menu-settings/" + QDateTime::currentDateTimeUtc().toString("yyyyMMddHHmmsszzz") + "-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (QDir().mkpath(menuDirectory)) entorno.insert("GOW_MENU_SETTINGS", menuDirectory);
     else entorno.remove("GOW_MENU_SETTINGS");
+    m_menuDirectory = entorno.value("GOW_MENU_SETTINGS");
+    if (m_initialSlot >= 0 && m_gameElf != QFileInfo(elf).canonicalFilePath()) m_initialSlot = -1;
+    m_gameElf = QFileInfo(elf).canonicalFilePath();
+    if (m_initialSlot >= 0) {
+        const int slot = std::exchange(m_initialSlot, -1);
+        QSaveFile request(m_menuDirectory + "/load.request");
+        const QByteArray bytes = QByteArray::number(slot) + '\n';
+        if (m_menuDirectory.isEmpty() || !request.open(QIODevice::WriteOnly) || request.write(bytes) != bytes.size() || !request.commit()) {
+            emit error(QStringLiteral("diagnosticsError"), QStringLiteral("Cannot queue the selected save slot."));
+            return false;
+        }
+    }
     m_proceso->setProcessEnvironment(entorno);
     m_proceso->setWorkingDirectory(carpetaDatos());
     m_proceso->setProcessChannelMode(QProcess::MergedChannels);
@@ -816,6 +833,44 @@ QString Lanzador::nuevaPartida(const QString &carpeta, const QByteArray &tarjeta
         return {};
     }
     return nombre;
+}
+
+QVariantList Lanzador::partidasIndividuales(const QString &elf) const
+{
+    QVariantList result;
+    const QString assets = QFileInfo(elf).absolutePath() + "/.gow-save-slots";
+    QFile directory(assets + "/directory");
+    if (directory.size() > 32 || !directory.open(QIODevice::ReadOnly)) return result;
+    const auto name = directory.readAll().trimmed();
+    if (name.isEmpty() || name.contains('/') || name.contains('\\')) return result;
+    try {
+        const auto nativeEntries = gow_native_saves::read(std::filesystem::u8path(rutaTarjeta(elf).toUtf8().toStdString()), name.toStdString());
+        for (const auto &slot : nativeEntries) {
+            QFile label(assets + "/" + QString::number(slot.location) + ".name");
+            QString title;
+            if (label.size() <= 512 && label.open(QIODevice::ReadOnly)) title = QString::fromUtf8(label.readAll()).trimmed();
+            if (title.isEmpty()) title = QStringLiteral("Slot %1 · %2").arg(slot.slot + 1).arg(QString::fromStdString(slot.zone));
+            const QString preview = assets + "/" + QString::number(slot.location) + ".png";
+            result.append(QVariantMap{{"slot", slot.slot}, {"file", slot.file}, {"nombre", title},
+                {"fecha", QString::fromStdString(gow_native_saves::localTime(slot.time))},
+                {"segundos", slot.seconds}, {"imagen", QFileInfo::exists(preview) ? QUrl::fromLocalFile(preview) : QUrl()}});
+        }
+    } catch (const std::exception &) { /* A partial index is never offered as a load target. */ }
+    return result;
+}
+
+bool Lanzador::seleccionarPartida(const QString &elf, int slot)
+{
+    if (slot < 0 || slot > 3) return false;
+    bool found = false;
+    for (const auto &entry : partidasIndividuales(elf)) found |= entry.toMap().value("slot").toInt() == slot;
+    if (!found) return false;
+    const QString canonical = QFileInfo(elf).canonicalFilePath();
+    if (!jugando()) { m_gameElf = canonical; m_initialSlot = slot; return true; }
+    if (canonical != m_gameElf || m_menuDirectory.isEmpty() || QFileInfo::exists(m_menuDirectory + "/load.request")) return false;
+    QSaveFile request(m_menuDirectory + "/load.request");
+    const QByteArray bytes = QByteArray::number(slot) + '\n';
+    return request.open(QIODevice::WriteOnly) && request.write(bytes) == bytes.size() && request.commit();
 }
 
 QVariantList Lanzador::partidas(const QString &carpeta) const

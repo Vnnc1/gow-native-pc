@@ -23,7 +23,50 @@ diziam v0.0.x. Agora são v0.1.0, v0.2.0, v0.3.0 e v0.3.1, com os mesmos arquivo
 cima da instalação atual**; daí em diante as atualizações automáticas voltam a funcionar. A compilação do jogo, os
 discos e os saves são mantidos.
 
-## [Não lançado]
+## [v0.6.0-rc.1] — pré-release para testes
+
+Inclui fix-chore e mudanças da main desde v0.5.0. A v0.5.0 continua estável; esta versão é opcional para testes.
+
+### Recursos para o jogador
+- Setup Windows permite escolher a pasta da build em instalações novas e atualizações. Mudar o local exige
+  recompilar; discos, saves, configurações e build anterior são preservados. Sem perfil PGO pré-treinado compatível no pacote.
+- Menu no jogo reformulado, navegável por teclado, mouse e controle, com pausa, gráficos/áudio ao vivo,
+  remapeamento, acessibilidade, cheats e packs ativos. Ajustes suportados persistem e sincronizam com o launcher.
+  Aviso inicial das acessibilidades ativas, identidade RatOne e abertura com animação de spray.
+- Mods e texture packs reunidos no launcher. Os packs são fornecidos pelo jogador.
+- Backup automático após salvar com sucesso nos altares USA, histórico e notificação. Slots do cartão ativo
+  exibem local, miniatura original e horário local no launcher e menu. É possível carregar pela rotina nativa
+  durante a partida após confirmação. Não são savestates; restaurar histórico do cartão completo exige jogo fechado.
+  Veja [como os saves funcionam](docs/saves.md).
+- Ícones seguem último dispositivo e remapeamentos, com estilos Xbox, PlayStation e teclado/mouse. Botões
+  originais reconhecidos são ocultados; indicadores sobre inimigos preservam a animação do jogo. QTEs de analógico
+  mostram sequência das direções mapeadas no teclado. Assistências opcionais de QTE automático e botão segurado.
+
+### Correções e desempenho
+- Corrigido CTRL deformado no estilo espartano: arte grega compartilhada só é substituída dentro da instância
+  validada do botão R2. Reproduzido e validado em cópia privada do slot 3. Cabeçalhos GS/VU1 corrigidos para Clang
+  nativo Linux; propriedades do setup Windows passam a usar a mesma versão da definição de build.
+- Corrigido loop de fim de arquivo do vídeo USA em Cliffs of Madness (#30), preservando os últimos quadros;
+  ajustes de final de vídeo, fase do áudio após reset e diagnóstico limitado de áudio.
+- Corrigido encerramento com janela minimizada e resumo do coletor que ficava running após sair. Métricas de
+  filas/apresentação ajudam investigar engasgos; não significam que todo problema do issue #31 foi resolvido.
+- Gerador VU1 lê imagens de microcódigo uma por vez, reduzindo memória local com saída gerada idêntica.
+- Rotina chain do VU1 separa instrumentação do caminho normal, mantendo a semântica. Nas três comparações locais
+  Athn01D: medianas de 59,766 → 59,966 FPS convidados e p99 de 19,490 → 18,537 ms. Ganho isolado de tarefas de 7,66%
+  não equivale a esse ganho em FPS. Veja [método e limites](docs/research/vu1-chain-2026-11-09.md).
+- Apresentação compartilhada evita uma espera de mutex. Correções de shaders, limites de texturas, posse do
+  buffer de vértices, primitivas e ordem de quadros acompanham a integração do renderer abaixo.
+
+### Distribuição e limites
+- Candidatas setup Windows e Linux x86-64 `.run`/arquivo. Linux usa Qt/QML do sistema e exige ambiente compatível;
+  não é um pacote universal para Steam Deck. Veja [guia Linux](docs/linux.md).
+- Nenhuma ISO, arquivo extraído do jogo, cartão de memória ou código recompilado do jogo acompanha o pacote.
+- Campanha completa, combate prolongado em todos os PCs, controles Sony físicos e oclusão dos ícones 3D continuam
+  pendentes. A fala ausente da Afrodite não foi comprovada; validar assets/mixer não comprova corrigir essa cena.
+- 60 FPS estáveis em todo PC é uma meta, não garantia. Opções experimentais não são ganhos universais.
+  Validações da candidata: [registro de testes](docs/research/release-0.6.0-candidate.md).
+
+### Integração do renderer desde v0.5.0
 
 - **PR 26 integrada ao fix-chore.** O trabalho de renderização do colaborador entrou: um anel de vértices
   persistente, agrupamento de primitivas, reuso de textura por hash do conteúdo, um depth buffer por ZBP, cache do

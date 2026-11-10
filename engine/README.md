@@ -119,3 +119,9 @@
 | zzz-205-experimental-logic-rate | fix-chore 73: opt-in `GOW_EXPERIMENTAL_LOGIC_FPS=120\|240`. | fix-chore 73 |
 | zzz-261-shared-present-no-host-wait | fix-chore 61: nonblocking host acquisition of the shared presentation slot. | fix-chore 61 |
 | zzz-300-pr26-review-fixes | Default-path fixes found while integrating: 4-segment fenced vertex ring (no full GPU drain per wrap), Op::Run zero tail from a real array + no `base` wrap, Op::Vertices guard sized for compact records (every compact single primitive was dropped), `glBufferStorage` below 4.4 only with `ARB_buffer_storage`, `PS2X_GS_RUN` read per GS. | PR 26 integration |
+
+## 0.6.0 pre-release follow-ups
+
+- zzz-323-native-save-slots: bounded read-only native slot reader, host request queue and USA native loader hooks. See docs/research/native-save-slots-2026-11-10.md.
+- zzz-324-linux-cost-intrinsics: compiler-specific x86 headers for the GS/VU1 cycle counters; native Linux runtime compilation verified.
+- zzz-325-r2-prompt-instance: require the current Greek R2 button instance, preserving shared animation leaves in the Spartan-style HUD. See docs/research/spartan-r2-prompt-2026-11-10.md.

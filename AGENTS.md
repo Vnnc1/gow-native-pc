@@ -95,6 +95,9 @@ See `docs/research/regional-port-2026-11-02.md` for evidence and limitations.
 
 ## Experimental Linux integration
 
+Patch `zzz-324` selects MSVC `intrin.h` versus Clang/GCC `x86intrin.h` for GS/VU1 cycle counters.
+Keep x86 architecture gates and the non-x86 fallback; verify the native Linux runtime library after header changes.
+
 `bash build.sh` runs `tools/pipeline/linux.py` with Python 3.12+, native Clang,
 system/SDK Qt 6.5+ and SDL2. It shares the profile, disc preparation, transactional
 recompiler and ordinal runtime patch chain, holds `data/pipeline.lock` with flock,
@@ -161,6 +164,11 @@ patch 02. Launcher changes live in `launcher/` sources, never as patch files. De
 laptop A/B plan: [docs/research/pr26-integration.md](docs/research/pr26-integration.md).
 
 ## Player diagnostic reports
+
+Patch `zzz-325` requires a verified current `R2ButtonPress` instance for Greek R2 replacement. The symbol's
+leaf meshes also appear outside that instance; replacing by leaf identity corrupts the Spartan-style HUD.
+Preserve those original draws and the existing readiness/capacity gates. `control-prompts.py` covers the
+regression; private slot-3 captures and limits are in `docs/research/spartan-r2-prompt-2026-11-10.md`.
 
 Patch `zzz-318` adds the RatOne startup and six-category in-game dock. The profile's
 `runtime.branding_image` supplies `GOW_BRAND_IMAGE` at Windows/Linux configure time;
@@ -327,6 +335,17 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 `verify` includes frame-metric tests. Instructions and metric semantics: `docs/reporting-bugs.md`.
 
 ## Contracts (do not break)
+
+- **Individual saves (zzz-323)**: the launcher and in-game menu read the four valid 16-byte records of the USA
+  68-byte card index, not every dataN.bin file. `launcher/src/native_save_slots.h` must match the runtime copy
+  shipped by the patch. `tools/disc/save_slots.py` derives edition-specific names/previews from disc resources;
+  `discs` and `sync` populate `.gow-save-slots`. Never package those copyrighted caches or player cards.
+  Loading uses a session-local request and the EE's native teardown/frontend/load path, with loader state 8
+  (not a transient UI dialog field) as the slot-selection gate. Validate card 0 and the native index before
+  choosing; preserve original resume/error paths. Never overwrite the IOP's active card. Whole-card history
+  restoration still requires a closed game; regional hooks remain unvalidated. Run `save-slots.py`,
+  `native-load-tests.py`, `game-menu.py`, `save-history-ui.py` and the private-card `native-save-smoke.py`.
+  Evidence: `docs/research/native-save-slots-2026-11-10.md`.
 
 - **Pipeline output protocol** (parsed by `installer_backend.cpp`): `=== <step> ===`, `@@progress <done> <all>`,
   `@@status <text>`, anything else is log. Errors: a final `ERROR: <message>` line and exit code 1.

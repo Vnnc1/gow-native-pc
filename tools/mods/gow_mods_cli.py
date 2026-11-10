@@ -127,6 +127,7 @@ ENV_ALLOWED: dict[str, str] = {
 # Manager-owned: staging paths, the test harness and diagnostics that write files.  A mod must not touch them, or
 # activation would stop being reversible and a package could redirect the game's own evidence.
 ENV_RESERVED = {
+    "GOW_SAVE_ASSETS",
     "GOW_MENU_SETTINGS",
     "GOW_ACTIVE_MODS",
     "GOW_MOD_VFS_TABLE",

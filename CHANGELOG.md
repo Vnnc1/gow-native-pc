@@ -21,7 +21,50 @@ said v0.0.x. They are now v0.1.0, v0.2.0, v0.3.0 and v0.3.1, with the same files
 releases (it reports 1.0.0 to 3.0.1) does not see 0.x releases as newer: **install v0.4.0 once from its setup over the
 existing installation**; automatic updates work again from there on. Your game build, discs and saves are kept.
 
-## [Unreleased]
+## [v0.6.0-rc.1] — pre-release for testing
+
+Includes fix-chore and the main changes since v0.5.0. v0.5.0 remains the stable release; this is an opt-in test build.
+
+### Player features
+- Windows setup lets new and existing installations choose the game build directory. Relocation requires a rebuild;
+  existing discs, saves, settings and the old build are retained. No matching pre-trained PGO profile is bundled.
+- Redesigned in-game menu with keyboard, mouse and controller navigation, gameplay pause, live graphics/audio,
+  control bindings, accessibility, cheats and active texture-pack listing. Supported settings persist and synchronize
+  with the launcher. Startup notice lists active accessibility options; RatOne branding and spray intro are included.
+- Mods and texture-pack management share the launcher interface. Packs remain user supplied.
+- Automatic backups after successful USA altar saves, with history and in-game notification. Individual active-card
+  slots show native location names, thumbnails and local timestamps in the launcher and menu. Select a slot to load
+  via the game's normal loader, including during gameplay after confirmation. These are not savestates; full-card
+  historical restore still requires closing the game. See [save behavior](docs/saves.md).
+- Button prompts follow the last active device and remappings, with Xbox, PlayStation and keyboard/mouse styles.
+  Recognized original buttons are suppressed; enemy world badges retain the game's animation. Keyboard stick QTE
+  guides show mapped direction sequences. Optional automatic button QTEs and held-button assistance are available.
+
+### Fixes and performance
+- Fixed distorted Spartan-style CTRL: shared Greek R2 artwork is replaced only inside a verified live button
+  instance. Reproduced and validated on a private copy of slot 3. Linux GS/VU1 diagnostic headers now compile
+  with native Clang; Windows setup file properties use the same version as its build definition.
+- Fixed the USA movie drained-EOF loop reported at Cliffs of Madness (#30), retaining decoded final pictures;
+  corrected movie-tail handling, audio reset phase and bounded audio diagnostics.
+- Fixed minimized-window shutdown and collector summaries left running after child exit. Added queue/presentation
+  attribution; this does not claim to eliminate every stutter from issue #31.
+- VU1 generator processes microcode images one at a time, reducing local memory pressure with identical generated output.
+- Default VU1 chain specialization removes diagnostic checks from ordinary execution while retaining semantics.
+  Local Athn01D three-pair medians: 59.766 → 59.966 guest FPS, p99 19.490 → 18.537 ms. Isolated task time improved
+  7.66%; that is not an FPS percentage. See [method and limitations](docs/research/vu1-chain-2026-11-09.md).
+- Shared presentation acquisition avoids one publisher mutex wait. Shader failure handling, texture bounds,
+  ring ownership, primitive submission and frame-order fixes accompany the renderer integration below.
+
+### Distribution and remaining limits
+- Windows setup and experimental Linux x86-64 `.run`/archive candidates. Linux uses host Qt/QML libraries,
+  requires a compatible environment and is not a universally portable Steam Deck build. See [Linux guide](docs/linux.md).
+- No ISO, extracted game assets, memory cards or precompiled copyrighted game code is distributed.
+- Full campaign, sustained combat on all hardware, physical Sony controllers and world-badge depth occlusion remain
+  acceptance gaps. Aphrodite's reported missing dialogue is unproven; asset/mixer checks do not establish a fix.
+- Stable 60 FPS on all PCs is a target, not a release guarantee. Experimental logic-rate and renderer switches are
+  not universal performance improvements. Candidate validation is recorded in [the release checklist](docs/research/release-0.6.0-candidate.md).
+
+### Renderer integration carried since v0.5.0
 
 - **PR 26 integrated onto fix-chore.** The contributor's renderer work is in: one persistent vertex ring, primitive
   runs, texture-reuse by content hash, one depth buffer per ZBP, cached GL prelude, warm CLUT shader, frame-pacing

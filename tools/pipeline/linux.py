@@ -173,6 +173,7 @@ class Pipeline:
         elif stage == 'sync':
             step('generated code into the runner')
             self.python('tools/pipeline/recompile.py', 'sync', '--root', ROOT, '--game', self.args.game)
+            self.python('tools/disc/save_slots.py', '--prepare-data', self.data, '--game', self.args.game)
         elif stage in ('build', 'native'):
             step('build the game (Linux, Clang)' if stage == 'build' else 'native (Linux recorded VU1)')
             self.configure()

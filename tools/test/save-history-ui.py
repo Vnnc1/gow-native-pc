@@ -25,6 +25,7 @@ Item {
         signal jugandoCambiado()
         property var entries: []
         function partidas(folder) { calls++; return entries }
+        function partidasIndividuales(elf) { return [{slot:2,file:2,nombre:"Templo do Oráculo",fecha:"04/11/2026 07:54:30",segundos:7041,imagen:""}] }
     }
     UI.PaginaPartidas { id: page; anchors.fill: parent; carpeta: "/private/history"; elf: "/private/ELF" }
     function check(value, message) { if (!value) throw Error(message) }
@@ -38,6 +39,7 @@ Item {
             try {
                 if (phase === 0) {
                     check(page.lista.length === 1 && page.lista[0].origen === "auto", "new backup not refreshed during play")
+                    check(page.slots.length === 1 && page.slots[0].slot === 2 && page.slots[0].nombre === "Templo do Oráculo", "native slots not refreshed")
                     check(UI.Tema.t("partidaOrigen_auto").indexOf("Backup automático") >= 0, "missing automatic label")
                     page.visible = false; pausedCalls = calls; phase++
                 } else if (phase === 1) {

@@ -36,7 +36,7 @@ std::atomic<float> g_estiramientoVertical{1};
 bool g_activo=true,g_diag=false,named=false,tab=false;
 Boton namedButton=BR2; Variante namedVariant=VNormal;
 struct Symbol { const char *nombre; };
-Symbol kSimbolos[]={{"Up180CCW"},{"360CW"},{"Down180CCW"}};
+Symbol kSimbolos[]={{"Up180CCW"},{"360CW"},{"Down180CCW"},{"R2ButtonPress"}};
 int symbolIdentity=0;
 int symbolFromInstance(const uint8_t *,const R5900Context *,uint32_t) {return symbolIdentity;}
 char glyph=0; int originals=0; Boton coloredButton=BCruz;
@@ -97,7 +97,12 @@ int main() {
     g_construyendo.clear();symbolIdentity=-1;draw();assert(g_construyendo.empty()); // Never guess shared arrow direction.
     symbolIdentity=2;draw();assert(g_construyendo.size()==3 && g_construyendo[0].boton==BMoveUp);
     g_construyendo.clear();
-    named=false;tab=true;draw();assert(originals==0); // Both pause navigation button drawings.
+    // Spartan HUD reuses Greek R2 leaves outside a button instance: retain them, never publish an R2.
+    g_buttonBackgrounds.clear();g_anterior={};g_rotulo={};form={};named=true;namedButton=BR2;namedVariant=VGriego;
+    symbolIdentity=-1;draw();assert(originals==1 && g_construyendo.empty());
+    symbolIdentity=0;draw();assert(originals==1 && g_construyendo.empty());
+    symbolIdentity=3;draw();assert(originals==0 && g_construyendo.size()==1 && g_construyendo[0].boton==BR2);
+    g_construyendo.clear();named=false;tab=true;draw();assert(originals==0); // Both pause navigation button drawings.
     g_activo=false;draw();assert(originals==1);
     std::puts("PASS: original button faces, plates, labels and tabs hidden only with a ready replacement");
 }

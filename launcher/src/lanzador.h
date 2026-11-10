@@ -67,6 +67,8 @@ public:
     Q_INVOKABLE QString rutaTarjeta(const QString &elf) const;
     // [{nombre, etiqueta, fecha, origen, ruta}] (folder name, label, time, source: F1/launcher/import/backup), newest first
     Q_INVOKABLE QVariantList partidas(const QString &carpeta) const;
+    Q_INVOKABLE QVariantList partidasIndividuales(const QString &elf) const;
+    Q_INVOKABLE bool seleccionarPartida(const QString &elf, int slot);
     // copy the current card into a new save; returns the folder name, empty on failure (no card yet)
     Q_INVOKABLE QString guardarPartida(const QString &carpeta, const QString &elf, const QString &etiqueta) const;
     // a .ps2 image (8 MB raw card, PCSX2 format) from elsewhere as a new save; returns the folder name or empty
@@ -92,4 +94,6 @@ private:
     QProcess *m_proceso = nullptr;
     QElapsedTimer m_reloj;
     QString m_session;
+    QString m_menuDirectory, m_gameElf;
+    int m_initialSlot = -1;
 };

@@ -56,7 +56,7 @@ if ($Stages -contains 'package' -or $Stages -contains 'installer') {
     New-Item -ItemType Directory -Force (Join-Path $stage 'launcher\bin') | Out-Null
     # Only the clean deployment directory is packaged, never CMake objects or generated build sources.
     Get-ChildItem -LiteralPath $lb | Copy-Item -Destination (Join-Path $stage 'launcher\bin') -Recurse -Force
-    foreach ($item in @('README.md', 'README.pt-BR.md', 'CREDITS.md', 'LICENSE', 'AGENTS.md', 'CLAUDE.md', 'build.cmd', 'docs', 'games', 'tools')) {
+    foreach ($item in @('README.md', 'README.pt-BR.md', 'CHANGELOG.md', 'CHANGELOG.pt-BR.md', 'CREDITS.md', 'LICENSE', 'AGENTS.md', 'CLAUDE.md', 'build.cmd', 'docs', 'games', 'tools')) {
         Copy-Item (Join-Path $root $item) $stage -Recurse -Force
     }
     # The release's profile-guided data (Use-ReleaseProfile, game.ps1): this checkout's profile, and only one trained on

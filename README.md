@@ -11,11 +11,13 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-0.5.0-crimson)
+![version](https://img.shields.io/badge/version-0.6.0-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 </div>
+
+**0.6.0 test candidate:** new paused in-game menu with persistent settings, native save-slot loading, altar backups, mapped QTE prompts, optional QTE assistance and build-directory selection. See the [complete changes](CHANGELOG.md) and [candidate validation](docs/research/release-0.6.0-candidate.md). Published only as v0.6.0-rc.1 for testing; v0.5.0 remains stable.
 
 **Linux / Steam Deck (experimental):** native launcher, build pipeline and Linux installer are available for testing.
 See [installation and remaining validation](docs/linux.md). Steam Deck hardware and performance are not yet validated.
@@ -77,11 +79,14 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
   ("Hold instead of mashing" in the Accessibility tab), alongside stick gestures and texture packs.
-- **In-game menu (F1)**: graphics settings changed live, cheats and memory-card copies.
+- **In-game menu (F1 / Select + Start)**: pauses gameplay; graphics, controls, audio, accessibility, texture packs,
+  cheats and saves. Supported changes persist and synchronize with the launcher.
 - **Launcher in nine languages**: English, Portuguese, Spanish, Turkish, French, German, Italian, Russian and
   Simplified Chinese.
 
 ## What's new in 0.5.0
+
+For the newer 0.6.0 test candidate, see the [complete changelog](CHANGELOG.md). The following is the previous release.
 
 - **Experimental Linux:** native launcher, build pipeline and `.run` installer for testing on Linux PCs and
   Steam Deck. Built and smoke-tested in WSL; real Steam Deck performance and compatibility remain unvalidated.
@@ -250,13 +255,15 @@ Players do not need Qt or a compiler for the launcher itself.
 
 | Key | Action |
 |---|---|
-| **F1** | Game menu: Graphics (live), Cheats, Save |
+| **F1 / Select + Start** | Paused game menu: Graphics, Controls, Audio, Texture packs, Cheats, Saves |
 | **F2** | Game menu on the Cheats tab |
 | **F11** | Full screen / window (borderless when that mode is selected) |
 | **Ctrl+F1** | Runtime debugger (for developers) |
 
-Graphics changes made in the F1 menu last for the session; the launcher keeps your saved settings. Internal resolution
-and widescreen are changed in the launcher (they need a restart).
+Supported graphics, audio, control and accessibility changes in the menu persist and synchronize with the launcher.
+Startup-only renderer options still require a restart. Saves lists the active card's native slots with location,
+preview and time; loading discards progress since the last altar after confirmation. Historical card restoration
+remains a separate closed-game operation. See [save documentation](docs/saves.md).
 
 ## Updates and maintenance
 
