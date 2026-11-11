@@ -2,19 +2,19 @@
 # An instrumented copy of the game (its own build folder) plays the [optimize] pad script with the hardware renderer and
 # the sound path running, like a player, but hidden and silent (GOW_WINDOW_HIDDEN, engine/patches/15; GOW_AUDIO=0 with
 # GOW_AUDIO_PCM=NUL keeps the audio stream paced at volume 0); closing its window writes the profile (engine/patches/12),
-# which is merged into gow.profdata and used by later clang builds with a matching manifest. Unmatched profiles stay
-# on disk but are not applied automatically; a fitting shipped profile or new training restores PGO.
-# A launcher update that changed the runtime patches marks the profile stale (data\pgo-stale.txt, tools/pipeline/update.ps1;
-# the launcher then recommends this step again). A new profile clears it when it was trained on the current runtime: this
-# run fetched it, or no rebuild after an update is pending.
-# The same condition says what the new profile was trained on: the current runtime gets a manifest (Write-ProfileManifest,
-# game.ps1: what lets a configure, and the release package, recognise it), an older one none.
+# which is merged into gow.profdata and used by later clang builds whose game code matches its manifest (game.ps1,
+# Get-ProfileFit: a function changed since training loses only its own counts). Profiles of other game code stay on
+# disk but are not applied; a fitting shipped profile or new training restores PGO.
+# A launcher update that changed the runtime patches writes data\pgo-stale.txt (tools/pipeline/update.ps1); the next build
+# that applies a profile clears it. A new profile clears it too when it was trained on the current runtime: this run
+# fetched it, or no rebuild after an update is pending. Either way the profile gets a manifest: one trained on an older
+# runtime still describes this game code, and clang drops its stale functions at the next build.
 function Clear-StaleProfile {
     if (($Stages -contains 'fetch') -or -not (Test-Path (Join-Path $root 'data\needs-rebuild.txt'))) {
         Remove-Item (Join-Path $root 'data\pgo-stale.txt') -ErrorAction SilentlyContinue
         Write-ProfileManifest 'trained'
     }
-    else { Remove-Item "$pgoProfile.json" -ErrorAction SilentlyContinue }
+    else { Write-ProfileManifest 'trained-before-rebuild' }
 }
 if ($Stages -contains 'pgo') {
     $genBld = "$bld-pgogen"
@@ -127,14 +127,13 @@ if ($Stages -contains 'optimize' -or $Stages -contains 'native' -or $tuneWithPro
 
 # --- pgo-check: prove that a build really uses a profile that fits it -------------------------------------------------
 # Clang silently accepts a stale or empty profile (options can disable the warnings), so a "PGO build" can be a plain
-# build. This stage is the single place that checks, in order: the manifest identity (runtime, patches, game code,
-# source tree, unity batch), the profile's function coverage, the compile flags in build.ninja (use, not generate),
-# and the linked runner (no profiling runtime).
+# build. This stage is the single place that checks, in order: the manifest's game code (and reports whether runtime,
+# patches, source tree and unity batch still match exactly), the profile's function coverage, the compile flags in
+# build.ninja (use, not generate), and the linked runner (no profiling runtime).
 function Invoke-PgoCheck {
     Need $pgoProfile "profile-guided data (run the pgo stage)"
-    if (-not (Test-ProfileManifest "$pgoProfile.json")) {
-        throw 'the profile does not fit this runtime/game code (stale manifest): re-run the pgo stage'
-    }
+    $fit = Get-ProfileFit "$pgoProfile.json"
+    if (-not $fit) { throw 'the profile was trained on other game code (or its manifest is unreadable): re-run the pgo stage' }
     Show-ProfileCoverage
     $ninja = Join-Path $bld 'build.ninja'
     Need $ninja "configured build folder ($bld)"
@@ -152,8 +151,10 @@ function Invoke-PgoCheck {
         if ($nm -match '(?m)^\s*\S+\s+[Tt]\s+__llvm_profile_write_file') { throw 'the runner links the profiling runtime (instrumented build)' }
     }
     $manifest = Get-Content "$pgoProfile.json" -Raw | ConvertFrom-Json
-    Write-Host ("pgo check: profile fits ({0} source hash {1}..., unity batch {2}), used by the build, no instrumentation runtime" -f
-        $pgoProfile, $manifest.src.Substring(0, [math]::Min(12, $manifest.src.Length)), $manifest.unity)
+    $src = "$($manifest.src)"
+    Write-Host ("pgo check: profile fits ({0} match, {1} source hash {2}..., unity batch {3}), used by the build, no instrumentation runtime" -f
+        $fit, $pgoProfile, $src.Substring(0, [math]::Min(12, $src.Length)), $manifest.unity)
+    if ($fit -ne 'exact') { Write-Host 'pgo check: trained on an earlier runtime; functions changed since then build without profile data (see "profile coverage" in the build output)' }
 }
 if ($Stages -contains 'pgo-check') { Step 'pgo check'; Invoke-PgoCheck }
 

@@ -562,11 +562,16 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   `.text` is byte-identical to the USA one). A configure of the main build folder without a fitting local profile takes
   the shipped one; `tune` with a fitting profile skips the instrumented build and the training run (one build, then the
   optimize recording), and small CPUs' `build,optimize` get it too. A trained profile gets the same manifest
-  (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
-  without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
-  holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
-  Automatic configure also rejects missing, malformed or mismatched manifests; without a matching shipped profile,
-  it preserves the rejected local profile and configures without PGO. Never silently reuse stale optimization data.
+  (`Clear-StaleProfile`). The `.profdata` holds function names derived from guest addresses (`sub_<address>`),
+  counters and CFG hashes, no game code or data.
+  PGO must stay invisible to players: no training step, no failed build. A profile fits (`Get-ProfileFit`) when its
+  manifest's `code` (the `.text` hash) is this installation's: `exact` when the whole identity matches, `code` when the
+  runtime, patches, game profile, sources or unity batch moved on since training. Clang compares every function's CFG
+  hash and ignores the counts of a changed one, so `-Wprofile-instr-out-of-date` stays a warning (never `-Werror`):
+  a stale function only loses its optimisation, never correctness. `Build-Game` sums those warnings into a
+  `profile coverage:` line; retrain when that share grows. Missing, malformed or other-game-code manifests are still
+  rejected (the local profile is preserved and the build continues without PGO). `package` ships any fitting profile
+  (`-NoReleaseProfile` to package without one); train once with `-Stages fetch,configure,recomp,sync,pgo`.
 - Texture packs (runtime patch 52): PCSX2's replacement names, so PCSX2 packs work unchanged; the name code mirrors
   `GSTextureCache::HashCacheKey` (blocks or unswizzled rows, 32-bit palette, PSM/TW/TH/TEXA bits). Never commit or ship
   packs, dumps or screenshots of them. `GOW_TEX_PCSX2_NAMES=<file>` lists the names a session draws.
@@ -575,9 +580,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - CPUs without SSE4.2/POPCNT (x86-64-v2) cannot run the build: the Install page blocks the install
   (`installer.cpuSupported()`) instead of compiling a game that would not start.
 - Update markers: `data/needs-rebuild.txt` is removed by a successful final build only in a run that also fetched the
-  runtime (a `sync,build` of the old runtime keeps it). `data/pgo-stale.txt` (written with it by update.ps1) makes
-  `pgoApplied()` false so the launcher recommends PGO again; a new profile clears it when trained on the current runtime
-  (`Clear-StaleProfile` in optimize.ps1).
+  runtime (a `sync,build` of the old runtime keeps it). `data/pgo-stale.txt` (written with it by update.ps1 and the
+  installer) makes `pgoApplied()` false until the next main build that applies a profile (`Build-Game`) or a profile
+  trained on the current runtime (`Clear-StaleProfile` in optimize.ps1) clears it.
 - PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
   `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
 - Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts

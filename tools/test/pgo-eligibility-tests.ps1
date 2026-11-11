@@ -30,6 +30,7 @@ Configure
 if ($script:captured -match 'fprofile-instr-use') { throw 'Stale PGO was applied' }; Write-Output 'PASS: stale profile is not applied'
 # Exercise the real pgo-check path with valid eligibility/coverage stubs.
 . "$root/tools/pipeline/modules/optimize.ps1"
+function Get-ProfileFit { 'exact' }
 function Test-ProfileManifest { $true }
 function Show-ProfileCoverage {}
 $hash = (Get-FileHash $pgoProfile).Hash
