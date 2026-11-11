@@ -479,3 +479,16 @@ frame 240 (delta-time physics), so frame-aligned scenes need faster hardware.
   intervals >100 ms 14 → 0; missing audio 1751 → 0 (one reference run). Every valid off run was slower than
   every on run. **The notebook gate passed: grouping stays default on.** Local i5-8265U/UHD 620 evidence only.
   Evidence: `data/experiments/grouping-keepgoing-20261111/`.
+
+GAIN-09 retest (2026-11-11, i5-8265U / UHD 620): first profile trained on the current 140-patch chain
+(`-Stages pgo,pgo-check`, 243,003 profiled functions, exact fit). The final build reported
+`profile coverage: 1 of 6 profiled functions in 1 recompiled objects changed` (`vu1_generado/programa0.cpp`
+differs between the instrumented and the final build): under the former `-Werror=profile-instr-out-of-date`
+that object would have failed the build; with the tolerant fit it built and pgo-check passed.
+Runners: no PGO `e909b29f…cef14`, PGO `7ee02a2a…afcd` (copies in `data/experiments/runners/`).
+`--compare vu1 --reference-runner` (both variants grouping **off**, not the shipped default), visible
+`ship_guard`, 4 pairs, `--keep-going`: **inconclusive**, only 1 valid pair (no PGO 19.16 vs PGO 15.78 FPS,
+the PGO run under 44% system CPU from concurrent node/headless Chrome/VS Code). Five runs failed `same_scene`:
+knockback moved Kratos up to ~230 units into a lighter area (20–29 FPS), so roughly half of ship_guard runs
+on this notebook are not comparable. No PGO speed claim from this machine; repeat on an idle machine with
+`--grouping 1`. Evidence: `data/experiments/pgo-20261111/`.
