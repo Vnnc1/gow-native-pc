@@ -1560,3 +1560,13 @@ Generated/JIT/backend equivalence and self-loop exits pass; detailed diagnostic
 modes still preserve fixture digests. Installed saves/settings/runner unchanged.
 This validates a local stationary heavy scene, not universal 60, combat or other
 hardware. [Methods, all runs and limitations](research/vu1-chain-2026-11-09.md).
+
+## Frame-latency and grouping retries (2026-11-11, i5-8265U / UHD 620)
+
+The 140-patch chain (through `zzz-326`) built with pinned llvm-mingw and passed `verify` (18/18 CTest
+groups). Visible `ship_guard` A/B runs reached gameplay and exited cleanly, but FPS comparisons are
+invalid: concurrent desktop load (system CPU up to 100%) and the notebook's shared CPU/iGPU power limit
+(processor performance ~207% idle -> ~130-160% in game) dominated, and several runs failed the scene
+gate. Combat ran at roughly 20-26 guest FPS when the machine was quieter. `zzz-326` waited at most once
+per 5 s (no timeouts) and reference ring stalls were 0-2 per session. Details: GPU-06 / GS-05 follow-ups
+in the [performance ledger](research/performance-experiments.md). No defaults changed.

@@ -440,3 +440,24 @@ oldest while more than 2 are pending, 50 ms bound, no `glFinish`. `GOW_GS_FRAME_
 Validation so far: fake-fence unit test, syntax compile, full chain apply. **No game, GPU or FPS run.**
 Do not claim a #31 fix or an FPS change until gates 1–3 in
 [the report](frame-latency-2026-11-11.md) pass: GTX 1060 3 GB scene, a CPU-bound notebook and the RX 580 arrival probe.
+
+GPU-06 Windows follow-up (2026-11-11, i5-8265U / UHD 620 / driver 27.20.100.9664, AC):
+`fetch,sync,build,verify` with the 140-patch chain passed on Windows/llvm-mingw (18/18 CTest groups
+including `gow_frame_latency`, VU1 equivalence, task replay, mod consumers). Runner
+`e909b29f5a8b68e9f20a426eee13fadfa65f9601e5482503cfd8488b5b7cef14`. `gs-run-ab.py --compare frame-latency`
+(new mode: variant 0 = `GOW_GS_FRAME_LATENCY=0`, 1 = shipped 2; checks `[gs-latency-config]`) ran visible
+`ship_guard`, 1x/1280x720, audio, private blank cards, 120 s / 60 s warmup. **FPS comparison invalid**:
+three batches aborted on `same_scene` after 5, 1 and 2 runs; guest FPS ranged 13.7–26.5 in both variants
+with mean system CPU 16–70% from concurrent desktop work (VS Code, Chrome, Explorer), and the sampled
+processor performance fell from ~207% idle to ~130–160% while playing (shared CPU/iGPU power limit).
+Mechanism evidence that is valid: with `GOW_GS_HW_STATS=1` the reference had `ringStalls` 0–2 per session,
+and the candidate waited at most once per 5 s window (≤1.8 ms total), with no timeouts. So on this
+power-limited notebook zzz-326 is near-free and the ring-wrap stall it targets barely occurs; this neither
+confirms nor refutes the GTX 1060 issue-31 hypothesis. Evidence: `data/experiments/frame-latency-20261111{,-b,-c}/`.
+Gate 2 (no CPU-bound regression) still needs an idle-machine repeat; gates 1 and 3 untouched.
+
+GS-05 (patch 66 grouping) gate retry (2026-11-11, same notebook/runner): `--compare grouping`, same settings.
+**Invalid**: aborted on `same_scene` after 3 runs, system CPU 69–100% (concurrent `zig`/`node`/Chrome),
+guest FPS 7–13. No default change; the i5-8265U gate in AGENTS.md remains open and needs an idle machine.
+Evidence: `data/experiments/grouping-20261111/`. Per maintainer guidance, a notebook result alone
+does not set defaults for other tiers.
