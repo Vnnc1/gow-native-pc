@@ -156,7 +156,9 @@ assert all(on[f] == "1" for f in m.PR26_FLAGS.values()) and m.grouping_for("wrap
 for mode, flag in m.SHIPPED_FLAGS.items():
     off, on = m.pr26_environment(mode, 0), m.pr26_environment(mode, 1)
     assert [k for k in off if off[k] != on[k]] == [flag] and m.grouping_for(mode, 0, 0) == 1
-print("PASS: wrap-group / chain-warm comparisons change only their own switch")
+assert m.pr26_environment("frame-latency", 0)["GOW_GS_FRAME_LATENCY"] == "0"
+assert m.pr26_environment("frame-latency", 1)["GOW_GS_FRAME_LATENCY"] == "2"
+print("PASS: wrap-group / chain-warm / frame-latency comparisons change only their own switch")
 
 # Explicit installation paths must not read this checkout's generated languages.json.
 with tempfile.TemporaryDirectory() as directory:

@@ -84,3 +84,23 @@ Regional overlays were not rebuilt. In the same scene and settings, compare
 2. A CPU-bound notebook (i3-10110U or i5-8265U), fixed arrival route: no FPS/p99 regression.
 3. RX 580 PERF-06 arrival probe: no regression, and movies (EOF tail) still complete.
 4. If the limit costs FPS on any CPU-bound tier, try 3 before turning it off. Record every run in the ledger.
+
+## Running the comparison (i3-10110U and other machines)
+
+The machine needs a game rebuilt with this chain (`fetch,sync,build`; build both the runner and
+`gow-session`). `gs-run-ab.py --compare frame-latency` alternates `GOW_GS_FRAME_LATENCY=0`
+(reference) with the shipped value 2, and keeps every other renderer switch at its shipped default.
+It enables the bounded `GOW_GS_HW_STATS` counters in both variants. A run is rejected unless its log
+contains `[gs-latency-config] frames=<expected>`. Each run also records `latency_waits`,
+`latency_wait_ms` and `ring_stalls`, next to the usual frame-interval percentiles and
+>33/50/100 ms counts. Use a new output directory for every invocation:
+
+```powershell
+python -I tools/test/gs-run-ab.py --runner <runner.exe> --elf <prepared-disc/SCUS_973.99> --collector <gow-session.exe> --output <new-output-directory> --compare frame-latency --scene ship_arrival_frames --pairs 3 --seconds 120 --warmup 30 --gpu-samples
+```
+
+On the i3-10110U, the gate is "no regression": the CPU (VU1) is the bottleneck there (GAIN-11/12),
+so waits should be rare. The ship arrival scene is short and CPU-bound. For the GPU-bound case, repeat
+with `--scale 2 --env GOW_ANISO=16` (or the reporter's settings) in a heavier scene with a private card.
+Expect fewer `ring_stalls` and fewer >33 ms intervals with the candidate. Record every run, including
+rejected ones, under GPU-06 in the ledger and in `docs/tested-hardware.md`.

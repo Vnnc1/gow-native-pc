@@ -181,11 +181,15 @@ PR26_FLAGS = {"ring": "GOW_GS_HW_RING", "texreuse": "GOW_GS_TEXREUSE", "depth-zb
 # Comparisons of a later default-on switch: every PR 26 switch and grouping stay at the shipped value, so the
 # variable under test is the only difference from what players run. zzz-302: wrapping-blend triangle grouping.
 SHIPPED_FLAGS = {"wrap-group": "GOW_GS_WRAP_GROUP",
-                 "chain-warm": "GOW_VU1_CHAIN_WARM"}  # patch 76: successor-slot prefetch in VU1 chain()
+                 "chain-warm": "GOW_VU1_CHAIN_WARM",  # patch 76: successor-slot prefetch in VU1 chain()
+                 "frame-latency": "GOW_GS_FRAME_LATENCY"}  # zzz-326: GS worker frames in flight on the GPU
+# Values of variants 0 (reference) and 1 (shipped candidate) where the switch is not a plain 0/1.
+SHIPPED_VALUES = {"frame-latency": ("0", "2")}
 
 def pr26_environment(mode, variant):
     if mode in SHIPPED_FLAGS:
-        return {**{flag: "1" for flag in PR26_FLAGS.values()}, SHIPPED_FLAGS[mode]: str(variant)}
+        value = SHIPPED_VALUES[mode][variant] if mode in SHIPPED_VALUES else str(variant)
+        return {**{flag: "1" for flag in PR26_FLAGS.values()}, SHIPPED_FLAGS[mode]: value}
     if mode != "pr26" and mode not in PR26_FLAGS:
         return {}
     return {flag: str(variant if mode in (name, "pr26") else 1) for name, flag in PR26_FLAGS.items()}
@@ -332,7 +336,7 @@ def main():
             env.update(GOW_PAD_GUION=scene["pad_script"], GOW_PLAYER_TRACE="1")
             if scene.get("god_mode"):
                 env["GOW_GOD_MODE"] = "1"
-        if a.timing or a.compare in ("alpha", "sampler", "shader", "alpha-bounds", "efficiency"):
+        if a.timing or a.compare in ("alpha", "sampler", "shader", "alpha-bounds", "efficiency", "frame-latency"):
             # Existing bounded counters; no per-draw timers or GPU readbacks.
             env["GOW_GS_HW_STATS"] = "1"
         if a.task_capture:
@@ -425,6 +429,13 @@ def main():
         stats["exit_metadata_recovered"] = "exit_code" not in meta and checks["exit_zero"]
         if a.compare == "wrap-group":
             checks["effective_wrap_group"] = f"[gs-wrap-config] group={variant}" in log
+        if a.compare == "frame-latency":
+            frames = SHIPPED_VALUES["frame-latency"][variant]
+            checks["effective_frame_latency"] = f"[gs-latency-config] frames={frames}" in log
+            # Bounded [gs-hw-latency] / [gs-hw] counters: frame waits and vertex ring stalls per run.
+            stats["latency_waits"] = sum(int(x) for x in re.findall(r"\[gs-hw-latency\].* waits=(\d+)", log))
+            stats["latency_wait_ms"] = sum(float(x) for x in re.findall(r"\[gs-hw-latency\].* wait_ms=([0-9.]+)", log))
+            stats["ring_stalls"] = sum(int(x) for x in re.findall(r"\[gs-hw\] .*ringStalls=(\d+)", log))
         if a.compare in (*EFFICIENCY_FLAGS, "efficiency"):
             configured = efficiency_environment(a.compare, variant)
             checks["effective_efficiency_settings"] = all(marker in log for marker in (
