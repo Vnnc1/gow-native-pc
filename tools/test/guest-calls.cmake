@@ -100,7 +100,8 @@ add_test(NAME gow_control_prompts COMMAND "${Python3_EXECUTABLE}" -I
 set_tests_properties(gow_control_prompts PROPERTIES TIMEOUT 180)
 
 # PR 26 integration: production cache policy, shader ownership and software fallback.
-foreach(pair IN ITEMS "texture_budget|gs-texture-budget" "shader_program|gs-shader-program" "software_reference|gs-software-reference")
+foreach(pair IN ITEMS "texture_budget|gs-texture-budget" "shader_program|gs-shader-program" "software_reference|gs-software-reference"
+        "frame_latency|gs-frame-latency")
     string(REPLACE "|" ";" fields "${pair}")
     list(GET fields 0 target)
     list(GET fields 1 source)

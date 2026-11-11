@@ -21,6 +21,14 @@ said v0.0.x. They are now v0.1.0, v0.2.0, v0.3.0 and v0.3.1, with the same files
 releases (it reports 1.0.0 to 3.0.1) does not see 0.x releases as newer: **install v0.4.0 once from its setup over the
 existing installation**; automatic updates work again from there on. Your game build, discs and saves are kept.
 
+## [Unreleased] — fix-chore after v0.6.0-rc.1
+
+### Performance (needs testing on weak GPUs)
+- The GS worker now keeps at most two frames of draws queued on the GPU (`zzz-326`). Before, only the vertex ring
+  held it back, so GPU-bound scenes (AF, 3x, rain and particles) could queue many frames and then stall, stuttering
+  while the counter still showed 45–60 FPS (#31). Not yet validated on the affected GPU. `GOW_GS_FRAME_LATENCY=0`
+  restores the previous behaviour for comparison. See [hypothesis and acceptance gates](docs/research/frame-latency-2026-11-11.md).
+
 ## [v0.6.0-rc.1] — pre-release for testing
 
 Includes fix-chore and the main changes since v0.5.0. v0.5.0 remains the stable release; this is an opt-in test build.

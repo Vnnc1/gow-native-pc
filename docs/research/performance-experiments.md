@@ -427,3 +427,16 @@ Five-seed generated/JIT/SSE/special-value and self-loop budget/depth equivalence
 passed. Final rebuilt core equals the measured object except its COFF timestamp.
 The installed runner/settings/source card were not replaced. Other hardware,
 sustained combat and full-campaign acceptance remain open. [Full report](vu1-chain-2026-11-09.md).
+
+## GPU-06 / 2026-11-11 — GS worker frames in flight (`zzz-326`)
+
+New hypothesis for issue 31 (still reproducing on v0.6.0-rc.1): the GS worker context never swaps,
+so no driver pre-render limit applies. Only the 4×8 MiB vertex ring, waiting on a fence three segments old,
+bounded its lead (about 12–24 frames). A GPU-bound scene then alternates running ahead with whole-segment
+ring stalls. That fits the counter showing 45–60 FPS during visible stutter, and the 5–6 s of smoothness
+after a menu pause drains the queue. Not a retest: GS-04 and SYNC-01..04 changed batching and spin strategy,
+GPU-02/05 host acquisition; none bounded queue depth. Candidate: fence per presented frame, wait on the
+oldest while more than 2 are pending, 50 ms bound, no `glFinish`. `GOW_GS_FRAME_LATENCY=0` is the reference.
+Validation so far: fake-fence unit test, syntax compile, full chain apply. **No game, GPU or FPS run.**
+Do not claim a #31 fix or an FPS change until gates 1–3 in
+[the report](frame-latency-2026-11-11.md) pass: GTX 1060 3 GB scene, a CPU-bound notebook and the RX 580 arrival probe.

@@ -1,0 +1,190 @@
+Bound GS worker frames in flight on the GPU (default 2, GOW_GS_FRAME_LATENCY=0 = reference).
+The worker context never swaps, so only the 4x8 MiB vertex ring throttled it: GPU-bound scenes queued tens of frames, then stalled at a wrap.
+Fences guard no resource; each wait is bounded to 50 ms and never falls back to glFinish.
+Validation: tools/test/gs-frame-latency.cpp; docs/research/frame-latency-2026-11-11.md.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frame_latency.h b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frame_latency.h
+new file mode 100644
+index 0000000..b8a5f37
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gs/gs_frame_latency.h
+@@ -0,0 +1,91 @@
++#pragma once
++// GOW-Port (zzz-326): limita los cuadros del GS que la GPU tiene pendientes.
++//
++// El contexto del trabajador del GS nunca hace SwapBuffers, así que el límite de "cuadros prerenderizados" del
++// controlador no se aplica a él. Lo único que frenaba al trabajador era el anillo de vértices (4 segmentos de 8 MiB),
++// cuya espera usa una valla de hace tres segmentos: en una GPU saturada la cola llegaba a decenas de cuadros y el
++// trabajador se bloqueaba de golpe al dar la vuelta (tirones con el contador de FPS todavía en 45-60, issue 31).
++//
++// Al cerrar cada cuadro se pone una valla; si quedan más de `limit` cuadros sin completar, se espera a la más antigua
++// con un tiempo máximo. Las vallas solo marcan el ritmo: ningún recurso depende de ellas, de modo que un tiempo
++// agotado o una valla que no se pudo crear siguen adelante sin glFinish. limit 0 = desactivado (referencia).
++#include <array>
++#include <cstddef>
++
++template <class Fence>
++class GSFrameLatency
++{
++public:
++    static constexpr unsigned kCapacity = 8u;
++    static constexpr unsigned kMaxLimit = kCapacity - 1u;
++
++    struct Result
++    {
++        unsigned waits = 0;    // cuadros que hubo que esperar (la GPU iba por detrás)
++        unsigned timeouts = 0; // esperas que agotaron el tiempo (se siguió sin bloquear más)
++    };
++
++    static unsigned clampLimit(long value)
++    {
++        if (value <= 0)
++            return 0u;
++        return value > static_cast<long>(kMaxLimit) ? kMaxLimit : static_cast<unsigned>(value);
++    }
++
++    // poll(f): true si la GPU ya la completó (sin esperar). wait(f): espera acotada, true si se completó.
++    template <class Create, class Poll, class Wait, class Destroy>
++    Result endFrame(unsigned limit, Create create, Poll poll, Wait wait, Destroy destroy)
++    {
++        Result result;
++        if (limit == 0u)
++        {
++            clear(destroy);
++            return result;
++        }
++        if (limit > kMaxLimit)
++            limit = kMaxLimit;
++        while (m_count && poll(front()))
++            pop(destroy);
++        Fence fence = create();
++        if (!fence)
++            return result; // sin valla no hay ritmo que medir: el cuadro sigue como sin el límite
++        if (m_count == kCapacity)
++            pop(destroy); // no ocurre con limit <= kMaxLimit; protege el anillo
++        m_fences[(m_head + m_count) % kCapacity] = fence;
++        ++m_count;
++        while (m_count > limit)
++        {
++            ++result.waits;
++            if (!wait(front()))
++                ++result.timeouts;
++            pop(destroy);
++        }
++        return result;
++    }
++
++    template <class Destroy>
++    void clear(Destroy destroy)
++    {
++        while (m_count)
++            pop(destroy);
++        m_head = 0u;
++    }
++
++    unsigned pending() const { return m_count; }
++
++private:
++    Fence &front() { return m_fences[m_head]; }
++
++    template <class Destroy>
++    void pop(Destroy destroy)
++    {
++        destroy(m_fences[m_head]);
++        m_fences[m_head] = Fence{};
++        m_head = (m_head + 1u) % kCapacity;
++        --m_count;
++    }
++
++    std::array<Fence, kCapacity> m_fences{};
++    unsigned m_head = 0u;
++    unsigned m_count = 0u;
++};
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 858a679..59f6c4e 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1,6 +1,7 @@
+ // GOW-Port: render-target GS renderer, see include/runtime/gs/gs_hw_backend.h.
+ #include "runtime/gs/gs_hw_backend.h"
+ #include "runtime/gs/gs_texture_budget.h"
++#include "runtime/gs/gs_frame_latency.h"
+ #include "runtime/gow_ajustes_vivo.h"
+ #include "gs_texture_store.h"
+ #include "runtime/gs/gs_swizzle.h"
+@@ -645,6 +646,15 @@ struct GSHwBackend::Impl
+     uint32_t vertexRingSegment = 0;
+     uint8_t *vertexRingMap = nullptr;
+     GLsync vertexSegmentFence[kRingSegments] = {};
++    // GOW-Port (zzz-326): GPU frames in flight on this context, see gs_frame_latency.h. The ring above only bounds the
++    // queue at about three segments (often tens of frames), so a GPU-bound scene ran far ahead and then stalled at a
++    // wrap. GOW_GS_FRAME_LATENCY=<n> (default 2, 0 = off: the previous behaviour, kept as the reference).
++    GSFrameLatency<GLsync> frameLatency;
++    unsigned frameLatencyLimit = [] {
++        const char *v = std::getenv("GOW_GS_FRAME_LATENCY");
++        return GSFrameLatency<GLsync>::clampLimit(v && *v ? std::strtol(v, nullptr, 10) : 2L);
++    }();
++    bool frameLatencyAnnounced = false;
+     bool vertexRing = false;
+     GLuint spillVbo = 0; // only for a chunk larger than the ring; the ring itself is immutable, so it cannot be respecified
+     GLint locInvSize = -1, locTex = -1, locTexSize = -1, locTexDim = -1, locTme = -1, locFst = -1, locTfx = -1, locTcc = -1, locIip = -1,
+@@ -754,6 +764,8 @@ struct GSHwBackend::Impl
+         uint64_t redecodeBoxPct = 0; // sum of (dirty block rectangle area / image area) in percent, over the samples
+         // zzz-302: wrapping-blend (COLCLAMP=0 shader blend) batches, their triangles and the draws actually issued
+         uint64_t wrapBatches = 0, wrapTris = 0, wrapDraws = 0;
++        // zzz-326: frames whose end had to wait for the GPU, waits that timed out, and the time spent waiting
++        uint64_t latencyWaits = 0, latencyTimeouts = 0, latencyWaitUs = 0, latencyFrames = 0;
+         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+     } stats;
+     bool statsEnabled = std::getenv("GOW_GS_HW_STATS") != nullptr;
+@@ -3701,6 +3713,42 @@ struct GSHwBackend::Impl
+         std::fprintf(stderr, "[gs-hw-wrap] group=%d batches=%llu tris=%llu draws=%llu\n", wrapGroupOn ? 1 : 0,
+                      (unsigned long long)stats.wrapBatches, (unsigned long long)stats.wrapTris, (unsigned long long)stats.wrapDraws);
+         stats.wrapBatches = stats.wrapTris = stats.wrapDraws = 0;
++        std::fprintf(stderr, "[gs-hw-latency] limit=%u frames=%llu waits=%llu timeouts=%llu wait_ms=%.1f\n", frameLatencyLimit,
++                     (unsigned long long)stats.latencyFrames, (unsigned long long)stats.latencyWaits,
++                     (unsigned long long)stats.latencyTimeouts, static_cast<double>(stats.latencyWaitUs) / 1000.0);
++        stats.latencyFrames = stats.latencyWaits = stats.latencyTimeouts = stats.latencyWaitUs = 0;
++    }
++
++    // zzz-326: close the frame for pacing. Waits only while more than frameLatencyLimit frames are still on the GPU,
++    // each wait bounded to 50 ms; the fences guard no resource, so a timeout continues without glFinish.
++    void limitFrameLatency()
++    {
++        const Api &g = gl();
++        if (!frameLatencyAnnounced)
++        {
++            frameLatencyAnnounced = true; // marker for A/B harnesses, like [gs-wrap-config]
++            std::fprintf(stderr, "[gs-latency-config] frames=%u\n", frameLatencyLimit);
++        }
++        const auto begin = std::chrono::steady_clock::now();
++        const auto result = frameLatency.endFrame(
++            frameLatencyLimit, [&] { return g.FenceSync(kSyncGpuCommandsComplete, 0); },
++            [&](GLsync f) {
++                const GLenum status = g.ClientWaitSync(f, 0, 0);
++                return status == kAlreadySignaled || status == kConditionSatisfied;
++            },
++            [&](GLsync f) {
++                const GLenum status = g.ClientWaitSync(f, kSyncFlushCommandsBit, 50000000ull);
++                return status == kAlreadySignaled || status == kConditionSatisfied;
++            },
++            [&](GLsync f) { if (f) g.DeleteSync(f); });
++        ++stats.latencyFrames;
++        if (result.waits)
++        {
++            stats.latencyWaits += result.waits;
++            stats.latencyTimeouts += result.timeouts;
++            stats.latencyWaitUs += static_cast<uint64_t>(
++                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
++        }
+     }
+ 
+     RenderTarget *findTarget(uint32_t fbp)
+@@ -3918,6 +3966,7 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
+         return frame;
+     d.flushPending();
+     d.endGpuSample(); // closes the frame's GPU window: the timestamps cover exactly this frame's draws
++    d.limitFrameLatency(); // zzz-326: at most frameLatencyLimit frames of draws queued on the GPU
+     ++d.presentCount;
+     d.dumpAfterSkip = false;
+     d.frameBatch = 0;

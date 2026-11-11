@@ -125,3 +125,4 @@
 - zzz-323-native-save-slots: bounded read-only native slot reader, host request queue and USA native loader hooks. See docs/research/native-save-slots-2026-11-10.md.
 - zzz-324-linux-cost-intrinsics: compiler-specific x86 headers for the GS/VU1 cycle counters; native Linux runtime compilation verified.
 - zzz-325-r2-prompt-instance: require the current Greek R2 button instance, preserving shared animation leaves in the Spartan-style HUD. See docs/research/spartan-r2-prompt-2026-11-10.md.
+- zzz-326-gs-frame-latency: at most two frames of GS worker draws in flight on the GPU (bounded 50 ms fence waits, `GOW_GS_FRAME_LATENCY=0` = reference). Unvalidated in game. See docs/research/frame-latency-2026-11-11.md.

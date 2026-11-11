@@ -23,6 +23,15 @@ diziam v0.0.x. Agora são v0.1.0, v0.2.0, v0.3.0 e v0.3.1, com os mesmos arquivo
 cima da instalação atual**; daí em diante as atualizações automáticas voltam a funcionar. A compilação do jogo, os
 discos e os saves são mantidos.
 
+## [Não lançado] — fix-chore depois da v0.6.0-rc.1
+
+### Desempenho (precisa de teste em GPUs fracas)
+- O worker do GS agora deixa no máximo dois quadros de desenho na fila da GPU (`zzz-326`). Antes, só o anel de
+  vértices o segurava: cenas limitadas pela GPU (AF, 3x, chuva e partículas) acumulavam muitos quadros e depois
+  travavam, com engasgos enquanto o contador ainda mostrava 45–60 FPS (#31). Ainda não validado na GPU afetada.
+  `GOW_GS_FRAME_LATENCY=0` volta ao comportamento anterior para comparação. Veja
+  [hipótese e critérios de aceitação](docs/research/frame-latency-2026-11-11.md).
+
 ## [v0.6.0-rc.1] — pré-release para testes
 
 Inclui fix-chore e mudanças da main desde v0.5.0. A v0.5.0 continua estável; esta versão é opcional para testes.
