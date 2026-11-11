@@ -1570,3 +1570,8 @@ invalid: concurrent desktop load (system CPU up to 100%) and the notebook's shar
 gate. Combat ran at roughly 20-26 guest FPS when the machine was quieter. `zzz-326` waited at most once
 per 5 s (no timeouts) and reference ring stalls were 0-2 per session. Details: GPU-06 / GS-05 follow-ups
 in the [performance ledger](research/performance-experiments.md). No defaults changed.
+
+Idle repeat the same day (system CPU 17–33%, `--keep-going`): `zzz-326` frame-latency 3 valid pairs,
+19.82 → 20.67 guest FPS with equal or better p95 and no >100 ms intervals (no regression); primitive grouping
+2 valid pairs, 18.62 (off) → 21.65 (on) with better p95/p99, so the shipped default stays on. Combat on this
+notebook remains about 20–22 guest FPS at 1x; it does not approach 60.

@@ -461,3 +461,21 @@ GS-05 (patch 66 grouping) gate retry (2026-11-11, same notebook/runner): `--comp
 guest FPS 7–13. No default change; the i5-8265U gate in AGENTS.md remains open and needs an idle machine.
 Evidence: `data/experiments/grouping-20261111/`. Per maintainer guidance, a notebook result alone
 does not set defaults for other tiers.
+
+Idle-machine repeat (2026-11-11, same notebook/runner, system CPU 17–33%, no concurrent build). New
+`gs-run-ab.py --keep-going` keeps runs that fail validation as invalid evidence and averages only complete
+pairs whose two runs passed every check (same validity rules; `same_scene` now compares against accepted
+runs only). Visible `ship_guard`, 1x/1280x720, audio, private blank cards, 120 s / 60 s warmup, 4 pairs each.
+`ship_arrival_frames` was not usable here: at ~26 FPS the frame-indexed trajectory diverged by 88 units at
+frame 240 (delta-time physics), so frame-aligned scenes need faster hardware.
+
+- GPU-06 `--compare frame-latency`: 3 valid pairs (one reference run failed `same_scene`). Mean guest FPS
+  19.82 → 20.67; median-window p95 per pair 67.8/76.2/64.5 → 65.6/64.5/65.6 ms; intervals >100 ms 14 → 0;
+  zero missing audio. Candidate waited 2–8 times per session (38–249 ms total), never timed out; reference
+  ringStalls 0–4. **Neutral to slightly favorable; gate 2 (no notebook regression) passed.** Gates 1 (GTX 1060)
+  and 3 (RX 580) remain open. Evidence: `data/experiments/frame-latency-keepgoing-20261111/`.
+- GS-05 `--compare grouping`: 2 valid pairs (two candidate runs failed `same_scene`, both faster: 22.4 and
+  25.7 FPS, excluded). Mean guest FPS 18.62 → 21.65; p95 74.5/68.7 → 63.6/65.7 ms, p99 81.3/72.0 → 68.7/70.6 ms;
+  intervals >100 ms 14 → 0; missing audio 1751 → 0 (one reference run). Every valid off run was slower than
+  every on run. **The notebook gate passed: grouping stays default on.** Local i5-8265U/UHD 620 evidence only.
+  Evidence: `data/experiments/grouping-keepgoing-20261111/`.

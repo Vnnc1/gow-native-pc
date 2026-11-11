@@ -199,6 +199,15 @@ def grouping_for(mode, variant, fixed):
         return variant
     return 1 if mode in PR26_FLAGS or mode in SHIPPED_FLAGS else fixed  # keep the shipped grouping default
 
+def valid_pairs(runs):
+    """Consecutive (reference, candidate) runs of one alternating pair where both passed every check."""
+    pairs = []
+    for i in range(0, len(runs) - 1, 2):
+        both = {r["variant"]: r for r in runs[i:i + 2]}
+        if set(both) == {0, 1} and all(r.get("valid", True) for r in both.values()):
+            pairs.append(both)
+    return pairs
+
 def completed_child(meta, events, helper_code):
     exits = [e for e in events if e.get("type") == "process_exit"]
     return (helper_code == 0 and meta.get("exit_code", 0) == 0 and len(exits) == 1 and
@@ -229,6 +238,8 @@ def main():
     p.add_argument("--grouping", type=int, choices=(0, 1), default=0, help="Fixed grouping for alpha/scaler comparisons")
     p.add_argument("--gpu-samples", action="store_true", help="Optional Windows PDH engine busy-time samples every 2 s")
     p.add_argument("--hidden", action="store_true", help="Background sessions; no visible-play performance claim")
+    p.add_argument("--keep-going", action="store_true",
+                   help="Record a run that fails validation as invalid and continue; means use valid runs and complete pairs only")
     p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="Extra GOW_/PS2X_ diagnostic variable for both variants (repeatable); recorded in settings.json")
     a = p.parse_args()
@@ -469,16 +480,24 @@ def main():
             checks["effective_logic_rate"] = f"[gow-logic-config] fps={stats['logic_fps']} experimental={variant} vblank=60" in log
             checks["speed_windows"] = stats["simulation_speed"]["windows"] >= 3
         if scene:
-            checks["same_scene"] = same_scene([r["scene"] for r in report["runs"]] + [stats["scene"]], scene["position_tolerance"], scene.get("zones"), scene.get("states", [11]))
-        if scene and "trajectory_tolerance" in scene:
-            checks["same_scene"] = same_trajectory([r["scene"] for r in report["runs"]] + [stats["scene"]], scene["trajectory_tolerance"], scene["zones"])
-        report["runs"].append({"directory": str(run), "variant": variant, "grouped": grouped, "checks": checks, **stats})
+            # compared only with accepted runs: an earlier invalid run (--keep-going) must not reject later ones
+            accepted = [r["scene"] for r in report["runs"] if r.get("valid", True)] + [stats["scene"]]
+            checks["same_scene"] = same_scene(accepted, scene["position_tolerance"], scene.get("zones"), scene.get("states", [11]))
+            if "trajectory_tolerance" in scene:
+                checks["same_scene"] = same_trajectory(accepted, scene["trajectory_tolerance"], scene["zones"])
+        report["runs"].append({"directory": str(run), "variant": variant, "grouped": grouped, "checks": checks,
+                               "valid": all(checks.values()), **stats})
         save()
         print(json.dumps(report["runs"][-1]), flush=True)
-        if not all(checks.values()): raise RuntimeError(f"Run failed validation: {checks}")
+        if not all(checks.values()):
+            if not a.keep_going: raise RuntimeError(f"Run failed validation: {checks}")
+            print(f"Run {index + 1} invalid, kept as evidence: {[k for k, v in checks.items() if not v]}", flush=True)
     report["completed"] = True
     if not (a.capture or a.timing or a.task_capture):
-        report["mean_run_guest_fps"] = {str(v): statistics.mean(r["guest_fps"] for r in report["runs"] if r["variant"] == v) for v in (0, 1)}
+        pairs = valid_pairs(report["runs"])
+        report["valid_pairs"] = len(pairs)
+        if pairs:
+            report["mean_run_guest_fps"] = {str(v): statistics.mean(pair[v]["guest_fps"] for pair in pairs) for v in (0, 1)}
     save()
     print(output / "summary.json", flush=True)
 

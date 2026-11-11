@@ -371,10 +371,13 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
 - **GS primitive grouping (patch 66)**: since the PR 26 integration the PR's patch 66 is in the chain and grouping
   is ON by default (`PS2X_GS_RUN=0` restores individual submissions; the launcher writes it from
-  `gsAgruparPrimitivas`). This is still an open decision: fix-chore's laptop A/B improved mean FPS but regressed
-  p95/p99 in its last pair, and the PR's evidence is frontend cost on an HD 4400 (366-427 -> 86-118 ns/vertex), not
-  frame tails. `gs-run-ab.py --compare grouping` on the i5-8265U is the gate; if p95/p99 regress again, set the
-  default back to off in both `gs_frontend.cpp` (zzz-300) and `Main.qml`, and record it in the performance ledger.
+  `gsAgruparPrimitivas`). fix-chore's earlier laptop A/B improved mean FPS but regressed p95/p99 in its last pair;
+  the i5-8265U gate (`gs-run-ab.py --compare grouping`) was rerun on 2026-11-11 with the full chain: 2 valid visible
+  ship_guard pairs, on beat off in FPS (18.6 -> 21.7) and p95/p99 in both, so the default stays on (GS-05 follow-up
+  in the ledger). That is notebook evidence only: if another tier's p95/p99 regress, set the default back to off in
+  both `gs_frontend.cpp` (zzz-300) and `Main.qml`, and record it in the performance ledger.
+  `--keep-going` records a run that fails validation (e.g. `same_scene` after combat knockback at low FPS) and
+  continues; means then use only complete pairs whose two runs passed every check.
   zzz-300 restored fix-chore's review fixes to the run encoder and the per-GS read of `PS2X_GS_RUN`.
   fix-chore's opt-in GS candidates (67 alpha prune, 72 sampler cache, 73 specialized shader, 74 alpha bounds,
   75 variant counters) and 71 VU1 chain inline are not in the chain since the PR 26 integration: they conflict
