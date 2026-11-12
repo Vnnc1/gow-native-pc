@@ -498,3 +498,12 @@ step so frame-indexed scenes replay the same simulation on slow machines. Identi
 `--fixed-step` on the i5-8265U: 4/4 runs valid, trajectory deviation 0.000, guest FPS 32.5–34.7 (same binary,
 ~6 % spread). Use it for future A/Bs on this notebook; its FPS is identical-workload throughput, not real-time play.
 Evidence: `data/experiments/fixedstep-repeat-20261112/`, [report](fixed-step-2026-11-12.md).
+
+GAIN-09 notebook retest with `--fixed-step` (2026-11-12, i5-8265U / UHD 620): same source (fix-chore + `zzz-328`),
+no PGO `539c1434…fac5` vs PGO `f3a5e8d9…aa7b` (tolerant `code` fit, 4 of 586 recompiled functions without data),
+visible `ship_frames`, grouping on, audio, 4 pairs, `--keep-going`. **8/8 runs valid** (the scene gate no longer
+rejects runs). Mean guest FPS 20.83 → 23.60 (+13.3 %); per pair +1.9 %, −1.0 %, +13.6 %, +47.2 %; candidate p95 better
+in 2 of 4 pairs. **Favorable but confounded**: system CPU 44–81 % from concurrent headless Chrome / VS Code / node
+work, the largest gains coincide with references under the heaviest load, and the identical binary alone spread ~6 %
+(MEAS-01). PGO stays shipped on the strength of GAIN-09; no notebook percentage is claimed. Repeat on an idle machine.
+Evidence: `data/experiments/pgo-fixedstep-20261112/`.
