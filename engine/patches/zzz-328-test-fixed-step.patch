@@ -1,0 +1,62 @@
+Test-only fixed 1/60 s game step (GOW_PAD_TEST=1 + GOW_TEST_FIXED_STEP=1; default off, never a player mode).
+The game scales each frame by elapsed fields, so frame-indexed scripted runs diverged on slow machines (88 units by
+frame 240 at ~26 FPS with identical frame 0). Movies, game fixed/one-shot steps and the experimental rate keep their path.
+Validation: tools/test/logic-rate.cpp.in; gs-run-ab.py --fixed-step; docs/research/fixed-step-2026-11-12.md.
+
+diff --git a/src/gow_overrides.cpp b/src/gow_overrides.cpp
+--- a/src/gow_overrides.cpp
++++ b/src/gow_overrides.cpp
+@@ -2207,6 +2207,11 @@ namespace
+     // BEGIN experimental logic rate (also compiled by the isolated regression test).
+     int g_logicFps = 60;
+     uint64_t g_logicNextSlot = 0;
++    // GOW-Port (zzz-328): test-only fixed timestep (GOW_PAD_TEST=1 plus GOW_TEST_FIXED_STEP=1). Every measured
++    // gameplay frame simulates exactly 1/60 s, so frame-indexed scripted input replays the same trajectory on a slow
++    // machine (the game otherwise scales each frame's motion by the elapsed fields). The game then runs slower than
++    // real time there: a throughput benchmark, never a player mode. Excludes the experimental logic rate.
++    bool g_logicFixedStep = false;
+ 
+     int gowParseLogicFps(const char *value)
+     {
+@@ -2239,12 +2244,14 @@ namespace
+         const uint32_t ra = GPR_U32(ctx, 31);
+         sub_0017D778_0x17d778(rdram, ctx, runtime);
+         // The current generated leaf has no checkpoints. Never patch an incomplete return.
+-        if (!entry || ctx->pc != ra || g_logicFps <= 60 || !measured || once || gowLogicOriginalStep(rdram))
++        if (!entry || ctx->pc != ra || (g_logicFps <= 60 && !g_logicFixedStep) || !measured || once ||
++            gowLogicOriginalStep(rdram))
+             return;
+         const uint32_t ticks = readGuest32(rdram, 0x0029C670u);
+         const float perField = readGuest32(rdram, 0x00331078u) == 3u ? 115.2f : 96.1f;
+         const float lower = 6000.0f / static_cast<float>(g_logicFps);
+-        const float hundredths = std::min(std::max(static_cast<float>(ticks) / perField, lower), 400.0f);
++        const float hundredths = g_logicFixedStep ? 100.0f
++                                                  : std::min(std::max(static_cast<float>(ticks) / perField, lower), 400.0f);
+         const float delta = (hundredths / 100.0f) / 60.0f;
+         const float scaled = delta * gowLogicFloat(rdram, 0x0029C644u) * gowLogicFloat(rdram, 0x0029C648u);
+         std::memcpy(rdram + 0x0029C64Cu, &delta, sizeof(delta));
+@@ -2284,6 +2291,12 @@ namespace
+     {
+         g_logicFps = gowParseLogicFps(std::getenv("GOW_EXPERIMENTAL_LOGIC_FPS"));
+         g_logicNextSlot = 0u;
++        const char *padTest = std::getenv("GOW_PAD_TEST");
++        const char *fixedStep = std::getenv("GOW_TEST_FIXED_STEP");
++        const bool fixedRequested = fixedStep && std::strcmp(fixedStep, "1") == 0;
++        g_logicFixedStep = fixedRequested && padTest && std::strcmp(padTest, "1") == 0 && g_logicFps == 60;
++        if (fixedRequested && !g_logicFixedStep)
++            std::fprintf(stderr, "[gow-logic-config] fixed step ignored: needs GOW_PAD_TEST=1 and the original 60 Hz rate\n");
+         gow_logic_present::flips.store(0, std::memory_order_relaxed);
+         gow_logic_present::enabled.store(g_logicFps > 60, std::memory_order_relaxed);
+         if (g_logicFps > 60)
+@@ -2291,7 +2304,10 @@ namespace
+             runtime.replaceFunction(0x0017D778u, gowLogicTimeStep);
+             runtime.replaceFunction(0x0017A1D0u, gowLogicFrameWait);
+         }
+-        std::fprintf(stderr, "[gow-logic-config] fps=%d experimental=%d vblank=60\n", g_logicFps, g_logicFps > 60);
++        else if (g_logicFixedStep)
++            runtime.replaceFunction(0x0017D778u, gowLogicTimeStep); // the frame wait stays the original VBlank wait
++        std::fprintf(stderr, "[gow-logic-config] fps=%d experimental=%d vblank=60 fixed_step=%d\n", g_logicFps, g_logicFps > 60,
++                     g_logicFixedStep ? 1 : 0);
+     }
+     // END experimental logic rate.
+ 

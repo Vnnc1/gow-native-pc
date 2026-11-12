@@ -116,6 +116,36 @@ int main() {
         assert(originalWaits == before+1);
         assert(g_logicNextSlot == (which < 2 ? 1000u : 0u)); ++cases;
     }
+    // zzz-328 test-only fixed step: every measured gameplay frame is exactly 1/60 s, whatever the elapsed fields.
+    for (uint32_t ticks : {0u, 2402u, 4805u, 9610u, 19220u, 100000u}) {
+        setup(); g_logicFps = 60; g_logicFixedStep = true; writeGuest32(p, 0x29C670, ticks);
+        gowLogicTimeStep(p, &ctx, &rt);
+        assert(std::abs(gowLogicFloat(p, 0x29C64C) - 1.0f/60) < 1e-7);
+        assert(std::abs(gowLogicFloat(p, 0x29C658) - 0.5f/60) < 1e-7 && ctx.pc == ctx.gpr[31]); ++cases;
+    }
+    // Movies, game fixed steps, one-shot steps and incomplete/resumed calls keep the original result.
+    for (int which = 0; which < 6; ++which) {
+        setup(); g_logicFps = 60; g_logicFixedStep = true; writeGuest32(p, 0x29C670, 19220);
+        if (which == 0) writeGuest32(p, 0x29C65C, 0);
+        if (which == 1) writeGuest32(p, 0x29C660, 1);
+        if (which == 2) writeGuest32(p, 0x29C654, 2);
+        if (which == 3) writeGuest32(p, 0x29C838, 5);
+        if (which == 4) incomplete = true;
+        if (which == 5) ctx.pc = 0x17D800;
+        gowLogicTimeStep(p, &ctx, &rt);
+        assert(gowLogicFloat(p, 0x29C658) == 1.0f/120); ++cases;
+    }
+    g_logicFixedStep = false;
+    // Registration: only with GOW_PAD_TEST=1, never together with the experimental rate.
+    auto install = [&](const char *pad, const char *fixed, const char *fps) {
+        _putenv_s("GOW_PAD_TEST", pad); _putenv_s("GOW_TEST_FIXED_STEP", fixed); _putenv_s("GOW_EXPERIMENTAL_LOGIC_FPS", fps);
+        rt.installed.clear(); gowInstallLogicRate(rt);
+    };
+    install("1", "1", ""); assert(g_logicFixedStep && rt.installed == std::vector<uint32_t>({0x17D778}));
+    install("", "1", ""); assert(!g_logicFixedStep && rt.installed.empty());
+    install("1", "0", ""); assert(!g_logicFixedStep && rt.installed.empty());
+    install("1", "1", "120"); assert(!g_logicFixedStep && rt.installed == std::vector<uint32_t>({0x17D778, 0x17A1D0}));
+    install("", "", ""); rt.installed.clear(); cases += 4;
     _putenv_s("GOW_EXPERIMENTAL_LOGIC_FPS", "");
     gowInstallLogicRate(rt); assert(rt.installed.empty() && g_logicFps == 60);
     gow_logic_present::noteFlip(); assert(gow_logic_present::token(7) == 7);

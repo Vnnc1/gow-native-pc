@@ -240,6 +240,9 @@ def main():
     p.add_argument("--hidden", action="store_true", help="Background sessions; no visible-play performance claim")
     p.add_argument("--keep-going", action="store_true",
                    help="Record a run that fails validation as invalid and continue; means use valid runs and complete pairs only")
+    p.add_argument("--fixed-step", action="store_true",
+                   help="Test-only 1/60 s game step in both variants (zzz-328): same simulation per frame on slow machines; "
+                        "FPS is then throughput of an identical workload, not real-time play")
     p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="Extra GOW_/PS2X_ diagnostic variable for both variants (repeatable); recorded in settings.json")
     a = p.parse_args()
@@ -266,6 +269,8 @@ def main():
         p.error("--compare scale already selects 1x/2x; omit --scale")
     if a.compare == "logic-rate" and scene and "frame_begin" in scene:
         p.error("Logic-rate comparisons require real-time input/windows, not equal frame numbers")
+    if a.fixed_step and a.compare == "logic-rate":
+        p.error("--fixed-step replaces the measured step; it cannot be combined with --compare logic-rate")
     if scene and "frame_begin" in scene:
         begin, end = scene["frame_begin"], scene.get("frame_end", 0)
         if not (0 <= begin < end <= 1000000 and end - begin <= 4096):
@@ -289,6 +294,7 @@ def main():
               "visible": not a.hidden,
               "compare": a.compare, "gpu_samples": a.gpu_samples, "jit_only": a.compare == "vu1-inline",
               "logic_fps": a.logic_fps if a.compare == "logic-rate" else None,
+              "fixed_step": a.fixed_step,
               "scene": a.scene, "scene_contract": scene,
               "seconds": a.seconds, "warmup": a.warmup, "runs": []}
     original_saves = save_inventory(root / "data" / a.game, elf.parent)
@@ -321,6 +327,8 @@ def main():
         env.update(efficiency_environment(a.compare, variant))
         env.update(pr26_environment(a.compare, variant))
         env.update(extra_env)
+        if a.fixed_step:
+            env["GOW_TEST_FIXED_STEP"] = "1"
         if a.compare == "vu1-fast":
             env["GOW_VU1_FAST"] = str(variant)  # launcher "fast VU" option; changes VU1 float semantics
         if a.compare == "alpha":
@@ -469,6 +477,8 @@ def main():
             stats["task_capture_bytes"] = corpus.stat().st_size if corpus.is_file() else 0
             checks["bounded_tasks_recorded"] = stats["task_capture_bytes"] > 0 and "[gow-vu1-task] recorded=32 " in log and "[gow-vu1-task] write_error=1" not in log
         checks["effective_scale"] = f"render-target renderer ready, scale {a.scale:.2f}" in log
+        if a.fixed_step:
+            checks["effective_fixed_step"] = "[gow-logic-config] fps=60 experimental=0 vblank=60 fixed_step=1" in log
         if a.compare == "vu1-inline":
             checks["effective_inline_chain"] = f"[vu1-chain] inline={variant}" in log
             checks["effective_jit_only"] = "[vu1x] JIT-only validation: AOT registry cleared" in log

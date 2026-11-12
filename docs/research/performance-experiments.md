@@ -492,3 +492,9 @@ the PGO run under 44% system CPU from concurrent node/headless Chrome/VS Code). 
 knockback moved Kratos up to ~230 units into a lighter area (20–29 FPS), so roughly half of ship_guard runs
 on this notebook are not comparable. No PGO speed claim from this machine; repeat on an idle machine with
 `--grouping 1`. Evidence: `data/experiments/pgo-20261111/`.
+
+MEAS-01 / 2026-11-12 — reproducible combat measurement (`zzz-328`). Not a speed change: a test-only fixed 1/60 s
+step so frame-indexed scenes replay the same simulation on slow machines. Identical-binary `ship_frames` with
+`--fixed-step` on the i5-8265U: 4/4 runs valid, trajectory deviation 0.000, guest FPS 32.5–34.7 (same binary,
+~6 % spread). Use it for future A/Bs on this notebook; its FPS is identical-workload throughput, not real-time play.
+Evidence: `data/experiments/fixedstep-repeat-20261112/`, [report](fixed-step-2026-11-12.md).

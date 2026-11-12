@@ -648,6 +648,12 @@ real-time input/windows, private cards and `GOW_DELTA_DIAG`. A speed ratio near
 one does not validate frame-counted QTEs, combos or collision behavior. See
 `docs/research/experimental-logic-rate.md` for evidence and limitations.
 
+Patch `zzz-328` adds a test-only fixed 1/60 s step to the same adapter (`GOW_PAD_TEST=1` + `GOW_TEST_FIXED_STEP=1`,
+never with the experimental rate). The game scales each frame by elapsed fields, so frame-indexed scenes diverged on
+slow machines even with an aligned origin; `gs-run-ab.py --fixed-step` made four identical-binary `ship_frames`
+runs match exactly on the i5-8265U. Its FPS is throughput of an identical workload, not real-time play; never expose
+it to players. The same binary spread ~6% there. See `docs/research/fixed-step-2026-11-12.md`.
+
 Patches 36–37 add opt-in `GOW_SYNC_DIAG=1` worker/GS-stage wait aggregates and bounded isolated MSCAL task replay.
 `tools/test/worker-ab.py` separates FPS, intrusive timing and capture modes; it uses private cards and stops only its
 own child. `tools/test/vu1-task-replay.py` validates local task corpora with `gow_vu1_tasks` from the verify build.
