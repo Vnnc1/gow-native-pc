@@ -1,0 +1,29 @@
+Print $s2-$s7 and the first two words they point to in the guest missing-target report.
+Issue 33 died in a virtual call through a null member whose `this` was in $s2, which the report omitted.
+Diagnostics only: the line is printed once per missing target, nothing else changes.
+Evidence: docs/research/issue-reports-2026-11-12.md.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1482,8 +1482,18 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+             << " s0=0x" << s0
+             << " s1=0x" << s1
+             << " v0=0x" << v0
+-            << " v1=0x" << v1
+-            << " a0Readable=" << (a0Readable ? "yes" : "no")
++            << " v1=0x" << v1;
++        // GOW-Port (zzz-327): the remaining saved registers and the first two words they point to. A virtual call
++        // through a null member (issue 33: `this` was in $s2) was otherwise invisible in the report.
++        for (int reg = 18; reg <= 23; ++reg)
++        {
++            const uint32_t value = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[reg], 0));
++            uint32_t word0 = 0u, word4 = 0u;
++            oss << " s" << std::dec << (reg - 16) << "=0x" << std::hex << value;
++            if (readGuestU32Offset(value, 0x00u, word0) && readGuestU32Offset(value, 0x04u, word4))
++                oss << "[0x" << word0 << ",0x" << word4 << "]";
++        }
++        oss << " a0Readable=" << (a0Readable ? "yes" : "no")
+             << " a0[0]=0x" << a0Word0
+             << " a0[4]=0x" << a0Word4
+             << " a0[8]=0x" << a0Word8

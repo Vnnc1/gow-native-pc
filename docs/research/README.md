@@ -36,6 +36,7 @@ Additional investigations:
 
 - [RX580 renderer candidates and validation](patch66-67-rx580-2026-11-04.md): patches 66/67 and experimental 72–75; capped FPS, resource uncertainty and rejected comparisons.
 - [v0.6.0-rc.1 open-issue sweep and GS frame-latency limit](frame-latency-2026-11-11.md): issues 34/33/31/30/28 status, regional movie-EOF gap, GPU-06 hypothesis and acceptance gates.
+- [Player report ZIPs for issues 33/31/30](issue-reports-2026-11-12.md): issue 33 is a null-object virtual call after the Cronos movie (not the movie EOF hang), 30 matches the fixed USA EOF hang, 31 has no new data.
 - [Future graphics APIs and automatic launcher selection](graphics-api-roadmap.md): Vulkan/Direct3D evaluation, compatibility gates and OpenGL fallback; proposal only.
 
 Rules that hold for all of them: runtime changes are new `engine/patches/NN-*.patch` files (never edit an applied patch's

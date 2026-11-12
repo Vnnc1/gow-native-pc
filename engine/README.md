@@ -125,4 +125,5 @@
 - zzz-323-native-save-slots: bounded read-only native slot reader, host request queue and USA native loader hooks. See docs/research/native-save-slots-2026-11-10.md.
 - zzz-324-linux-cost-intrinsics: compiler-specific x86 headers for the GS/VU1 cycle counters; native Linux runtime compilation verified.
 - zzz-325-r2-prompt-instance: require the current Greek R2 button instance, preserving shared animation leaves in the Spartan-style HUD. See docs/research/spartan-r2-prompt-2026-11-10.md.
-- zzz-326-gs-frame-latency: at most two frames of GS worker draws in flight on the GPU (bounded 50 ms fence waits, `GOW_GS_FRAME_LATENCY=0` = reference). Unvalidated in game. See docs/research/frame-latency-2026-11-11.md.
+- zzz-326-gs-frame-latency: at most two frames of GS worker draws in flight on the GPU (bounded 50 ms fence waits, `GOW_GS_FRAME_LATENCY=0` = reference). No regression on the i5-8265U notebook; GTX 1060 / RX 580 gates open. See docs/research/frame-latency-2026-11-11.md.
+- zzz-327-missing-target-saved-registers: the guest missing-target report also prints `$s2`-`$s7` and the first two words they point to (issue 33's null `this` was in `$s2`). Diagnostics only. See docs/research/issue-reports-2026-11-12.md.
