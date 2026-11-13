@@ -98,6 +98,15 @@ int main(int argc,char **argv) {
     gowIconosFrame(); assert(g_publicados.empty());
     icon.autoButton=0x2000;anotar(icon);gowIconosFrame();assert(gow_qte_prompt::buttons==0x2000);
     gowIconosFrame();assert(gow_qte_prompt::buttons==0);icon.autoButton=0;
+    { // zzz-329: the frame publishes its rotation guide in numbered order, and clears it with the next frame.
+        const Boton order[]={BMoveDown,BMoveRight,BMoveUp};
+        for(unsigned k=0;k<3;++k){Icono g{order[k],VNormal,100.0f+52.0f*k,300,28,1,1,1,1};g.guideStep=k+1;g.guideCount=3;anotar(g);}
+        Icono hold{BQteStick,VNormal,152,346,28,1,1,1,1};hold.guideHold=true;anotar(hold);
+        gowIconosFrame();
+        assert(gow_qte_prompt::activeGuide().count==3 && gow_qte_prompt::activeGuide().keys==(std::array<unsigned,5>{2,1,0}));
+        assert(gow_qte_prompt::turnOf(gow_qte_prompt::activeGuide())==-1 && g_publicados.size()==4);
+        gowIconosFrame();assert(gow_qte_prompt::activeGuide().count==0);
+    }
     icon.worldSpace=true;anotar(icon);icon.worldSpace=false;anotar(icon);
     assert(g_construyendo.size()==2); // World and Flash prompts at the same position are distinct.
     gowIconosFrame();assert(g_publicados.size()==2);
@@ -179,6 +188,7 @@ int main(int argc,char **argv) {
     std::array<uint16_t,16> before{};
     for(int i=0;i<16;++i){keys.fill(false);keys[baselineKeys[i]]=true;backend.readState(0,0,data,32);before[i]=data[2]|(data[3]<<8);}
     assert(gowMenuBind("qte_stick",KEY_G,false));
+    assert(rotulo(ETeclado,BQteStick)=="G"); // zzz-329 hold-key hint under a rotation guide
     for(int i=0;i<16;++i){keys.fill(false);keys[baselineKeys[i]]=true;backend.readState(0,0,data,32);assert(before[i]==(data[2]|(data[3]<<8)));}
     gowMenuResetBindings();
     assert(!gowMenuBind("invalid",KEY_I,false));

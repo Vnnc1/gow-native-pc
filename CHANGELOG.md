@@ -23,6 +23,13 @@ existing installation**; automatic updates work again from there on. Your game b
 
 ## [Unreleased] — fix-chore after v0.6.0-rc.1
 
+### Keyboard and mouse
+- Rotation QTEs (#34): while the numbered key guide is on screen, the shown keys turn the stick continuously in the
+  arrow's direction instead of jumping through the centre, so pressing them in order works whether you tap or hold
+  them (`zzz-329`). The Accessibility "Circle" stick gesture now starts at the guide's first key and turns the way the
+  arrow shows (it always turned clockwise), and the guide shows its key under a circle mark. Gamepads are unchanged.
+  Not yet confirmed in a real combat QTE. See [design and tests](docs/research/keyboard-qte-rotation-2026-11-13.md).
+
 ### Performance (needs testing on weak GPUs)
 - The GS worker now keeps at most two frames of draws queued on the GPU (`zzz-326`). Before, only the vertex ring
   held it back, so GPU-bound scenes (AF, 3x, rain and particles) could queue many frames and then stall, stuttering

@@ -14,7 +14,7 @@
 struct R5900Context { uint32_t pc=0; uint32_t regs[32]{}; };
 struct PS2Runtime {};
 #define GPR_U32(c,n) ((c)->regs[n])
-enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight };
+enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight, BQteStick };
 enum Variante { VNormal,VGriego };
 struct Caja {};
 struct Anterior {
@@ -28,7 +28,7 @@ struct Rotulo {
 } g_rotulo;
 struct Forma { uint32_t malla=0,rellenos=0,color0=0,color1=0; } form;
 struct Especial { Boton boton; float dx,dy,radio; } special{BL1,0,0,1};
-struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; unsigned guideStep=0,guideCount=0;uint16_t autoButton=0; };
+struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; unsigned guideStep=0,guideCount=0;bool guideHold=false;uint16_t autoButton=0; };
 std::vector<Icono> g_construyendo;
 std::set<uint32_t> g_buttonBackgrounds;
 std::atomic<bool> g_replacementsReady{false};

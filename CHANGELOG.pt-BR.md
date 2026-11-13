@@ -25,6 +25,13 @@ discos e os saves são mantidos.
 
 ## [Não lançado] — fix-chore depois da v0.6.0-rc.1
 
+### Teclado e mouse
+- QTEs de girar (#34): enquanto o guia numerado de teclas está na tela, as teclas mostradas giram o analógico de forma
+  contínua no sentido da seta, sem passar pelo centro, então apertá-las em ordem funciona tocando ou segurando
+  (`zzz-329`). O gesto "Círculo" da Acessibilidade agora começa na primeira tecla do guia e gira no sentido da seta
+  (antes girava sempre no sentido horário), e o guia mostra a tecla dele sob um círculo. Controles não mudam.
+  Ainda não confirmado em um QTE de combate real. Veja [projeto e testes](docs/research/keyboard-qte-rotation-2026-11-13.md).
+
 ### Desempenho (precisa de teste em GPUs fracas)
 - O worker do GS agora deixa no máximo dois quadros de desenho na fila da GPU (`zzz-326`). Antes, só o anel de
   vértices o segurava: cenas limitadas pela GPU (AF, 3x, chuva e partículas) acumulavam muitos quadros e depois

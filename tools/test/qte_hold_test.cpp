@@ -9,6 +9,9 @@
 // at the chosen rate, the game sees them whether it polls at 60 or at 30 fps, the button stays down most of the time
 // (so a "Hold" prompt still charges), and a button the player did not list is never touched.
 #include "runtime/gow_qte_hold.h"
+#include "runtime/gow_qte_prompt.h"
+
+#include <cmath>
 
 #include <cstdio>
 #include <cstdint>
@@ -180,6 +183,115 @@ int main()
             x = 45; y = 200;
             check(!gesture.apply(gow_qte::StickMode::Off, true, 4.0, x, y) && x == 45 && y == 200,
                   "disabled assistance leaves axes untouched");
+        }
+    }
+
+    // zzz-329: the gesture follows a displayed guide; its defaults keep the original clockwise samples.
+    {
+        gow_qte::StickGesture original, guided;
+        bool same = true;
+        for (int i = 0; i < 40; ++i)
+        {
+            const double t = i / 60.0, angle = std::fmod(t, 0.5) * 12.566370614359172;
+            uint8_t x = 0, y = 0;
+            original.apply(gow_qte::StickMode::Rotate, true, t, x, y);
+            same &= x == std::lround(128.0 + 127.0 * std::cos(angle)) && y == std::lround(128.0 + 127.0 * std::sin(angle));
+        }
+        check(same, "default rotation keeps the original clockwise samples");
+        uint8_t x = 0, y = 0;
+        guided.apply(gow_qte::StickMode::Rotate, true, 10.0, x, y, -1, 180.0);
+        check(x == 128 && y == 255, "guided rotation starts at the guide's first key (down)");
+        guided.apply(gow_qte::StickMode::Rotate, true, 10.0 + 0.0625, x, y, -1, 180.0);
+        check(x > 200 && y > 200, "counter-clockwise from down passes down-right first");
+        guided.apply(gow_qte::StickMode::Rotate, true, 10.125, x, y, -1, 180.0);
+        check(x == 255 && y == 128, "a quarter turn later it is right, the guide's second key");
+    }
+
+    // zzz-329: keyboard sweep along a rotation guide.
+    {
+        using gow_qte_prompt::KeyboardSweep;
+        using gow_qte_prompt::turnOf;
+        check(turnOf({{2, 1, 0}, 3}) == -1 && turnOf({{0, 1, 2, 3, 0}, 5}) == 1 && turnOf({{0, 3, 2}, 3}) == -1 &&
+                  turnOf({}) == 0 && turnOf({{0, 2, 0}, 3}) == 0,
+              "guide direction from its first two keys");
+        auto angleOf = [](uint8_t x, uint8_t y) {
+            double a = std::atan2(double(x) - 128.0, 128.0 - double(y)) * 57.29577951308232;
+            return a < 0 ? a + 360.0 : a;
+        };
+        auto key = [](unsigned k, uint8_t &x, uint8_t &y) { // 0 up 1 right 2 down 3 left, 4 none
+            x = k == 1 ? 255 : k == 3 ? 0 : 128;
+            y = k == 0 ? 0 : k == 2 ? 255 : 128;
+        };
+        for (double hz : {15.0, 20.0, 30.0, 60.0})
+        {
+            // Taps with releases between them, the way issue 34's player pressed S, D, W for a CCW half turn.
+            const unsigned taps[] = {2, 2, 4, 1, 1, 4, 0, 0};
+            KeyboardSweep sweep;
+            bool centred = false, diagonal = false, reversed = false, stable = true;
+            double previous = -1.0, travelled = 0.0;
+            double t = 5.0;
+            for (int frame = 0; frame < 60; ++frame, t += 1.0 / hz)
+            {
+                uint8_t x, y;
+                key(frame < 8 ? taps[frame] : 4, x, y);
+                const uint8_t rawX = x, rawY = y;
+                const bool on = sweep.apply(-1, t, x, y);
+                if (!on)
+                {
+                    stable &= x == rawX && y == rawY;
+                    continue;
+                }
+                uint8_t againX = rawX, againY = rawY;
+                sweep.apply(-1, t, againX, againY);
+                stable &= againX == x && againY == y;
+                centred |= std::hypot(double(x) - 128.0, double(y) - 128.0) < 100.0;
+                const double a = angleOf(x, y);
+                diagonal |= a > 95.0 && a < 175.0;
+                if (previous >= 0.0)
+                {
+                    double step = previous - a; // counter-clockwise lowers the angle
+                    if (step < -180.0) step += 360.0;
+                    if (step > 180.0) step -= 360.0;
+                    reversed |= step < -0.5;
+                    travelled += step;
+                }
+                previous = a;
+            }
+            const std::string rate = std::to_string(int(hz)) + " Hz: ";
+            check(!centred, rate + "tapped keys never drop the stick to the centre during the guide");
+            check(diagonal, rate + "the sweep passes the down-right diagonal between S and D");
+            check(!reversed && travelled > 170.0 && travelled < 190.0, rate + "S, D, W make one counter-clockwise half turn");
+            check(stable, rate + "repeated reads at one time agree; idle reads keep the raw axes");
+        }
+        {
+            KeyboardSweep sweep;
+            uint8_t x, y;
+            key(2, x, y);
+            sweep.apply(-1, 1.0, x, y);
+            bool viaRight = false;
+            for (int i = 1; i <= 20; ++i)
+            {
+                key(0, x, y);
+                sweep.apply(-1, 1.0 + i / 60.0, x, y);
+                viaRight |= x > 240;
+            }
+            check(viaRight && y < 8, "an opposite key turns the guide's way (down to up through right)");
+            key(4, x, y);
+            check(sweep.apply(-1, 1.5, x, y) && y < 8, "a released key holds the reached angle for a moment");
+            key(4, x, y);
+            check(!sweep.apply(-1, 1.9, x, y) && x == 128 && y == 128, "after the grace period the stick returns to the centre");
+            key(1, x, y);
+            check(!sweep.apply(0, 2.0, x, y) && x == 255 && y == 128, "without a guide the keys stay raw digital input");
+            key(1, x, y);
+            sweep.apply(1, 3.0, x, y);
+            key(3, x, y);
+            sweep.apply(1, 3.0 + 1.0 / 60.0, x, y);
+            check(y > 128, "a clockwise guide turns right to left through down");
+            key(2, x, y);
+            sweep.apply(1, 4.0, x, y);
+            key(1, x, y);
+            sweep.apply(1, 4.5, x, y);
+            check(x == 255 && y == 128, "a player turning against a guide still reaches the shorter target");
         }
     }
 

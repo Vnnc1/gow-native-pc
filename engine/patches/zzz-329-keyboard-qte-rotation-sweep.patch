@@ -1,0 +1,216 @@
+Keyboard/mouse rotation QTEs (issue 34): while a recognized zzz-317 rotation guide is on screen, the mapped movement keys
+drive one continuous full-deflection stick sweep (900 deg/s, shorter way, the guide's way when opposite, 250 ms grace
+after a release) instead of digital jumps through the centre, so tapping the shown keys in order works. The held
+qte_stick gesture (GOW_QTE_STICK=rotate) starts at the guide's first key and turns its way; with that assist enabled
+the guide also shows the key under a circle mark. Outside a guide, keys, gamepads, evade and scripted tests are unchanged;
+GOW_QTE_KEY_SWEEP=0 keeps raw keys. Whether the game rejects a centred stick was not reverse-engineered: in-game QTE
+acceptance remains manual. Tests: qte_hold_test, qte_input_test (4 modes), control-prompts.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+index c1ce286..09e3df0 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_hold.h
+@@ -26,7 +26,9 @@ namespace gow_qte
+     class StickGesture
+     {
+     public:
+-        bool apply(StickMode mode, bool held, double now, uint8_t &x, uint8_t &y)
++        // turn: +1 clockwise on screen (the original gesture), -1 counter-clockwise; start: degrees clockwise from
++        // screen up where a rotation begins (90 = right, the original). zzz-329 passes the displayed guide's values.
++        bool apply(StickMode mode, bool held, double now, uint8_t &x, uint8_t &y, int turn = 1, double start = 90.0)
+         {
+             if (!held || mode == StickMode::Off || !std::isfinite(now))
+             {
+@@ -46,7 +48,9 @@ namespace gow_qte
+             }
+             else
+             {
+-                const double angle = std::fmod(elapsed, 0.5) * 12.566370614359172;
++                // Two turns per second. Defaults give the original samples: x = cos, y = sin, from the right.
++                const double angle = (start - 90.0) * 0.017453292519943295 +
++                                     (turn < 0 ? -1.0 : 1.0) * std::fmod(elapsed, 0.5) * 12.566370614359172;
+                 x = static_cast<uint8_t>(std::lround(128.0 + 127.0 * std::cos(angle)));
+                 y = static_cast<uint8_t>(std::lround(128.0 + 127.0 * std::sin(angle)));
+             }
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+index 9d1c8f0..8fd708a 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+@@ -41,11 +41,65 @@ struct AutoButtons {
+         return phase<60 ? uint16_t(buttons&~requested) : uint16_t(buttons|requested);
+     }
+ };
++// zzz-329: +1 when the guide turns clockwise on screen, -1 counter-clockwise, 0 when it is not a turn.
++inline int turnOf(const Sequence &guide) {
++    if (guide.count<2 || guide.keys[0]>3 || guide.keys[1]>3) return 0;
++    const unsigned step=(guide.keys[1]+4u-guide.keys[0])%4u;
++    return step==1u ? 1 : step==3u ? -1 : 0;
++}
++// Digital keys jump between 8 directions and fall back to the centre between taps, which a stick-rotation QTE
++// does not read as a turn. While a recognized rotation guide is on screen, the keys the player presses become
++// targets of one continuous full-deflection sweep: it never passes through the centre, takes the shorter way
++// round (the guide's way when opposite) and moves at a bounded rate, so even a slow game frame samples the
++// intermediate angles. Angles are degrees clockwise from screen up. Outside a guide the axes are untouched.
++class KeyboardSweep {
++public:
++    static constexpr double kDegreesPerSecond=900.0; // half turn 0.2 s, full turn 0.4 s
++    static constexpr double kGrace=0.25;             // a released key keeps the stick out this long (taps work)
++    static constexpr double kMaxStep=0.1;            // a stalled reader never makes the sweep jump
++    bool apply(int turn,double now,uint8_t &x,uint8_t &y) {
++        if (!turn || !std::isfinite(now)) { reset(); return false; }
++        const double dt=m_active && now>m_last ? std::fmin(now-m_last,kMaxStep) : 0.0;
++        m_last=now;
++        const int dx=(x>128)-(x<128), dy=(y>128)-(y<128);
++        if (dx || dy) {
++            const double held=wrap(std::atan2(double(dx),double(-dy))*57.29577951308232);
++            if (!m_active) { m_angle=held; m_active=true; }
++            m_target=held; m_released=-1.0;
++        } else {
++            if (!m_active) return false;
++            if (m_released<0.0) m_released=now;
++            if (now-m_released>kGrace && distance(m_angle,m_target)<0.5) { reset(); return false; }
++        }
++        const double forward=wrap(turn>0 ? m_target-m_angle : m_angle-m_target);
++        const double way=forward<=180.0 ? double(turn) : -double(turn);
++        const double remaining=forward<=180.0 ? forward : 360.0-forward;
++        m_angle=wrap(m_angle+way*std::fmin(remaining,kDegreesPerSecond*dt));
++        const double radians=m_angle/57.29577951308232;
++        x=static_cast<uint8_t>(std::lround(128.0+127.0*std::sin(radians)));
++        y=static_cast<uint8_t>(std::lround(128.0-127.0*std::cos(radians)));
++        return true;
++    }
++    void reset() { m_active=false; m_released=-1.0; }
++    bool active() const { return m_active; }
++private:
++    static double wrap(double a) { a=std::fmod(a,360.0); return a<0.0 ? a+360.0 : a; }
++    static double distance(double a,double b) { const double d=wrap(a-b); return d>180.0 ? 360.0-d : d; }
++    bool m_active=false;
++    double m_angle=0.0, m_target=0.0, m_last=0.0, m_released=-1.0;
++};
+ inline std::mutex mutex;
+ inline uint16_t buttons=0;
++inline Sequence guide{};
+ inline std::chrono::steady_clock::time_point published{};
+-inline void publish(uint16_t value) {
+-    std::lock_guard<std::mutex> lock(mutex);buttons=value;published=std::chrono::steady_clock::now();
++inline void publish(uint16_t value,const Sequence &rotation=Sequence{}) {
++    std::lock_guard<std::mutex> lock(mutex);buttons=value;guide=rotation;published=std::chrono::steady_clock::now();
++}
++// The rotation guide of the last complete guest frame; empty once publication stops (250 ms, like the buttons).
++inline Sequence activeGuide() {
++    std::lock_guard<std::mutex> lock(mutex);
++    const double age=std::chrono::duration<double>(std::chrono::steady_clock::now()-published).count();
++    return age>=0.0 && age<=0.25 ? guide : Sequence{};
+ }
+ inline uint16_t apply(uint16_t input,bool enabled,bool focused) {
+     static AutoButtons assist;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+index 7f87567..cb8c9f1 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -62,11 +62,11 @@ namespace
+     enum Boton : uint8_t
+     {
+         BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BL3, BR3, BStart, BSelect,
+-        BArriba, BAbajo, BIzquierda, BDerecha, BCruceta, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight, NumBotones
++        BArriba, BAbajo, BIzquierda, BDerecha, BCruceta, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight, BQteStick, NumBotones
+     };
+     constexpr const char *kAccion[NumBotones] = {"cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3",
+                                                  "start", "select", "up", "down", "left", "right", "up", "li_arriba",
+-                                                 "li_arriba", "li_izq", "li_abajo", "li_der"};
++                                                 "li_arriba", "li_izq", "li_abajo", "li_der", "qte_stick"};
+     enum Variante : uint8_t
+     {
+         VNormal,
+@@ -484,6 +484,7 @@ namespace
+         bool worldSpace = false;
+         std::array<float, 8> worldCorners{};
+         unsigned guideStep = 0, guideCount = 0;
++        bool guideHold = false; // zzz-329: the held QTE gesture key that turns along the guide
+         uint16_t autoButton = 0;
+     };
+     std::mutex g_mutex;
+@@ -780,6 +781,20 @@ namespace
+                 leerCxform(rdram, GPR_U32(ctx, 8), hint.r, hint.g, hint.b, hint.a);
+                 anotar(hint);
+             }
++            // zzz-329: with Accessibility > stick gesture "Circle", holding its key turns the way this guide shows.
++            static const bool rotateAssist = [] {
++                const char *mode = std::getenv("GOW_QTE_STICK");
++                const char *test = std::getenv("GOW_PAD_TEST");
++                return mode && std::strcmp(mode, "rotate") == 0 && !(test && std::strcmp(test, "1") == 0);
++            }();
++            if (rotateAssist && g_construyendo.size() < 128) {
++                // Centred below the sequence (above it near the bottom edge), so a five-key guide stays on screen.
++                const float holdY = top + 46.0f <= 456.0f ? top + 46.0f : top - 46.0f;
++                Icono hold{BQteStick, VNormal, centerX, holdY, size, 1, 1, 1, 1};
++                hold.guideHold = true;
++                leerCxform(rdram, GPR_U32(ctx, 8), hold.r, hold.g, hold.b, hold.a);
++                anotar(hold);
++            }
+         }
+ 
+         // Rotation/shake diagrams encode direction as well as a stick. Keep that information visible.
+@@ -1238,8 +1253,16 @@ void gowIconosFrame()
+     cerrarRotulo();
+     std::lock_guard<std::mutex> lock(g_mutex);
+     uint16_t automatic = 0;
+-    for (const auto &i : g_construyendo) automatic |= i.autoButton;
+-    gow_qte_prompt::publish(automatic);
++    // zzz-329: the frame's rotation guide, in its numbered order, for the keyboard sweep (ps2_pad.cpp).
++    gow_qte_prompt::Sequence guide;
++    for (const auto &i : g_construyendo) {
++        automatic |= i.autoButton;
++        if (i.guideStep && i.guideStep <= guide.keys.size() && i.guideCount <= guide.keys.size()) {
++            guide.keys[i.guideStep - 1] = i.boton == BMoveUp ? 0u : i.boton == BMoveRight ? 1u : i.boton == BMoveDown ? 2u : 3u;
++            guide.count = i.guideCount;
++        }
++    }
++    gow_qte_prompt::publish(automatic, guide);
+     g_publicados.swap(g_construyendo);
+     g_construyendo.clear();
+     g_anterior = {};
+@@ -1247,6 +1270,10 @@ void gowIconosFrame()
+ 
+ void drawGuideMarkers(const Icono &i, float cx, float cy, float dw, float dh, Color tinte)
+ {
++        if (i.guideHold) { // an open circle over the key: hold it instead of pressing the sequence
++            const float unit = dh / 480.0f;
++            DrawRing({cx, cy - 24.0f * unit}, 5.0f * unit, 6.5f * unit, -60.0f, 240.0f, 24, tinte);
++        }
+         if (i.guideStep) {
+             const float unit = dh / 480.0f;
+             DrawText(TextFormat("%u", i.guideStep), int(cx-3*unit), int(cy-26*unit), std::max(10,int(10*unit)), tinte);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+index 3b5e727..3574af5 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -345,8 +345,27 @@ bool tobiichiSticksTeclado(uint8_t (&sticks)[4])
+         if (std::strcmp(value, "rotate") == 0) return gow_qte::StickMode::Rotate;
+         return gow_qte::StickMode::Off;
+     }();
++    // GOW-Port (zzz-329): a recognized rotation guide on screen gives the keys a continuous turn (see KeyboardSweep)
++    // and the held QTE gesture key the guide's direction and start. GOW_QTE_KEY_SWEEP=0 keeps raw digital keys.
++    static const bool sweepEnabled = [] {
++        const char *value = std::getenv("GOW_QTE_KEY_SWEEP");
++        const char *test = std::getenv("GOW_PAD_TEST");
++        return !(value && std::strcmp(value, "0") == 0) && !(test && std::strcmp(test, "1") == 0);
++    }();
++    const gow_qte_prompt::Sequence guide = gow_qte_prompt::activeGuide();
++    const int turn = gow_qte_prompt::turnOf(guide);
++    const bool focused = IsWindowFocused();
++    const double now = GetTime();
++    static std::mutex sweepMutex; // both pad readers call this; one sweep state
++    static gow_qte_prompt::KeyboardSweep sweep;
+     static gow_qte::StickGesture gesture;
+-    gesture.apply(mode, accionPulsada(m, AccQteStick) && IsWindowFocused(), GetTime(), sticks[2], sticks[3]);
++    std::lock_guard<std::mutex> lock(sweepMutex);
++    if (sweepEnabled && focused && !evadeModifierHeld(m))
++        sweep.apply(turn, now, sticks[2], sticks[3]);
++    else
++        sweep.reset();
++    gesture.apply(mode, accionPulsada(m, AccQteStick) && focused, now, sticks[2], sticks[3],
++                  turn ? turn : 1, turn ? 90.0 * guide.keys[0] : 90.0);
+     return true;
+ }
+ 

@@ -251,6 +251,14 @@ empty-frame publication, stale/focus/conflict rejection and scripted-pad exclusi
 `gow_control_prompts` covers production recognition/input; `qte-controls.py` tests
 the actual accessibility toggle. See `docs/research/keyboard-qte-sequences-2026-11-09.md`.
 
+Patch `zzz-329` publishes the frame's rotation guide with the button batch (same 250 ms staleness) and, only while
+one is fresh, turns the keyboard left stick into `gow_qte_prompt::KeyboardSweep`: full deflection, bounded 900°/s,
+shorter way (guide way when opposite), 250 ms grace after release. It is time-based (repeated reads agree) and
+guarded by one mutex because both pad readers call `tobiichiSticksTeclado`. Evade, focus loss, gamepads, scripted
+`GOW_PAD_TEST=1` sessions and `GOW_QTE_KEY_SWEEP=0` keep raw keys. The `qte_stick` gesture takes the guide's turn and
+start; its defaults must keep the original clockwise samples (`qte_hold_test`). Do not extend the sweep to unrecognized
+diagrams or make it press anything by itself. See `docs/research/keyboard-qte-rotation-2026-11-13.md`.
+
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
 written. Keep entry/resume, caller, primary-slot and size/result gates; do not use

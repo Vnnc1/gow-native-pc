@@ -38,6 +38,7 @@ Additional investigations:
 - [v0.6.0-rc.1 open-issue sweep and GS frame-latency limit](frame-latency-2026-11-11.md): issues 34/33/31/30/28 status, regional movie-EOF gap, GPU-06 hypothesis and acceptance gates.
 - [Reproducible combat scenes: test-only fixed step](fixed-step-2026-11-12.md): why the encounter anchor was not enough, `zzz-328`, identical-binary ship_frames runs matching exactly on the i5-8265U.
 - [Player report ZIPs for issues 33/31/30](issue-reports-2026-11-12.md): issue 33 is a null-object virtual call after the Cronos movie (not the movie EOF hang), 30 matches the fixed USA EOF hang, 31 has no new data.
+- [Keyboard rotation QTEs: continuous sweep along the guide](keyboard-qte-rotation-2026-11-13.md): issue 34 cause (digital keys pass the stick centre, clockwise-only Circle gesture), `zzz-329` sweep and guided gesture, tests and the in-game acceptance gate.
 - [Future graphics APIs and automatic launcher selection](graphics-api-roadmap.md): Vulkan/Direct3D evaluation, compatibility gates and OpenGL fallback; proposal only.
 
 Rules that hold for all of them: runtime changes are new `engine/patches/NN-*.patch` files (never edit an applied patch's
