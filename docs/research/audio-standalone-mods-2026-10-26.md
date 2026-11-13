@@ -29,7 +29,8 @@ the patched batch and `GOW_SND_PERFRAME=1` paths pass.
 Patch 25 reads `gow-native.boot` beside the runner when no guest ELF argument is supplied. Explicit arguments retain
 precedence. The pipeline writes initial defaults; starting through the launcher atomically saves the selected ELF
 and runtime settings (only TOBIICHI_/PS2X_/GOW_ variables, never the entire environment). The standalone process logs
-to `standalone.log` beside the executable. The profile contains local paths, is generated data, and must not ship.
+to `standalone.log` beside the executable. The profile records installation-relative paths (`GOW_NATIVE_BOOT_V2`, patch `zzz-326`), is generated data, and must not
+ship.
 After moving a disc or choosing another language, start through the launcher again to refresh it. A missing recorded
 disc is reported in the standalone log. The game process remains the actual OpenGL renderer, not a wrapper process.
 

@@ -13,7 +13,9 @@ Output (under <data>/<game>/):
                           code is checked to be identical; a change that hides the widescreen option is left out)
   mc0/                    the one memory card folder: every disc folder's mc0 is a junction to it
   languages.json          [{language, label, edition, elf, quality: "full"|"standalone"|"original"}], one per
-                          language (the best folder), plus "recompile_elf" (the executable the pipeline recompiles)
+                          language (the best folder), plus "recompile_elf" (the executable the pipeline recompiles).
+                          Paths inside the repository are stored relative to its root (discfs.root_relative), so a moved
+                          or copied installation still finds its discs; every reader resolves them against the root
 A disc whose profile region declares `code = "<region id>"` carries that region's executable (the Asia SCAJ-97399
 disc boots the Japanese copy byte for byte): it is extracted and normalised like any other, its executable is also
 linked under the name that build keys on, and it is reported for register_region.py instead of entering
@@ -308,11 +310,11 @@ def main():
         except (OSError, ValueError, KeyError) as error:
             say(f'  Save previews unavailable: {error}')
         entry = {'language': f['language'], 'label': f['label'], 'edition': f['edition'], 'quality': quality,
-                 'elf': os.path.abspath(os.path.join(folder, elf_name))}
+                 'elf': discfs.root_relative(os.path.join(folder, elf_name), ROOT)}
         rank = {'original': 3, 'full': 2, 'standalone': 1}
         if f['language'] not in languages or rank[quality] > rank[languages[f['language']]['quality']]:
             languages[f['language']] = entry
-    recompile = os.path.abspath(os.path.join((originals or found)[0]['folder'], elf_name))
+    recompile = discfs.root_relative(os.path.join((originals or found)[0]['folder'], elf_name), ROOT)
     manifest = {'game': a.game, 'title': prof['title'], 'recompile_elf': recompile,
                 'languages': sorted(languages.values(), key=lambda e: e['language'])}
     json.dump(manifest, open(os.path.join(base, 'languages.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)

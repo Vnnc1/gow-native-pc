@@ -34,7 +34,14 @@ public static class GowWindows {
 function Languages {
     $f = Join-Path $data 'languages.json'
     if (-not (Test-Path $f)) { throw 'no prepared disc: run the "discs" stage with your ISO' }
-    return Get-Content $f -Raw -Encoding UTF8 | ConvertFrom-Json
+    $m = Get-Content $f -Raw -Encoding UTF8 | ConvertFrom-Json
+    # tools/disc/prepare.py records the disc paths relative to the checkout root, so a moved installation still finds
+    # them; the pipeline consumes absolute paths.
+    if ($m.recompile_elf -and -not [IO.Path]::IsPathRooted($m.recompile_elf)) { $m.recompile_elf = Join-Path $root $m.recompile_elf }
+    foreach ($entrada in $m.languages) {
+        if ($entrada.elf -and -not [IO.Path]::IsPathRooted($entrada.elf)) { $entrada.elf = Join-Path $root $entrada.elf }
+    }
+    return $m
 }
 
 function Invoke-GameRecording([string]$exe, [string]$elf, [int]$seconds, [hashtable]$variables, [int]$closeTimeout = 15000) {

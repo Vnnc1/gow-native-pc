@@ -20,6 +20,29 @@ import iso_extract  # noqa: E402  (Waffle565's ISO9660 extractor, see its header
 SECTOR = 2048
 
 
+def root_relative(path, root) -> str:
+    """A path inside root as a POSIX relative name.
+
+    Manifests under data/ record where the prepared game files live. Relative names keep an installation playable after
+    its folder is moved or copied; absolute ones do not. Anything outside root (a user's ISO, a build folder) stays
+    absolute: it has no root-relative form, and Windows has none at all across drives.
+    """
+    path, root = os.path.abspath(path), os.path.abspath(root)
+    try:
+        relative = os.path.relpath(path, root)
+    except ValueError:  # another drive on Windows
+        return path.replace(os.sep, '/')
+    # Escaping the root would only be a pretty spelling of an absolute path (and confuse the packagers that reject '..').
+    if relative == '..' or relative.startswith('..' + os.sep):
+        return path.replace(os.sep, '/')
+    return relative.replace(os.sep, '/')
+
+
+def resolve_in_root(value, root) -> str:
+    """The absolute form of a value written by root_relative; absolute values pass through."""
+    return value if os.path.isabs(value) else os.path.normpath(os.path.join(os.path.abspath(root), *value.split('/')))
+
+
 def pcsx2_crc(elf: bytes) -> str:
     """PCSX2's game CRC: XOR of every little-endian 32-bit word of the ELF"""
     return '%08X' % functools.reduce(operator.xor, (w for (w,) in struct.iter_unpack('<I', elf[:len(elf) // 4 * 4])), 0)

@@ -1,0 +1,207 @@
+A boot profile an installation can be moved or copied with, and a reader that can be tested.
+
+gow-native.boot (patch 25) stored absolute paths, so the recorded disc, card, saves and capture folders stopped being
+found when the installation moved. Version 2 records the installation root relative to the boot file's own folder, then
+the guest ELF and every path inside the installation as '@'-relative to that root, so the launcher, the pipeline's
+first-run defaults (tools/pipeline/modules/common.ps1 Format-BootProfile) and this reader agree without either side
+knowing where the installation is. Paths outside the installation (a player's ISO, AppData) stay absolute, and V1 files
+keep working unchanged, so an older profile is not invalidated.
+Parsing, root anchoring and disc resolution live in the header-only runtime/boot_profile.h, away from the environment
+export and standalone.log redirect that stay in main.cpp, so tools/test/boot-profile.cpp can run the same reader through
+gow_boot_profile_tests (part of verify) with a V2 relative root, a V2 absolute root, legacy V1 and a missing disc. That
+test found two defects in the first draft: a trailing newline counted as the guest-ELF line, so a truncated profile was
+accepted, and an empty file was read before the header check.
+Explicit guest ELF arguments still win, as in patch 25. A missing recorded disc keeps the existing error.
+Validated: the whole chain plus this patch applies in order on the pinned runtime commit, and gow_boot_profile_tests
+passes against the patched header (g++ -std=c++20 -Wall -Wextra -Werror). The runtime itself was not built here; its
+Windows build and a gameplay start remain to be run.
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/boot_profile.h b/PS2Recomp/ps2xRuntime/include/runtime/boot_profile.h
+new file mode 100644
+--- /dev/null
++++ b/PS2Recomp/ps2xRuntime/include/runtime/boot_profile.h
+@@ -0,0 +1,125 @@
++// Relative gow-native.boot profiles (gow-native-pc, patch zzz-326).
++//
++// The launcher and the pipeline write GOW_NATIVE_BOOT_V2: the installation root relative to the profile's own folder,
++// then the guest ELF, then the runtime settings. Paths inside the installation carry a leading '@', so a copied or
++// moved installation keeps working. GOW_NATIVE_BOOT_V1 (absolute paths, no root line) is still read.
++//
++// Header-only and free of environment and current-directory side effects: main.cpp owns the standalone.log redirect and
++// the environment export, and tools/test/boot-profile.cpp exercises this parsing without building the runtime.
++#pragma once
++
++#include <filesystem>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <system_error>
++#include <vector>
++
++namespace ps2x::boot
++{
++    struct Setting
++    {
++        std::string key;
++        std::string value;
++    };
++
++    struct Profile
++    {
++        std::filesystem::path root; // as recorded; empty when the profile has no root line
++        std::string elf;            // as recorded: '@'-relative or absolute
++        std::vector<Setting> settings;
++        bool legacy = false; // V1: absolute paths, no installation root
++    };
++
++    inline constexpr char kMarker = '@';
++
++    inline bool IsRuntimeSetting(std::string_view key)
++    {
++        return key.starts_with("TOBIICHI_") || key.starts_with("PS2X_") || key.starts_with("GOW_");
++    }
++
++    // UTF-8 text (what the launcher and the pipeline write) as a path, including a player's non-ASCII folder. u8path is
++    // used by the older readers but is deprecated in C++20, so build the path from char8_t instead.
++    inline std::filesystem::path Utf8Path(std::string_view text)
++    {
++        return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t *>(text.data()), text.size()));
++    }
++
++    // '@x' is inside the installation; anything else (an absolute path, a number, a switch) is taken as written.
++    inline bool IsRelativeValue(std::string_view value)
++    {
++        return !value.empty() && value.front() == kMarker;
++    }
++
++    // std::nullopt for an unknown header or a missing guest-ELF line; malformed setting lines are ignored, as before.
++    inline std::optional<Profile> Parse(std::string_view text)
++    {
++        // A final newline ends the last line; it must not count as an extra (empty) guest-ELF line.
++        std::vector<std::string_view> lines;
++        while (!text.empty())
++        {
++            const auto end = text.find('\n');
++            auto line = text.substr(0, end);
++            if (!line.empty() && line.back() == '\r') line.remove_suffix(1); // hand-edited or CRLF-checkout file
++            lines.push_back(line);
++            if (end == std::string_view::npos) break;
++            text.remove_prefix(end + 1);
++        }
++        if (lines.empty()) return std::nullopt;
++
++        Profile profile;
++        std::size_t next = 1;
++        if (lines[0] == "GOW_NATIVE_BOOT_V2")
++        {
++            if (next >= lines.size()) return std::nullopt;
++            profile.root = Utf8Path(lines[next++]);
++        }
++        else if (lines[0] == "GOW_NATIVE_BOOT_V1")
++        {
++            profile.legacy = true;
++        }
++        else
++        {
++            return std::nullopt;
++        }
++        if (next >= lines.size()) return std::nullopt;
++        profile.elf = std::string(lines[next++]);
++        for (; next < lines.size(); ++next)
++        {
++            const auto split = lines[next].find('=');
++            if (split == std::string_view::npos) continue;
++            auto key = std::string(lines[next].substr(0, split));
++            if (!IsRuntimeSetting(key)) continue;
++            profile.settings.push_back({std::move(key), std::string(lines[next].substr(split + 1))});
++        }
++        return profile;
++    }
++
++    // The installation root anchored to the profile's folder, so the file itself does not depend on where it lives.
++    inline std::filesystem::path RootPath(const Profile &profile, const std::filesystem::path &bootFolder)
++    {
++        if (profile.root.empty()) return bootFolder.lexically_normal();
++        if (profile.root.is_absolute()) return profile.root.lexically_normal();
++        return (bootFolder / profile.root).lexically_normal();
++    }
++
++    // Absolute location of a recorded path; '@x' resolves against RootPath.
++    inline std::filesystem::path ResolvePath(const Profile &profile, const std::filesystem::path &bootFolder,
++                                             std::string_view value)
++    {
++        const auto root = RootPath(profile, bootFolder);
++        auto path = IsRelativeValue(value) ? (root / Utf8Path(value.substr(1))).lexically_normal() : Utf8Path(value);
++        if (path.is_relative()) path = root / path;
++        if (!path.is_absolute()) path = std::filesystem::absolute(path);
++        return path.lexically_normal();
++    }
++
++    // The guest ELF, absolute; std::nullopt when the recorded disc is missing.
++    inline std::optional<std::filesystem::path> GuestElf(const Profile &profile, const std::filesystem::path &bootFolder)
++    {
++        const auto path = ResolvePath(profile, bootFolder, profile.elf);
++        std::error_code error;
++        if (!std::filesystem::is_regular_file(path, error)) return std::nullopt;
++        return path;
++    }
++}
+diff --git a/PS2Recomp/ps2xRuntime/src/main.cpp b/PS2Recomp/ps2xRuntime/src/main.cpp
+--- a/PS2Recomp/ps2xRuntime/src/main.cpp
++++ b/PS2Recomp/ps2xRuntime/src/main.cpp
+@@ -19,7 +19,9 @@ void ps2InstallEePageWatch(PS2Runtime &runtime);
+ #include <algorithm>
+ #include <cstdlib>
+ #include <fstream>
++#include <iterator>
+ #include <cstdio>
++#include "runtime/boot_profile.h"
+ 
+ #if defined(__ANDROID__)
+ #include <android/log.h>
+@@ -159,32 +161,32 @@ namespace
+         {
+             const auto folder = std::filesystem::absolute(argv[0]).parent_path();
+             std::ifstream boot(folder / "gow-native.boot");
+-            std::string header, elf, line;
+-            if (std::getline(boot, header) && header == "GOW_NATIVE_BOOT_V1" && std::getline(boot, elf))
++            const std::string text((std::istreambuf_iterator<char>(boot)), std::istreambuf_iterator<char>());
++            // V2 (gow-native-pc): the installation root relative to this file's folder, then the guest ELF and every path
++            // inside the installation as '@'-relative to that root, so a copied or moved installation still starts. V1
++            // files (absolute paths) keep working unchanged. Parsing lives in runtime/boot_profile.h so it is testable.
++            if (const auto profile = ps2x::boot::Parse(text))
+             {
+                 std::filesystem::current_path(folder);
+                 std::ofstream("standalone.log", std::ios::trunc).close();
+                 std::freopen("standalone.log", "a", stdout);
+                 std::freopen("standalone.log", "a", stderr);
+-                if (!elf.empty() && elf.back() == '\r') elf.pop_back();
+-                const auto path = std::filesystem::u8path(elf);
+-                if (!path.is_absolute() || !std::filesystem::is_regular_file(path))
++                const auto disc = ps2x::boot::GuestElf(*profile, folder);
++                if (!disc)
+                     throw std::runtime_error("The disc recorded in gow-native.boot is missing. Open the launcher and select it again.");
+-                while (std::getline(boot, line))
++                for (const auto &setting : profile->settings)
+                 {
+-                    if (!line.empty() && line.back() == '\r') line.pop_back();
+-                    const auto split = line.find('=');
+-                    if (split == std::string::npos) continue;
+-                    const auto key = line.substr(0, split), value = line.substr(split + 1);
+-                    if (!(key.starts_with("TOBIICHI_") || key.starts_with("PS2X_") || key.starts_with("GOW_"))) continue;
++                    const bool inInstallation = ps2x::boot::IsRelativeValue(setting.value);
++                    const auto resolved = inInstallation ? ps2x::boot::ResolvePath(*profile, folder, setting.value) : std::filesystem::path();
+ #if defined(_WIN32)
+-                    _wputenv_s(std::filesystem::u8path(key).wstring().c_str(), std::filesystem::u8path(value).wstring().c_str());
++                    _wputenv_s(std::filesystem::u8path(setting.key).wstring().c_str(),
++                               (inInstallation ? resolved.wstring() : std::filesystem::u8path(setting.value).wstring()).c_str());
+ #else
+-                    setenv(key.c_str(), value.c_str(), 1);
++                    setenv(setting.key.c_str(), (inInstallation ? resolved.string() : setting.value).c_str(), 1);
+ #endif
+                 }
+                 std::cout << "Using per-build gow-native.boot" << std::endl;
+-                return path;
++                return *disc;
+             }
+         }
+ #if defined(PS2X_DEFAULT_BOOT_ELF)

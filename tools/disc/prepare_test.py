@@ -1,5 +1,6 @@
 """Synthetic disc normalization regressions; no game data required."""
 import hashlib
+import os
 from pathlib import Path
 import struct
 import sys
@@ -105,6 +106,25 @@ class BuildAliasTests(unittest.TestCase):
             (Path(tmp) / 'SLPM_670.10').write_bytes(b'executable')
             self.assertFalse(prepare.expose_for_build(tmp, 'SLPM_670.10', 'SLPM_670.10'))
             self.assertEqual(len(list(Path(tmp).iterdir())), 1)
+
+
+class RootRelativePathTests(unittest.TestCase):
+    """Prepared data records paths relative to the checkout root, so a moved installation still finds its discs."""
+    def test_inside_root_is_relative_and_resolves_back(self):
+        root = prepare.ROOT
+        inside = os.path.join(root, 'data', 'gow1', 'discs', 'usa', 'SCUS_973.99')
+        stored = prepare.discfs.root_relative(inside, root)
+        self.assertEqual(stored, 'data/gow1/discs/usa/SCUS_973.99')
+        self.assertEqual(os.path.normcase(prepare.discfs.resolve_in_root(stored, root)),
+                         os.path.normcase(os.path.normpath(inside)))
+
+    def test_outside_root_stays_absolute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = os.path.join(tmp, 'game.iso')
+            stored = prepare.discfs.root_relative(outside, prepare.ROOT)
+            self.assertTrue(os.path.isabs(stored))
+            self.assertEqual(os.path.normcase(prepare.discfs.resolve_in_root(stored, prepare.ROOT)),
+                             os.path.normcase(outside))
 
 
 if __name__ == '__main__':

@@ -11,6 +11,8 @@ $profile = (& $python -I (Join-Path $root 'tools/pipeline/profile.py') $Game | O
 if ($LASTEXITCODE -ne 0) { throw 'Cannot load game profile' }
 $data = Join-Path $root "data/$Game"
 $elf = (Get-Content (Join-Path $data 'languages.json') -Raw -Encoding UTF8 | ConvertFrom-Json).recompile_elf
+# prepare.py stores it relative to the checkout root, so a moved installation still runs
+if (-not [IO.Path]::IsPathRooted($elf)) { $elf = Join-Path $root $elf }
 $build = (Get-Content (Join-Path $root 'data/build-root.txt') -Raw).Trim() + '-clang'
 $runner = Join-Path $build 'ps2xRuntime/ps2EntryRunner.exe'
 if (-not (Test-Path $runner)) { throw 'Build the Clang game first' }

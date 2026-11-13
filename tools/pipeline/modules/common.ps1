@@ -40,6 +40,49 @@ function Write-PipelineMetrics {
 
 function Need($p, $what) { if (-not (Test-Path $p)) { throw "Missing $what : $p" } }
 function Barra($p) { $p -replace '\\', '/' }
+# --- gow-native.boot (engine/patches/25, zzz-326) -------------------------------------------------------------------
+# The installation can be moved or copied, so the boot profile records the installation root relative to its own folder
+# and every path inside the installation '@'-relative to that root; the runtime resolves them without knowing where the
+# installation is. Anything outside it (a player's ISO, AppData) stays absolute, and another Windows drive has no
+# relative form at all, so it stays absolute too.
+function Get-GowRelativePath([string]$desde, [string]$ruta) {
+    if (-not $desde -or -not $ruta) { return '' }
+    try {
+        $sep = [IO.Path]::DirectorySeparatorChar
+        $alt = [IO.Path]::AltDirectorySeparatorChar
+        # A bare POSIX path reads as a *relative* Uri, so build the file URI explicitly on every host.
+        $comoUri = {
+            param([string]$p)
+            $p = $p -replace '\\', '/'
+            if ($p -match '^[a-zA-Z]:') { $p = '/' + $p }
+            return [Uri]("file://$p")
+        }
+        $desdeAbsoluto = [IO.Path]::GetFullPath($desde).TrimEnd($sep, $alt)
+        $rutaAbsoluta = [IO.Path]::GetFullPath($ruta).TrimEnd($sep, $alt)
+        if ($desdeAbsoluto -eq $rutaAbsoluta) { return '.' } # the boot file sits in the installation root itself
+        $base = & $comoUri ($desdeAbsoluto + $sep)
+        $destino = & $comoUri $rutaAbsoluta
+        if ($base.Scheme -ne $destino.Scheme -or $base.Host -ne $destino.Host) { return '' }
+        $relativa = [Uri]::UnescapeDataString($base.MakeRelativeUri($destino).ToString())
+        # Another drive has no relative form: MakeRelativeUri returns an absolute URI there.
+        if ($relativa -match '^[a-zA-Z][a-zA-Z0-9+.-]*:' -or $relativa.StartsWith('/')) { return '' }
+        return ($relativa -replace '\\', '/')
+    } catch { return '' }
+}
+# '@'-relative to the installation when the path is inside it, otherwise unchanged (absolute paths keep working).
+function Get-BootProfilePath([string]$raiz, [string]$ruta) {
+    if (-not $ruta) { return '' }
+    $relativa = Get-GowRelativePath $raiz $ruta
+    if (-not $relativa -or $relativa -eq '.' -or $relativa.StartsWith('../') -or $relativa.StartsWith('..\\')) { return $ruta }
+    return '@' + $relativa
+}
+function Format-BootProfile([string]$carpetaBoot, [string]$raiz, [string]$elf, [string[]]$lineas = @()) {
+    $raizRelativa = Get-GowRelativePath $carpetaBoot $raiz
+    if (-not $raizRelativa) { $raizRelativa = [IO.Path]::GetFullPath($raiz) } # another drive: absolute still resolves
+    $texto = "GOW_NATIVE_BOOT_V2`n$raizRelativa`n$(Get-BootProfilePath $raiz $elf)`n"
+    foreach ($linea in $lineas) { if ($linea) { $texto += "$linea`n" } }
+    return $texto
+}
 function Get-RuntimePatches {
     # Windows PowerShell 5.1 sorts punctuation differently from PowerShell 7.
     # Ordinal order guarantees 29-... precedes its dependent 29a/29b follow-ups on both hosts.

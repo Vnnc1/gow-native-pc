@@ -34,8 +34,12 @@ public:
     Q_INVOKABLE QVariantList tarjetasGraficas() const;
     // Main display in physical pixels: {ancho, alto, hz} (width, height, refresh).
     Q_INVOKABLE QVariantMap pantalla() const;
-    // Paths found next to the launcher or in the repository folder: {elf, iso, ejecutable}.
+    // Paths found next to the launcher or in the repository folder: {elf, iso, ejecutable}, stored installation-relative
+    // ('@data/...') so a moved installation keeps them.
     Q_INVOKABLE QVariantMap rutasDetectadas() const;
+    // True when the path exists, resolving an installation-relative ('@...') value against the root first. Lets the
+    // settings drop a path from a previous location instead of reporting the game as missing.
+    Q_INVOKABLE bool existe(const QString &ruta) const;
     // {existe, valido, crc, titulo}: valido (valid) when it is the God of War ELF (NTSC-U, SCUS-97399).
     Q_INVOKABLE QVariantMap comprobarJuego(const QString &elf) const;
     // {ok, iso, extraidos}: the disc image used (the chosen one or the one the game would look for) or extracted files.

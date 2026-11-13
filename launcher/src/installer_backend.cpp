@@ -37,6 +37,14 @@ namespace
         return !QStandardPaths::findExecutable(program).isEmpty();
     }
 
+    // data/<game>/languages.json records where each prepared disc lives, relative to the repository root: a moved or
+    // copied installation still finds its discs. Absolute entries (a user's own manifest, an older preparation) pass
+    // through unchanged.
+    QString rootPath(const QString &root, const QString &value)
+    {
+        return value.isEmpty() || QDir::isAbsolutePath(value) ? value : QDir(root).absoluteFilePath(value);
+    }
+
     // A Python 3 that really runs: the Microsoft Store's python.exe stub in WindowsApps is on PATH without being a Python
     // (it only opens the Store), so being on PATH is not enough. Require 3.12 for the shared recompiler helpers.
     QString workingPython()
@@ -217,11 +225,15 @@ QVariantList InstallerBackend::languages() const
         ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject();
     QVariantList out;
     for (const QJsonValue &v : manifest.value(QStringLiteral("languages")).toArray())
-        if (QFileInfo::exists(v.toObject().value(QStringLiteral("elf")).toString())) {
+    {
+        const QString elf = rootPath(m_root, v.toObject().value(QStringLiteral("elf")).toString());
+        if (QFileInfo::exists(elf)) {
             auto entry = v.toObject().toVariantMap();
+            entry.insert(QStringLiteral("elf"), elf);
             entry.insert(QStringLiteral("runner"), runnerPath());
             out << entry;
         }
+    }
     out.append(RegionalInstallations::read(m_root, m_game));
     return out;
 }
@@ -265,7 +277,7 @@ QString InstallerBackend::recompileElf() const
     QFile file(m_root + QStringLiteral("/data/") + m_game + QStringLiteral("/languages.json"));
     if (!file.open(QIODevice::ReadOnly))
         return {};
-    return QJsonDocument::fromJson(file.readAll()).object().value(QStringLiteral("recompile_elf")).toString();
+    return rootPath(m_root, QJsonDocument::fromJson(file.readAll()).object().value(QStringLiteral("recompile_elf")).toString());
 }
 
 void InstallerBackend::identify(const QStringList &paths)

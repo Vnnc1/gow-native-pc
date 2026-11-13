@@ -255,7 +255,9 @@ def main():
         begin, end = scene["frame_begin"], scene.get("frame_end", 0)
         if not (0 <= begin < end <= 1000000 and end - begin <= 4096):
             p.error("Frame scene requires 1-4096 intervals and ordered boundaries up to 1000000")
-    elf = (a.elf or Path(json.loads((root / "data" / a.game / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"])).resolve()
+    # The manifest stores the executable relative to the checkout root (tools/disc/prepare.py).
+    recorded = Path(json.loads((root / "data" / a.game / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"])
+    elf = (a.elf or (recorded if recorded.is_absolute() else root / recorded)).resolve()
     helper = (a.collector or root / "launcher/build-clang/deploy/gow-session.exe").resolve()
     candidate = a.runner.resolve()
     reference = a.reference_runner.resolve() if a.reference_runner else candidate

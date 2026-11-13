@@ -55,8 +55,10 @@ elif sys.platform == 'linux':
     runner = Path((root / "data/build-root-linux.txt").read_text().strip()) / "ps2xRuntime/ps2EntryRunner"
 else:
     runner = Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe"
+recorded = Path(json.loads((data / "languages.json").read_text(encoding="utf-8"))["recompile_elf"])
+# The manifest stores it relative to the checkout root (tools/disc/prepare.py).
 elf = (str(args.elf.resolve()) if args.elf else
-       json.loads((data / "languages.json").read_text(encoding="utf-8"))["recompile_elf"])
+       str(recorded if recorded.is_absolute() else (root / recorded).resolve()))
 if not runner.is_file() or not Path(elf).is_file():
     parser.error("Runner and prepared ELF must exist")
 helper = root / ("data/build-linux/launcher/gow-session" if sys.platform == 'linux'

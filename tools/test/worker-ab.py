@@ -134,7 +134,9 @@ def main():
     profile = json.loads(subprocess.check_output([sys.executable, "-I", str(root / "tools/pipeline/profile.py"), a.game]))
     data = root / "data" / a.game
     runner = (a.runner or Path((root / "data/build-root.txt").read_text().strip() + "-clang") / "ps2xRuntime/ps2EntryRunner.exe").resolve()
-    elf = (a.elf or Path(json.loads((data / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"])).resolve()
+    # The manifest stores the executable relative to the checkout root (tools/disc/prepare.py).
+    recorded = Path(json.loads((data / "languages.json").read_text(encoding="utf-8-sig"))["recompile_elf"])
+    elf = (a.elf or (recorded if recorded.is_absolute() else root / recorded)).resolve()
     helper = (a.helper or root / "launcher/build-clang/deploy/gow-session.exe").resolve()
     baseline = a.baseline_runner.resolve() if a.baseline_runner else runner
     for f in (runner, baseline, elf, helper):

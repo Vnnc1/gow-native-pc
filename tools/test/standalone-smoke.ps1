@@ -11,6 +11,8 @@ $runner = Join-Path $build 'ps2xRuntime/ps2EntryRunner.exe'
 $boot = Join-Path (Split-Path $runner) 'gow-native.boot'
 $originalBoot = [IO.File]::ReadAllBytes($boot)
 $elf = (Get-Content (Join-Path $data 'languages.json') -Raw -Encoding UTF8 | ConvertFrom-Json).recompile_elf
+# prepare.py stores it relative to the checkout root, so a moved installation still runs
+if (-not [IO.Path]::IsPathRooted($elf)) { $elf = Join-Path $root $elf }
 $output = Join-Path $data ('logs/standalone-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $output | Out-Null
 . (Join-Path $root 'tools/pipeline/modules/process.ps1')

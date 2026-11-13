@@ -1,6 +1,8 @@
 # Test configure invalidation and process cleanup without configuring or running a game.
 $ErrorActionPreference = 'Stop'
 & (Join-Path $PSScriptRoot 'build-root-tests.ps1')
+& (Join-Path $PSScriptRoot 'languages-manifest-tests.ps1')
+& (Join-Path $PSScriptRoot 'boot-profile-tests.ps1')
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 & (Join-Path $PSScriptRoot 'build-progress-tests.ps1')
 $CompilerCache = 'sccache'
@@ -20,19 +22,25 @@ if (-not $missingFailed) { throw 'Native must reject a missing executable' }
 Write-Host 'PASS: native process failure, success after failure and missing executable'
 # The process must receive each argument whole: a quoted path with spaces inside a flag list (the PGO profile of an
 # install in "E:\God of War") once reached CMake cut at the first space.
-$argvFile = Join-Path ([IO.Path]::GetTempPath()) ('gow-argv-' + [guid]::NewGuid().ToString('N') + '.json')
-$sent = @('-DCMAKE_CXX_FLAGS=-O3 -fprofile-instr-use="E:/God of War/data/gow1/pgo/gow.profdata" -DX=1',
-          'C:\dir with space\', 'plain', '-I"C:/no-space"', 'a "b c" \"d\" e\\')
-Native $python (@('-I', '-c', "import json, sys; open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps(sys.argv[2:]))", $argvFile) + $sent) 'argument passing probe'
-# not piped: Windows PowerShell 5.1 emits a piped JSON array as one item
-$received = ConvertFrom-Json ([IO.File]::ReadAllText($argvFile))
-Remove-Item -LiteralPath $argvFile
-$expected = @($sent[0], $sent[1], $sent[2], '-IC:/no-space', $sent[4])
-if ($received.Count -ne $expected.Count) { throw "Native must pass each argument whole: got $($received.Count) arguments" }
-for ($i = 0; $i -lt $expected.Count; ++$i) {
-    if ($received[$i] -cne $expected[$i]) { throw "Native argument $i arrived as [$($received[$i])], expected [$($expected[$i])]" }
+# The quoting rules under test are Windows': an inner quote collapses and a trailing backslash doubles on the wire so
+# the child's CRT re-reads it as one backslash. Other platforms have no equivalent, so this probe only runs on Windows.
+if ($env:OS -ne 'Windows_NT') {
+    Write-Host 'SKIP: native argument quoting is a Windows command-line rule'
+} else {
+    $argvFile = Join-Path ([IO.Path]::GetTempPath()) ('gow-argv-' + [guid]::NewGuid().ToString('N') + '.json')
+    $sent = @('-DCMAKE_CXX_FLAGS=-O3 -fprofile-instr-use="E:/God of War/data/gow1/pgo/gow.profdata" -DX=1',
+              'C:\dir with space\', 'plain', '-I"C:/no-space"', 'a "b c" \"d\" e\\')
+    Native $python (@('-I', '-c', "import json, sys; open(sys.argv[1], 'w', encoding='utf-8').write(json.dumps(sys.argv[2:]))", $argvFile) + $sent) 'argument passing probe'
+    # not piped: Windows PowerShell 5.1 emits a piped JSON array as one item
+    $received = ConvertFrom-Json ([IO.File]::ReadAllText($argvFile))
+    Remove-Item -LiteralPath $argvFile
+    $expected = @($sent[0], $sent[1], $sent[2], '-IC:/no-space', $sent[4])
+    if ($received.Count -ne $expected.Count) { throw "Native must pass each argument whole: got $($received.Count) arguments" }
+    for ($i = 0; $i -lt $expected.Count; ++$i) {
+        if ($received[$i] -cne $expected[$i]) { throw "Native argument $i arrived as [$($received[$i])], expected [$($expected[$i])]" }
+    }
+    Write-Host 'PASS: native arguments with spaces, inner quotes and trailing backslashes arrive whole'
 }
-Write-Host 'PASS: native arguments with spaces, inner quotes and trailing backslashes arrive whole'
 $patchNames = @((Get-RuntimePatches).Name)
 if ([array]::IndexOf($patchNames, '29-recomp-dispatch-trim.patch') -ge [array]::IndexOf($patchNames, '29a-call-diagnostics-init.patch')) {
     throw 'Dependent runtime patches must follow their base patch on Windows PowerShell 5.1'
@@ -41,15 +49,20 @@ Write-Host 'PASS: deterministic runtime patch order'
 $scratch = Join-Path $root ('data/pipeline-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 . (Join-Path $root 'tools/pipeline/modules/qt.ps1')
-$archive = Join-Path $scratch 'qt-fixture.tar.xz'
-$archiveCode = "import io, sys, tarfile`nwith tarfile.open(sys.argv[1], 'w:xz') as archive:`n    member = tarfile.TarInfo('qt-fixture/CMakeLists.txt')`n    member.size = 7`n    archive.addfile(member, io.BytesIO(b'fixture'))"
-Native $python @('-I', '-c', $archiveCode, $archive) 'Qt source extraction fixture'
-Expand-QtSource $archive $scratch
-if ([IO.File]::ReadAllText((Join-Path $scratch 'qt-fixture/CMakeLists.txt')) -ne 'fixture' -or
-    @(Get-ChildItem $scratch -Filter 'qt-source-*.tar').Count -ne 0) {
-    throw 'Qt extraction must work without an external XZ executable and clean up its temporary tar'
+# Expand-QtSource unpacks with Windows' own tar.exe (qt.ps1); the SDK source build only exists for Windows.
+if ($env:OS -ne 'Windows_NT') {
+    Write-Host 'SKIP: Qt source extraction uses Windows tar.exe'
+} else {
+    $archive = Join-Path $scratch 'qt-fixture.tar.xz'
+    $archiveCode = "import io, sys, tarfile`nwith tarfile.open(sys.argv[1], 'w:xz') as archive:`n    member = tarfile.TarInfo('qt-fixture/CMakeLists.txt')`n    member.size = 7`n    archive.addfile(member, io.BytesIO(b'fixture'))"
+    Native $python @('-I', '-c', $archiveCode, $archive) 'Qt source extraction fixture'
+    Expand-QtSource $archive $scratch
+    if ([IO.File]::ReadAllText((Join-Path $scratch 'qt-fixture/CMakeLists.txt')) -ne 'fixture' -or
+        @(Get-ChildItem $scratch -Filter 'qt-source-*.tar').Count -ne 0) {
+        throw 'Qt extraction must work without an external XZ executable and clean up its temporary tar'
+    }
+    Write-Host 'PASS: Qt XZ source extraction with the pinned Python and Windows tar'
 }
-Write-Host 'PASS: Qt XZ source extraction with the pinned Python and Windows tar'
 $bld = Join-Path $scratch 'build'
 $rt = Join-Path $root 'engine/runtime'
 $rec = Join-Path $rt 'PS2Recomp'
@@ -173,18 +186,23 @@ try {
 } finally { $root = $savedRoot }
 Write-Host 'PASS: PGO manifest rejection, preserved data, valid recovery and shipped-profile reuse'
 
-$probe = Join-Path $scratch 'probe.py'
-[IO.File]::WriteAllText($probe, "import os, sys`nsys.exit(0 if os.environ.get('GOW_FOUNDATION_PROBE') == 'temporary' else 2)`n")
-$original = $env:GOW_FOUNDATION_PROBE
-try {
-    $env:GOW_FOUNDATION_PROBE = 'original'
-    Invoke-GameRecording $python $probe 1 @{GOW_FOUNDATION_PROBE='temporary'}
-    if ($env:GOW_FOUNDATION_PROBE -ne 'original') { throw 'Recording did not restore original environment' }
-    [IO.File]::WriteAllText($probe, "raise SystemExit(7)`n")
-    $failed = $false
-    try { Invoke-GameRecording $python $probe 1 @{GOW_FOUNDATION_PROBE='temporary'} } catch { $failed = $true }
-    if (-not $failed -or $env:GOW_FOUNDATION_PROBE -ne 'original') { throw 'Failed recording must fail and restore environment' }
-    Write-Host 'PASS: recording environment restored on success and failure'
-} finally {
-    [Environment]::SetEnvironmentVariable('GOW_FOUNDATION_PROBE', $original, 'Process')
+# Invoke-GameRecording hides the game window and closes it with WM_CLOSE (process.ps1), both Windows-only.
+if ($env:OS -ne 'Windows_NT') {
+    Write-Host 'SKIP: recording hides and closes a Windows game window'
+} else {
+    $probe = Join-Path $scratch 'probe.py'
+    [IO.File]::WriteAllText($probe, "import os, sys`nsys.exit(0 if os.environ.get('GOW_FOUNDATION_PROBE') == 'temporary' else 2)`n")
+    $original = $env:GOW_FOUNDATION_PROBE
+    try {
+        $env:GOW_FOUNDATION_PROBE = 'original'
+        Invoke-GameRecording $python $probe 1 @{GOW_FOUNDATION_PROBE='temporary'}
+        if ($env:GOW_FOUNDATION_PROBE -ne 'original') { throw 'Recording did not restore original environment' }
+        [IO.File]::WriteAllText($probe, "raise SystemExit(7)`n")
+        $failed = $false
+        try { Invoke-GameRecording $python $probe 1 @{GOW_FOUNDATION_PROBE='temporary'} } catch { $failed = $true }
+        if (-not $failed -or $env:GOW_FOUNDATION_PROBE -ne 'original') { throw 'Failed recording must fail and restore environment' }
+        Write-Host 'PASS: recording environment restored on success and failure'
+    } finally {
+        [Environment]::SetEnvironmentVariable('GOW_FOUNDATION_PROBE', $original, 'Process')
+    }
 }

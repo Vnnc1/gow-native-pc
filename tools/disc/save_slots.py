@@ -238,8 +238,11 @@ if __name__ == '__main__':
         manifest = base / 'languages.json'
         if manifest.is_file():
             if manifest.stat().st_size > 1024 * 1024: parser.error('Language manifest too large')
+            root = Path(__file__).resolve().parents[2]
             for entry in json.loads(manifest.read_text(encoding='utf-8')).get('languages', [])[:64]:
-                elf = Path(entry['elf']).resolve()
+                # Entries are stored relative to the checkout root, so prepared data survives moving the folder.
+                recorded = Path(entry['elf'])
+                elf = (recorded if recorded.is_absolute() else root / recorded).resolve()
                 if not elf.is_relative_to(base) or not elf.is_file() or elf.stat().st_size > 16 * 1024 * 1024:
                     continue
                 if discfs.text_sha1(elf.read_bytes()) != prof['executable']['text_sha1']:

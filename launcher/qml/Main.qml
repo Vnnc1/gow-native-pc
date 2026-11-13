@@ -222,8 +222,11 @@ ApplicationWindow {
 
     function detectarRutas(forzar) {
         var r = lanzador.rutasDetectadas()
-        if ((forzar || ajustes.elf.length === 0) && r.elf.length > 0) ajustes.elf = r.elf
-        if ((forzar || ajustes.ejecutable.length === 0) && r.ejecutable.length > 0) ajustes.ejecutable = r.ejecutable
+        // The stored paths are installation-relative, but a settings file from an older version (or from before the
+        // folder was moved) may hold an absolute path that no longer exists: replace it instead of reporting the game
+        // as missing.
+        if ((forzar || ajustes.elf.length === 0 || !lanzador.existe(ajustes.elf)) && r.elf.length > 0) ajustes.elf = r.elf
+        if ((forzar || ajustes.ejecutable.length === 0 || !lanzador.existe(ajustes.ejecutable)) && r.ejecutable.length > 0) ajustes.ejecutable = r.ejecutable
     }
 
     function restablecer() {

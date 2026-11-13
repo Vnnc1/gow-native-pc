@@ -130,7 +130,10 @@ def generate(root, game, build, codegen, force=False):
     runtime = root / 'engine/runtime'
     folder = data / 'recomp'
     folder.mkdir(parents=True, exist_ok=True)
-    elf = Path(read_json(data / 'languages.json')['recompile_elf']).resolve()
+    # The manifest stores the executable relative to the checkout root (tools/disc/prepare.py), so a moved installation
+    # still recompiles; absolute entries (a manifest written by hand or by an older run) pass through.
+    recorded = Path(read_json(data / 'languages.json')['recompile_elf'])
+    elf = (recorded if recorded.is_absolute() else root / recorded).resolve()
     # A hand-edited or stale language manifest must not reuse another region's map.
     executable = profile.get('executable', {})
     if executable:

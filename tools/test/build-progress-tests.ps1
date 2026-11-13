@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 . (Join-Path $root 'tools/pipeline/modules/build-progress.ps1')
-$directory = Join-Path $env:TEMP 'gow progress fixture'
+$directory = Join-Path ([IO.Path]::GetTempPath()) 'gow progress fixture'
 $state = New-GameBuildProgress $directory
 $lines = @(
     '[0/2] Re-checking globbed directories...',

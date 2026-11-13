@@ -120,6 +120,54 @@ namespace
         return {};
     }
 
+    // Installation-relative paths. A path inside the installation is stored in the launcher settings and in
+    // gow-native.boot relative to its root and marked with '@' (the project's own convention, see AGENTS.md): a moved or
+    // copied installation then still finds its disc, card, saves and capture folders. Anything outside the root (a
+    // player's ISO, AppData) has no relative form and stays absolute.
+    constexpr QChar kMarcaRaiz = QLatin1Char('@');
+
+    QString raizProyecto()
+    {
+        QDir dir(QCoreApplication::applicationDirPath());
+        for (int nivel = 0; nivel < 6; ++nivel) {
+            if (QFileInfo::exists(dir.filePath(QStringLiteral("engine/runtime.toml"))))
+                return QDir::cleanPath(dir.absolutePath());
+            if (!dir.cdUp())
+                break;
+        }
+        return {};
+    }
+
+    // The installation-relative value as a path; absolute values pass through unchanged.
+    QString desdeRaiz(const QString &valor)
+    {
+        if (valor.isEmpty())
+            return valor;
+        QString limpio = QDir::fromNativeSeparators(valor);
+        if (limpio.startsWith(kMarcaRaiz))
+            limpio = limpio.mid(1);
+        else if (QDir::isAbsolutePath(limpio))
+            return valor;
+        const QString raiz = raizProyecto();
+        return raiz.isEmpty() ? valor : QDir::cleanPath(raiz + QLatin1Char('/') + limpio);
+    }
+
+    // The path as stored: '@' + path relative to the root when it is inside the installation, else unchanged.
+    QString haciaRaiz(const QString &ruta)
+    {
+        if (ruta.isEmpty() || !QDir::isAbsolutePath(QDir::fromNativeSeparators(ruta)))
+            return ruta;
+        const QString raiz = raizProyecto();
+        if (raiz.isEmpty())
+            return ruta;
+        QString relativa = QDir(raiz).relativeFilePath(QDir::cleanPath(QDir::fromNativeSeparators(ruta)));
+        if (relativa == QStringLiteral("..") || relativa.startsWith(QStringLiteral("../")) ||
+            relativa.startsWith(QStringLiteral("..\\")))
+            return ruta;
+        relativa.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        return kMarcaRaiz + relativa;
+    }
+
     QString primeraIso(const QString &carpeta)
     {
         const QFileInfoList isos = QDir(carpeta).entryInfoList({QStringLiteral("*.iso"), QStringLiteral("*.ISO")}, QDir::Files, QDir::Name);
@@ -249,11 +297,20 @@ QVariantMap Lanzador::rutasDetectadas() const
     if (ejecutable.isEmpty())
         ejecutable = buscarHaciaArriba(desde, QStringLiteral("build/ps2xRuntime/") + kNombreEjecutable);
     const QString iso = elf.isEmpty() ? QString() : primeraIso(QFileInfo(elf).absolutePath());
-    return {{QStringLiteral("elf"), elf}, {QStringLiteral("iso"), iso}, {QStringLiteral("ejecutable"), ejecutable}};
+    // Stored by the caller in the launcher settings: relative to the installation, so it survives a move.
+    return {{QStringLiteral("elf"), haciaRaiz(elf)}, {QStringLiteral("iso"), haciaRaiz(iso)},
+            {QStringLiteral("ejecutable"), haciaRaiz(ejecutable)}};
 }
 
-QVariantMap Lanzador::comprobarJuego(const QString &elf) const
+bool Lanzador::existe(const QString &ruta) const
 {
+    const QFileInfo info(desdeRaiz(ruta));
+    return !info.filePath().isEmpty() && info.exists();
+}
+
+QVariantMap Lanzador::comprobarJuego(const QString &rutaGuardada) const
+{
+    const QString elf = desdeRaiz(rutaGuardada);
     QVariantMap resultado{{QStringLiteral("existe"), false}, {QStringLiteral("valido"), false}, {QStringLiteral("crc"), QString()}};
     QFile archivo(elf);
     if (elf.isEmpty() || !archivo.open(QIODevice::ReadOnly))
@@ -271,8 +328,10 @@ QVariantMap Lanzador::comprobarJuego(const QString &elf) const
     return resultado;
 }
 
-QVariantMap Lanzador::comprobarDatos(const QString &elf, const QString &iso) const
+QVariantMap Lanzador::comprobarDatos(const QString &rutaElf, const QString &rutaIso) const
 {
+    const QString elf = desdeRaiz(rutaElf);
+    const QString iso = desdeRaiz(rutaIso);
     const QString carpeta = QFileInfo(elf).absolutePath();
     QString imagen = iso;
     if (!imagen.isEmpty() && !QFileInfo(imagen).isFile())
@@ -289,8 +348,9 @@ QVariantMap Lanzador::comprobarDatos(const QString &elf, const QString &iso) con
             {QStringLiteral("extraidos"), extraidos}, {QStringLiteral("isoElegidaFalta"), !iso.isEmpty() && imagen.isEmpty()}};
 }
 
-QVariantMap Lanzador::comprobarEjecutable(const QString &ruta) const
+QVariantMap Lanzador::comprobarEjecutable(const QString &rutaGuardada) const
 {
+    const QString ruta = desdeRaiz(rutaGuardada);
     const QFileInfo info(ruta);
     return {{QStringLiteral("existe"), !ruta.isEmpty() && info.isFile()}, {QStringLiteral("ejecutable"), !ruta.isEmpty() && info.isFile() && info.isExecutable()}};
 }
@@ -355,8 +415,9 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
 {
     if (jugando())
         return false;
-    const QString ejecutable = a.value(QStringLiteral("ejecutable")).toString();
-    QString elf = a.value(QStringLiteral("elf")).toString();
+    // Both may come from the saved settings, which store installation-relative paths ('@data/...').
+    const QString ejecutable = desdeRaiz(a.value(QStringLiteral("ejecutable")).toString());
+    QString elf = desdeRaiz(a.value(QStringLiteral("elf")).toString());
     if (!comprobarEjecutable(ejecutable).value(QStringLiteral("ejecutable")).toBool())
     {
         emit error(QStringLiteral("errorEjecutable"), ejecutable);
@@ -656,16 +717,28 @@ bool Lanzador::iniciar(const QVariantMap &a, const QVariantMap &entornoMods)
         entorno.insert("GOW_SAVE_ASSETS", saveAssets);
     entorno.remove("GOW_MENU_SETTINGS"); // Per-session bridge must never survive in the reusable boot file.
     // Persist only runtime settings, never the complete inherited environment (which may contain credentials).
-    QSaveFile boot(QFileInfo(ejecutable).absolutePath() + QStringLiteral("/gow-native.boot"));
+    // Version 2 (engine/patches/zzz-326): the second line is the installation root relative to this file's folder, the
+    // third the guest ELF, and any value inside the installation is written '@'-relative to the root. A copy of the
+    // installation therefore runs from any folder; the launcher rewrites the file on every play, so a moved build folder
+    // (whose relative position to the root changed) is corrected with the next launch.
+    const QString carpetaBoot = QFileInfo(ejecutable).absolutePath();
+    const QString raiz = raizProyecto();
+    // No root found: this folder is the anchor and every path below stays absolute (haciaRaiz leaves them alone).
+    QString raizRelativa = QStringLiteral(".");
+    if (!raiz.isEmpty()) {
+        raizRelativa = QDir(carpetaBoot).relativeFilePath(raiz);
+        raizRelativa.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    }
+    QSaveFile boot(carpetaBoot + QStringLiteral("/gow-native.boot"));
     if (boot.open(QIODevice::WriteOnly))
     {
-        QByteArray bytes = "GOW_NATIVE_BOOT_V1\n" + QFileInfo(elf).absoluteFilePath().toUtf8() + '\n';
+        QByteArray bytes = "GOW_NATIVE_BOOT_V2\n" + raizRelativa.toUtf8() + '\n' + haciaRaiz(elf).toUtf8() + '\n';
         for (const QString &key : entorno.keys())
             if (key.startsWith(QStringLiteral("TOBIICHI_")) || key.startsWith(QStringLiteral("PS2X_")) || key.startsWith(QStringLiteral("GOW_")))
             {
                 const QString value = entorno.value(key);
                 if (!value.contains('\n') && !value.contains('\r'))
-                    bytes += key.toUtf8() + '=' + value.toUtf8() + '\n';
+                    bytes += key.toUtf8() + '=' + haciaRaiz(value).toUtf8() + '\n';
             }
         if (boot.write(bytes) == bytes.size()) boot.commit();
     }

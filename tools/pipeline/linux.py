@@ -111,7 +111,9 @@ class Pipeline:
         run([sys.executable, '-I', ROOT / script, *args])
 
     def elf(self):
-        return Path(json.loads((self.data / 'languages.json').read_text(encoding='utf-8'))['recompile_elf'])
+        # Relative to the checkout root (tools/disc/prepare.py), so a moved installation still recompiles.
+        recorded = Path(json.loads((self.data / 'languages.json').read_text(encoding='utf-8'))['recompile_elf'])
+        return recorded if recorded.is_absolute() else (self.root / recorded).resolve()
 
     def configure(self):
         brand = self.profile['runtime'].get('branding_image')

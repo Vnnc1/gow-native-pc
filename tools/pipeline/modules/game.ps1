@@ -278,8 +278,11 @@ function Build-Game([string]$dir = $bld) {
     $bootFile = Join-Path $dir 'ps2xRuntime\gow-native.boot'
     $elf = (Languages).recompile_elf
     if ($dir -eq $bld -and $elf -and (Test-Path $elf) -and -not (Test-Path $bootFile)) {
-        # A launcher session replaces these defaults with the selected disc and runtime settings.
-        $bootText = "GOW_NATIVE_BOOT_V1`n$elf`nGOW_VU1N_X64=1`nGOW_VU1_CAPTURE_MISSES=1`nGOW_VU1_CAPTURA=$vu1`nPS2X_GS_WORKER=1`nGOW_GS_FINISH_ASINCRONO=1`nGOW_GS_EARLY_FINISH=1`nTOBIICHI_PANORAMICO=16:9`n"
+        # A launcher session replaces these defaults with the selected disc and runtime settings. Paths are relative to
+        # the installation (Format-BootProfile), so a copied or moved installation still starts on its own.
+        $bootText = Format-BootProfile (Split-Path $bootFile) $root $elf @(
+            'GOW_VU1N_X64=1', 'GOW_VU1_CAPTURE_MISSES=1', "GOW_VU1_CAPTURA=$(Get-BootProfilePath $root $vu1)",
+            'PS2X_GS_WORKER=1', 'GOW_GS_FINISH_ASINCRONO=1', 'GOW_GS_EARLY_FINISH=1', 'TOBIICHI_PANORAMICO=16:9')
         [IO.File]::WriteAllText($bootFile, $bootText, (New-Object Text.UTF8Encoding($false)))
     }
     # the background VU1 compiler (launcher: "Compile new areas while playing") builds modules with this compiler and the

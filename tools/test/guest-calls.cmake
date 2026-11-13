@@ -48,6 +48,11 @@ add_executable(gow_frame_metrics "${CMAKE_CURRENT_LIST_DIR}/frame_metrics.cpp")
 target_compile_features(gow_frame_metrics PRIVATE cxx_std_20)
 target_include_directories(gow_frame_metrics PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
 add_test(NAME gow_frame_metrics COMMAND gow_frame_metrics)
+# gow-native.boot profile parsing (patch zzz-326): the header-only reader main.cpp uses, no runtime library or disc.
+add_executable(gow_boot_profile_tests "${CMAKE_CURRENT_LIST_DIR}/boot-profile.cpp")
+target_compile_features(gow_boot_profile_tests PRIVATE cxx_std_20)
+target_include_directories(gow_boot_profile_tests PRIVATE "${CMAKE_SOURCE_DIR}/ps2xRuntime/include")
+add_test(NAME gow_boot_profile_tests COMMAND gow_boot_profile_tests)
 add_test(NAME gow_codegen_tests COMMAND gow_codegen_tests)
 # The codegen suite reads instructions.h relative to its working directory.
 set_tests_properties(gow_codegen_tests PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

@@ -10,6 +10,8 @@ $build = (Get-Content (Join-Path $root 'data/build-root.txt') -Raw).Trim()
 if ((Get-Content (Join-Path $root 'data/toolchain.txt') -Raw).Trim() -eq 'clang') { $build += '-clang' }
 $data = Join-Path $root "data/$Game"
 $elf = (Get-Content (Join-Path $data 'languages.json') -Raw | ConvertFrom-Json).recompile_elf
+# prepare.py stores it relative to the checkout root, so a moved installation still runs
+if (-not [IO.Path]::IsPathRooted($elf)) { $elf = Join-Path $root $elf }
 if ($DiscElf) { $elf = (Resolve-Path -LiteralPath $DiscElf).Path }
 $python = Join-Path $root 'data/_tools/python/python.exe'
 $profile = (& $python -I (Join-Path $root 'tools/pipeline/profile.py') $Game | Out-String | ConvertFrom-Json)

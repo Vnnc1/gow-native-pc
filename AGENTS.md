@@ -355,7 +355,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   Regression checks: `tools/test/build-progress-tests.ps1` (also in pipeline-tests.ps1) and
   `python -I tools/test/loading-progress.py <Qt SDK bin/qml.exe> <llvm-mingw bin>` (real QML, fake pipeline signals).
 - **languages.json** (`data/<id>/`): `{game, title, recompile_elf, languages: [{language, label, edition, quality,
-  elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language.
+  elf}]}`; quality = original | full | standalone. The launcher plays `elf` of the chosen language. A path inside the
+  checkout is stored relative to its root (`tools/disc/discfs.py root_relative`) and every reader resolves it against
+  the root (`resolve_in_root`, `[IO.Path]::IsPathRooted` + `Join-Path $root`, `rootPath` in
+  `installer_backend.cpp`), so a moved or copied installation keeps finding its prepared discs. Never write absolute
+  paths into this manifest; anything outside the root (an ISO the player chose, a build folder) stays absolute.
 - **In-game menu (patch 39, redesigned by zzz-318)**: F1 or Back+Start opens the category dock in `gow_trucos.cpp`
   (Graphics, Controls, Audio, Mods, Cheats, Save); F2 opens cheats, Ctrl+F1 opens the ImGui runtime debugger.
   Remapping, master volume/mute and supported graphics changes are live and persist through the launcher settings bridge.
@@ -646,6 +650,20 @@ their digests need not match each other. Timing excludes reconstruction/hashing/
 The pipeline creates `gow-native.boot` beside the built runner; the launcher atomically refreshes it on play.
 It records the selected ELF and runtime-prefixed environment variables only. No-argument runner launches restore it
 and write `standalone.log` beside the executable (patch 25). Never package this machine-specific profile.
+**Format (patch `zzz-326`)**: `GOW_NATIVE_BOOT_V2`, then the installation root relative to the boot file's own folder,
+then the guest ELF; every value whose path is inside the installation is written `@`-relative to that root (a path
+outside it, such as the player's ISO or AppData, stays absolute). The runtime, the launcher
+(`haciaRaiz`/`desdeRaiz` in `lanzador.cpp`) and the pipeline's defaults (`Format-BootProfile` in
+`tools/pipeline/modules/common.ps1`) share that rule; `V1` files with absolute paths keep working. Never reintroduce
+absolute installation paths here: they are what stopped a copied or moved installation from starting. The runtime parses
+profiles in the header-only `ps2xRuntime/include/runtime/boot_profile.h` (`Parse`, `RootPath`, `ResolvePath`,
+`GuestElf`), with the environment export and `standalone.log` left in `main.cpp`; `tools/test/boot-profile.cpp`
+(`gow_boot_profile_tests`, part of verify) runs that reader without a runtime, disc or window and covers a V2 relative
+root, a V2 absolute root, legacy V1 and a missing disc.
+The launcher settings (`QSettings` category `ajustes`: `elf`, `iso`, `ejecutable`) store the same `@` form, and
+`Lanzador::existe` / `comprobarJuego` / `comprobarDatos` / `comprobarEjecutable` / `iniciar` resolve it, so a moved
+installation is not reported as missing and `rutasDetectadas` rewrites a stale absolute value. Paths the player chose
+outside the installation (texture pack, ISO, covers) stay absolute.
 The Performance diagnostics toggle enables audio buffer/rate, IOP drift, VU1 and performance counters.
 `tools/test/sound_regression.cpp` covers positive/negative SPU2 master-volume overflow (patch 24).
 See `docs/research/audio-standalone-mods-2026-10-26.md` for unresolved scene, HUD and mod acceptance criteria.
