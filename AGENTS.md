@@ -170,10 +170,12 @@ leaf meshes also appear outside that instance; replacing by leaf identity corrup
 Preserve those original draws and the existing readiness/capacity gates. `control-prompts.py` covers the
 regression; private slot-3 captures and limits are in `docs/research/spartan-r2-prompt-2026-11-10.md`.
 
-Patch `zzz-326` bounds GS worker frames in flight (`gs_frame_latency.h`, default 2, `GOW_GS_FRAME_LATENCY=0` =
-reference): the worker context never swaps, so only the vertex ring limited its lead over the GPU. Its fences
-guard no resource. Keep each wait bounded and never fall back to `glFinish`; the ring fences still own vertex
-safety. `gow_frame_latency` covers it. It is not validated in game; see GPU-06 in the performance ledger.
+Patch `zzz-326` bounds GS worker frames in flight (`gs_frame_latency.h`, `GOW_GS_FRAME_LATENCY=<n>`): the worker
+context never swaps, so only the vertex ring limited its lead over the GPU. Its fences guard no resource. Keep each
+wait bounded and never fall back to `glFinish`; the ring fences still own vertex safety. `gow_frame_latency` covers it.
+`zzz-330` makes 0 (off, the earlier behaviour) the default: on the RX 580, GPU-bound (`ship_frames --fixed-step`, 3x,
+AF16), limit 2 made intervals bimodal and p95/p99 much worse; limit 3 was neutral. Do not re-enable a default without a
+GPU-bound gate (`gs-run-ab.py --compare frame-latency --latency-candidate N --fixed-step`); see GPU-06 in the ledger.
 
 Patch `zzz-318` adds the RatOne startup and six-category in-game dock. The profile's
 `runtime.branding_image` supplies `GOW_BRAND_IMAGE` at Windows/Linux configure time;

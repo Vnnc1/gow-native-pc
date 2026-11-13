@@ -183,7 +183,8 @@ PR26_FLAGS = {"ring": "GOW_GS_HW_RING", "texreuse": "GOW_GS_TEXREUSE", "depth-zb
 SHIPPED_FLAGS = {"wrap-group": "GOW_GS_WRAP_GROUP",
                  "chain-warm": "GOW_VU1_CHAIN_WARM",  # patch 76: successor-slot prefetch in VU1 chain()
                  "frame-latency": "GOW_GS_FRAME_LATENCY"}  # zzz-326: GS worker frames in flight on the GPU
-# Values of variants 0 (reference) and 1 (shipped candidate) where the switch is not a plain 0/1.
+# Values of variants 0 (reference) and 1 (candidate) where the switch is not a plain 0/1. frame-latency: the shipped
+# default is 0 since zzz-330; variant 1 is --latency-candidate (2 unless given).
 SHIPPED_VALUES = {"frame-latency": ("0", "2")}
 
 def pr26_environment(mode, variant):
@@ -245,7 +246,13 @@ def main():
                         "FPS is then throughput of an identical workload, not real-time play")
     p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="Extra GOW_/PS2X_ diagnostic variable for both variants (repeatable); recorded in settings.json")
+    p.add_argument("--latency-candidate", type=int, choices=range(1, 8), default=2, metavar="1-7",
+                   help="--compare frame-latency: GOW_GS_FRAME_LATENCY of variant 1 (default 2, the shipped value); "
+                        "variant 0 stays the 0 reference")
     a = p.parse_args()
+    if a.latency_candidate != 2 and a.compare != "frame-latency":
+        p.error("--latency-candidate requires --compare frame-latency")
+    SHIPPED_VALUES["frame-latency"] = ("0", str(a.latency_candidate))
     extra_env = {}
     for item in a.env:
         name, sep, value = item.partition("=")

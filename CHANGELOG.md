@@ -30,11 +30,13 @@ existing installation**; automatic updates work again from there on. Your game b
   arrow shows (it always turned clockwise), and the guide shows its key under a circle mark. Gamepads are unchanged.
   Not yet confirmed in a real combat QTE. See [design and tests](docs/research/keyboard-qte-rotation-2026-11-13.md).
 
-### Performance (needs testing on weak GPUs)
-- The GS worker now keeps at most two frames of draws queued on the GPU (`zzz-326`). Before, only the vertex ring
-  held it back, so GPU-bound scenes (AF, 3x, rain and particles) could queue many frames and then stall, stuttering
-  while the counter still showed 45–60 FPS (#31). Not yet validated on the affected GPU. `GOW_GS_FRAME_LATENCY=0`
-  restores the previous behaviour for comparison. See [hypothesis and acceptance gates](docs/research/frame-latency-2026-11-11.md).
+### Performance
+- The setup ships a profile-guided optimisation (PGO) profile trained on this exact patch set (198,964 functions):
+  new installs and rebuilds use it without a training step.
+- A GS frame-latency limiter (`zzz-326`, aimed at the stutter in #31) is included but **off by default** (`zzz-330`).
+  On an RX 580 with the GPU saturated (3x, AF 16x) a limit of 2 made frame pacing much worse (p95 33 -> 51-74 ms);
+  a limit of 3 was neutral. Default behaviour is that of v0.6.0-rc.1. Testers can try `GOW_GS_FRAME_LATENCY=2` or `3`.
+  See [GPU-06](docs/research/performance-experiments.md).
 
 ## [v0.6.0-rc.1] — pre-release for testing
 

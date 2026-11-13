@@ -1575,3 +1575,21 @@ Idle repeat the same day (system CPU 17–33%, `--keep-going`): `zzz-326` frame-
 19.82 → 20.67 guest FPS with equal or better p95 and no >100 ms intervals (no regression); primitive grouping
 2 valid pairs, 18.62 (off) → 21.65 (on) with better p95/p99, so the shipped default stays on. Combat on this
 notebook remains about 20–22 guest FPS at 1x; it does not approach 60.
+
+## v0.5.0 vs fix-chore VU1 task replay (2026-11-13, Xeon E5-2666 v3 / RX 580)
+
+Identical 32-task corpus, each version's own verify-built `gow_vu1_tasks`: fix-chore's VU1 path is slower by 3.3 % (JIT,
+5/5 pairs), 1.2 % (hybrid, 4/4) and 4.6 % (same-configuration builds, 3/3). Too small to explain the i3-10110U's
+10-15 % heavy-section loss alone. Isolated VU1 time, not FPS. Details: REG-01 in the
+[performance ledger](research/performance-experiments.md).
+
+Bisection over chain prefixes: the VU1 cost rose with diagnostic patch 65 (+4.4 %) and the PR 26 VU1 patches
+(+10.3 % in total by prefix 98) and fell back to +1.7 % with `zzz-316`; later patches tie. The i3-10110U's
+2026-11-07 v0.5.0 comparison predates `zzz-316` and needs a rerun with a current runner.
+
+## PGO release profile and GPU-06 frame-latency gates (2026-11-13, Xeon E5-2666 v3 / RX 580)
+
+Profile trained on fix-chore `1abba7b` (143 patches): 198,964 functions, exact fit, pgo-check passed. With that runner:
+1x ship arrival 59.72 -> 60.00 guest FPS with `zzz-326` limit 2 (no regression) and the A01MP02 movie completed; GPU-bound
+3x/AF16 combat with fixed step: limit 2 p95 32-35 -> 51-74 ms (rejected), limit 3 neutral. The default is now off
+(`zzz-330`). Details: GPU-06 in the [performance ledger](research/performance-experiments.md).

@@ -507,3 +507,71 @@ in 2 of 4 pairs. **Favorable but confounded**: system CPU 44–81 % from concurr
 work, the largest gains coincide with references under the heaviest load, and the identical binary alone spread ~6 %
 (MEAS-01). PGO stays shipped on the strength of GAIN-09; no notebook percentage is claimed. Repeat on an idle machine.
 Evidence: `data/experiments/pgo-fixedstep-20261112/`.
+
+REG-01 / 2026-11-13 — v0.5.0 -> fix-chore regression, VU1 share (Xeon E5-2666 v3 / RX 580, desktop apps open).
+Follow-up of the i3-10110U report's open item 2 (heavy section ~10-15 % slower on fix-chore, cause not isolated), not a
+retest: it isolates the VU1 interpreter/JIT part with identical work. `gow_vu1_tasks` built by each version's own
+`fetch,verify` (v0.5.0 = 64-patch chain; fix-chore `77376e7` + zzz-329, which does not touch VU1), same pinned
+llvm-mingw, replaying the existing 32-task Athn01D corpus (`data/experiments/vu1-waits-20261109/load-cost/tasks.bin`),
+100 repetitions, alternating order; parity and per-record signatures identical in every run.
+
+- `vu1-task-ab.py` JIT, 5 pairs: 548.9/543.4/541.1/550.8/564.6 -> 561.5/565.3/567.0/579.8/569.7 us (sum of warm
+  medians); median 548.9 -> 567.0 (+3.3 %), **fix-chore slower in 5/5 pairs**.
+- hybrid mode, 4 pairs: 548.9/556.7/554.7/555.5 -> 561.3/562.7/556.7/575.4; median 555.1 -> 562.0 (+1.2 %), slower 4/4.
+- Same-configuration bisection builds (chain prefix 64 vs 142): 569.7/560.5/554.9 -> 586.0/599.5/573.6 (+4.6 %), 3/3.
+
+Decision: a small, consistent VU1 cost increase exists (about 1-5 % of isolated VU1 time), but it cannot explain the
+whole 10-15 % frame-rate loss on the i3-10110U; the larger part is outside the VU1 task path (EE codegen/memory
+patches, the PR 26 GS frontend, scheduling). Prime VU1 suspects: diagnostic branches added by 62/63/65 that zzz-316 did
+not specialize, 76/78/79/86/88, zzz-202. The bisection (prefix points 67, 71, 81, 90, 109, 129, 130) was interrupted:
+the 20-job build ran the 16 GB machine out of memory; no intermediate point was measured. Resume with fewer build jobs.
+
+REG-01 bisection (same day, 6 build jobs, same configuration for every point, `gow_vu1_tasks` built from chain prefixes
+of the current patch list; JIT replay, 3 alternating pairs each against prefix 64 = v0.5.0; medians in us).
+Prefixes 81-97 do not compile on their own (patch 75 includes `gs_sw_backend.h`, created by `zzz-002`), so the PR 26
+range is measured as one step.
+
+| Prefix (last patch) | 64 -> prefix | Pairs worse |
+| --- | --- | --- |
+| 67 (60 JIT fast mode) | 567.1 -> 568.0 (0 %) | 1/3 |
+| 68 (62 cost diag) | 550.5 -> 556.5 (+1.1 %) | 2/3 |
+| 69 (63 hot entry) | 547.4 -> 553.9 (+1.2 %) | 3/3 |
+| 70 (64 GS frontend diag) | 554.5 -> 556.7 (+0.4 %) | 2/3 |
+| 71 (65 opstat/chain diag) | 563.5 -> 588.1 (+4.4 %) | 3/3 |
+| 98 (rest of PR 26, zz-workspace, zzz-001/002) | 554.4 -> 611.3 (+10.3 %) | 3/3 |
+| 109 (zzz-202) | 555.9 -> 609.5 (+9.6 %) | 3/3 |
+| 129 (zzz-315) | 556.9 -> 611.5 (+9.8 %) | 3/3 |
+| 130 (zzz-316 chain specialization) | 554.0 -> 563.7 (+1.7 %) | 3/3 |
+| 142 vs 130 directly, 4 pairs | 574.5 -> 576.4 (tie) | 2/4 |
+
+Decision: the VU1-path regression came from diagnostic checks on the ordinary path, mostly patch 65 and the PR 26
+VU1 patches between 66 and 98, and `zzz-316` already removed almost all of it (+10 % -> +1.7 %). Nothing after
+`zzz-316` changes VU1 cost. The i3-10110U "fix-chore ~10-15 % slower than v0.5.0" result (2026-11-07) predates
+`zzz-316` (2026-11-09), so it must be re-measured with a current runner before any further cause is searched for. The
+remaining ~1-2 % (patch 62/63 per-run/per-block branches) is below this method's pair noise; no change proposed.
+Evidence: `data/experiments/regression-v050-20261113/bisect/`.
+Limits: one corpus (a stationary altar load, not ship combat), one CPU, interactive desktop load; not FPS.
+Evidence: `data/experiments/regression-v050-20261113/`.
+
+GPU-06 RX 580 gates and PGO release profile (2026-11-13, Xeon E5-2666 v3 / RX 580 2048SP, Windows). Runner built from
+fix-chore `1abba7b` (143 patches) with a profile trained the same day (`fetch,configure,recomp,sync,pgo,pgo-check`:
+198,964 functions, `pgo check: profile fits (exact match)`, no instrumentation runtime). Visible, audio, private cards,
+`gs-run-ab.py --compare frame-latency --keep-going --gpu-samples` (variant 0 = `GOW_GS_FRAME_LATENCY=0`, 1 = candidate).
+
+- Gate 3, `ship_arrival_frames`, 1x, 3 pairs, all 6 runs valid: guest FPS 59.18/60.00/59.99 -> 60.00/60.00/60.00;
+  aligned p99 18.08/17.68/17.66 -> 17.64/17.99/17.57 ms; the only >100 ms interval (109.8 ms) and the only ring stalls
+  (5) were in a reference run; 0 limiter waits, 0 missing audio. **No regression at 1x.**
+- Movie: `movie-smoke.ps1 -Movies A01MP02 -NewGame -RequireCompletion -ExpectedLastPicture 997 -Visible` with
+  `[gs-latency-config] frames=2`: played, last picture 997, returned to gameplay, exit 0, no guest error.
+- GPU-bound, `ship_guard`, 3x, AF16: 0 valid pairs (all but the first run failed `same_scene`), but every candidate run
+  had worse pacing: >33 ms intervals 57/178/126 -> 410/376/402, median-window p95 32.8-35.4 -> 48.8-62.5 ms.
+- GPU-bound, `ship_frames --fixed-step`, 3x, AF16, 3 valid pairs (GPU 95-98 %): FPS 42.45/42.69/41.25 ->
+  42.53/42.65/33.91; p50 24.0-25.0 -> 18.5-19.4 ms but p95 32.3-34.6 -> 50.6-74.1 ms, p99 37.6-41.8 -> 63.0-92.8 ms,
+  max 44-52 -> 71-120 ms (six >100 ms in one run); 616-1,414 limiter waits per run. **Limit 2 fails the GPU-bound gate.**
+- Same scene, `--latency-candidate 3` (new harness option), 3 valid pairs (slower session overall): FPS 34.51 -> 34.67,
+  p95 per pair 41.8/44.4/43.6 -> 40.8/42.2/43.3 ms, p99 mixed, ring stalls unchanged (~1,330-1,400). **Neutral.**
+
+Decision: `zzz-330` makes 0 the default for the public release (the v0.6.0-rc.1 behaviour); 2 and 3 stay available
+through `GOW_GS_FRAME_LATENCY`. The issue-31 queue-depth hypothesis is neither confirmed nor refuted: on this GPU the
+reference showed no multi-second stutter cycle. Gate 1 (GTX 1060 3 GB) remains open and should compare 0 / 3.
+Evidence: `D:/gfc-exp/frame-latency-rx580-20261113/` (copied to `data/experiments/frame-latency-rx580-20261113/`).

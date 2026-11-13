@@ -32,12 +32,13 @@ discos e os saves são mantidos.
   (antes girava sempre no sentido horário), e o guia mostra a tecla dele sob um círculo. Controles não mudam.
   Ainda não confirmado em um QTE de combate real. Veja [projeto e testes](docs/research/keyboard-qte-rotation-2026-11-13.md).
 
-### Desempenho (precisa de teste em GPUs fracas)
-- O worker do GS agora deixa no máximo dois quadros de desenho na fila da GPU (`zzz-326`). Antes, só o anel de
-  vértices o segurava: cenas limitadas pela GPU (AF, 3x, chuva e partículas) acumulavam muitos quadros e depois
-  travavam, com engasgos enquanto o contador ainda mostrava 45–60 FPS (#31). Ainda não validado na GPU afetada.
-  `GOW_GS_FRAME_LATENCY=0` volta ao comportamento anterior para comparação. Veja
-  [hipótese e critérios de aceitação](docs/research/frame-latency-2026-11-11.md).
+### Desempenho
+- O instalador traz um perfil de otimização guiada (PGO) treinado neste mesmo conjunto de patches (198.964 funções):
+  instalações novas e recompilações o usam sem etapa de treino.
+- O limitador de latência de quadros do GS (`zzz-326`, voltado aos engasgos da #31) está incluído, mas **desligado por
+  padrão** (`zzz-330`). Num RX 580 com a GPU saturada (3x, AF 16x), o limite 2 piorou muito o ritmo dos quadros
+  (p95 33 -> 51-74 ms); o limite 3 foi neutro. O comportamento padrão é o da v0.6.0-rc.1. Quem testa pode usar
+  `GOW_GS_FRAME_LATENCY=2` ou `3`. Veja [GPU-06](docs/research/performance-experiments.md).
 
 ## [v0.6.0-rc.1] — pré-release para testes
 

@@ -1,0 +1,24 @@
+zzz-326's GS frame-latency limit is off by default (GOW_GS_FRAME_LATENCY unset = 0, the behaviour of v0.6.0-rc.1 and
+earlier). RX 580 GPU-bound acceptance (ship_frames --fixed-step, 3x, AF16, 3 valid pairs): limit 2 turned frame
+intervals bimodal, p95 32.3-34.6 -> 50.6-74.1 ms and p99 37.6-41.8 -> 63.0-92.8 ms; limit 3 was neutral. CPU-bound and
+1x results stayed neutral. GOW_GS_FRAME_LATENCY=2|3 keeps the limiter available for testing. See GPU-06 in
+docs/research/performance-experiments.md.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 59f6c4e..a1d19bd 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -648,11 +648,11 @@ struct GSHwBackend::Impl
+     GLsync vertexSegmentFence[kRingSegments] = {};
+     // GOW-Port (zzz-326): GPU frames in flight on this context, see gs_frame_latency.h. The ring above only bounds the
+     // queue at about three segments (often tens of frames), so a GPU-bound scene ran far ahead and then stalled at a
+-    // wrap. GOW_GS_FRAME_LATENCY=<n> (default 2, 0 = off: the previous behaviour, kept as the reference).
++    // wrap. GOW_GS_FRAME_LATENCY=<n> (default 0 = off since zzz-330: the previous behaviour; 2 worsened GPU-bound pacing).
+     GSFrameLatency<GLsync> frameLatency;
+     unsigned frameLatencyLimit = [] {
+         const char *v = std::getenv("GOW_GS_FRAME_LATENCY");
+-        return GSFrameLatency<GLsync>::clampLimit(v && *v ? std::strtol(v, nullptr, 10) : 2L);
++        return GSFrameLatency<GLsync>::clampLimit(v && *v ? std::strtol(v, nullptr, 10) : 0L);
+     }();
+     bool frameLatencyAnnounced = false;
+     bool vertexRing = false;
