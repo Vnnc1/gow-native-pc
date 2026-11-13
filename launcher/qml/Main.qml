@@ -158,11 +158,30 @@ ApplicationWindow {
     // gow-native-pc: launcher updates (GitHub Releases, tools/pipeline/update.ps1). A newer release than this launcher is
     // offered under the version in the side bar.
     property var actualizacion: null
+    // True when version a is newer than b. Semantic-versioning order: a pre-release (0.6.1-rc.1, launchers built with
+    // GOW_PRERELEASE) sorts before its release, so its testers are offered 0.6.1; dot-separated pre-release parts compare
+    // numerically when both are numbers. Tested by tools/test/launcher-version.py.
     function versionMayor(a, b) {
-        var x = String(a).split("."), y = String(b).split(".")
-        for (var i = 0; i < Math.max(x.length, y.length); ++i) {
-            var p = parseInt(x[i] || "0"), q = parseInt(y[i] || "0")
+        function partes(v) {
+            var s = String(v), guion = s.indexOf("-")
+            return { num: (guion < 0 ? s : s.slice(0, guion)).split("."), pre: guion < 0 ? "" : s.slice(guion + 1) }
+        }
+        var x = partes(a), y = partes(b)
+        for (var i = 0; i < Math.max(x.num.length, y.num.length); ++i) {
+            var p = parseInt(x.num[i] || "0"), q = parseInt(y.num[i] || "0")
             if (p !== q) return p > q
+        }
+        if (x.pre === y.pre) return false
+        if (!x.pre) return true
+        if (!y.pre) return false
+        var xp = x.pre.split("."), yp = y.pre.split(".")
+        for (var j = 0; j < Math.max(xp.length, yp.length); ++j) {
+            if (j >= xp.length) return false
+            if (j >= yp.length) return true
+            var xn = /^\d+$/.test(xp[j]), yn = /^\d+$/.test(yp[j])
+            if (xn && yn && parseInt(xp[j]) !== parseInt(yp[j])) return parseInt(xp[j]) > parseInt(yp[j])
+            if (xn !== yn) return !xn // a word sorts after a number, as in semver
+            if (!xn && xp[j] !== yp[j]) return xp[j] > yp[j]
         }
         return false
     }

@@ -49,6 +49,8 @@ ApplicationWindow {
     }
     UI.PaginaControles { id: page; anchors.fill: parent; ajustes: settings; visible: false }
     UI.AccessibilityPage { id: accessibility; anchors.fill: parent; settings: settings }
+    // Texture packs moved from Accessibility to the Mods page (f60a672); test the toggle where players find it.
+    UI.PaginaMods { id: mods; anchors.fill: parent; modelo: null; settings: settings; visible: false }
     function find(item, predicate) {
         if (predicate(item)) return item
         var children = item.children || []
@@ -80,8 +82,8 @@ ApplicationWindow {
                 for (var action in defaults)
                     for (var code of defaults[action])
                         check(Keys.conflictos(defaults, action, code).length === 0, "conflicting default: " + action)
-                var texture = find(accessibility, o => o.titulo === UI.Tema.t("pacoteTexturas"))
-                check(texture !== null, "texture packs missing from Accessibility")
+                var texture = find(mods, o => o.titulo === UI.Tema.t("pacoteTexturas"))
+                check(texture !== null, "texture packs missing from the Mods page")
                 var textureToggle = find(texture, o => o.toggled !== undefined && o.checkable === true)
                 settings.pacoteTexturas = "/test/textures"
                 textureToggle.checked = true

@@ -483,5 +483,17 @@ var textos = {
     modsError: "Mods konnten nicht vorbereitet werden",
     modsScope: "Mods können Texturen, per Pfad geöffnete Dateien (etwas Audio/FMV/IOP-Module) und eingebaute Spiel-Schalter ersetzen. Audio in PAK-Dateien und Spielcode erfordern einen Neubau des Runners und werden nicht unterstützt. Ein deaktivierter Mod lässt das Spiel unverändert.",
     modsNoPython: "Python 3.11+ wurde nicht gefunden; der Mod-Manager ist deaktiviert.",
-    modsCheckResult: "%1 Mod(s) geplant, %2 Prüfung(en)."
+    modsCheckResult: "%1 Mod(s) geplant, %2 Prüfung(en).",
+    qteHoldButtonsDesc: "Wähle hier die Aktionstasten; Schultertasten aktivierst du unten separat. Die Wiederholung pausiert bei allen Tastenkombinationen, die der Schultertasten auch während der Bewegung. Eine einzeln wiederholte Schultertaste kann eine Halten-Aufforderung trotzdem unterbrechen; aktiviere sie nur bei Bedarf.",
+    qteStick: "Stick-Hilfe für Tastatur/Maus",
+    qteStickDesc: "Halte die QTE-Gestentaste (standardmäßig G; in Steuerung änderbar), wenn eine Aufforderung den linken Stick verlangt. Wähle Links / rechts oder Kreis passend zur Aufforderung. Ist die nummerierte Tastenanleitung zu sehen, beginnt der Kreis bei ihrer ersten Taste und dreht in Pfeilrichtung. Loslassen kehrt zur normalen Bewegung zurück. QTEs werden nicht erkannt; außerhalb davon kann sich Kratos bewegen. Verbundene Controller bleiben unverändert.",
+    qteStickOff: "Aus",
+    qteStickShake: "Links / rechts",
+    qteStickRotate: "Kreis",
+    acc_qte_stick: "Halten für QTE-Stickgeste",
+    pestAccessibility: "Barrierefreiheit",
+    accessibilityIntro: "Passe Eingabehilfen und visuelle Anpassungen an. Änderungen gelten beim nächsten Spielstart.",
+    inputAssistance: "Eingabehilfen",
+    keyboardChords: "Bewegung und gehaltene Aktionen",
+    keyboardChordsDesc: "Standardbelegung: Strg hält R2; Strg + WASD bewegt dabei, und Strg + Leertaste hält R2 + Kreuz gedrückt. Ausweichen mit Alt + WASD. Tasten und die QTE-Gestentaste änderst du in Steuerung.",
 };

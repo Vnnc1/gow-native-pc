@@ -5,6 +5,16 @@ cmake_minimum_required(VERSION 3.21)
 # The release version (tag v<this>, CHANGELOG.md). The updater compares it with the latest release's tag, so the two
 # must match. 0.x until the port is complete; releases up to 3.0.1 were renumbered 0.1.0-0.3.1.
 project(GowNativePcLauncher VERSION 0.6.0 LANGUAGES CXX)
+# Pre-release builds report "<version>-<suffix>" (e.g. 0.6.1-rc.1, tag v0.6.1-rc.1): the updater then offers the final
+# <version> to their testers (versionMayor in qml/Main.qml). The launcher stage passes $env:GOW_PRERELEASE; empty = release.
+set(GOW_PRERELEASE "" CACHE STRING "Pre-release suffix of this launcher build, such as rc.1; empty for a release")
+if(GOW_PRERELEASE AND NOT GOW_PRERELEASE MATCHES "^[0-9A-Za-z]+(\\.[0-9A-Za-z]+)*$")
+    message(FATAL_ERROR "GOW_PRERELEASE must be dot-separated letters and digits, such as rc.1")
+endif()
+set(GOW_LAUNCHER_VERSION "${PROJECT_VERSION}")
+if(GOW_PRERELEASE)
+    string(APPEND GOW_LAUNCHER_VERSION "-${GOW_PRERELEASE}")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,12 +89,12 @@ qt_add_qml_module(gow-launcher
     QML_FILES ${ARCHIVOS_QML}
 )
 
-target_compile_definitions(gow-launcher PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(gow-launcher PRIVATE TOBIICHI_VERSION="${GOW_LAUNCHER_VERSION}")
 target_link_libraries(gow-launcher PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
 qt_add_executable(gow-session WIN32 src/session_main.cpp src/session_diagnostics.cpp src/session_diagnostics.h)
 target_link_libraries(gow-session PRIVATE Qt6::Core)
-target_compile_definitions(gow-session PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(gow-session PRIVATE TOBIICHI_VERSION="${GOW_LAUNCHER_VERSION}")
 if(WIN32)
     target_link_libraries(gow-session PRIVATE psapi)
     target_link_libraries(gow-launcher PRIVATE psapi)
@@ -96,7 +106,7 @@ if(WIN32)
     qt_add_executable(gow-diagnostics WIN32 diagnostics/main.cpp diagnostics/diagnostic_kit.cpp
         diagnostics/diagnostic_kit.h src/session_diagnostics.cpp src/session_diagnostics.h)
     target_include_directories(gow-diagnostics PRIVATE src)
-    target_compile_definitions(gow-diagnostics PRIVATE TOBIICHI_VERSION="${PROJECT_VERSION}-diagnostics")
+    target_compile_definitions(gow-diagnostics PRIVATE TOBIICHI_VERSION="${GOW_LAUNCHER_VERSION}-diagnostics")
     target_link_libraries(gow-diagnostics PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 psapi comdlg32)
     qt_add_resources(gow-diagnostics diagnostic_ui PREFIX "/" FILES diagnostics/Main.qml qml/Textos.js
         qml/idiomas/fr.js qml/idiomas/de.js qml/idiomas/it.js qml/idiomas/ru.js qml/idiomas/zh.js)

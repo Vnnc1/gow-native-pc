@@ -511,6 +511,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **New game**: see `docs/adding-a-game.md`.
 - **New translation / edition**: add an `[[editions]]` entry (elf_crc from `identify.py`); if it changes code (.text
   differs) it is not supported.
+- **Launcher version**: `launcher/CMakeLists.txt` `project(... VERSION x.y.z)` is the release; a release candidate is
+  built with `GOW_PRERELEASE=rc.N` in the environment (the launcher stage always passes `-DGOW_PRERELEASE=...`, so an
+  empty value clears an earlier suffix) and reports `x.y.z-rc.N`, which `versionMayor` (Main.qml) orders before
+  `x.y.z`. Tag it `vx.y.z-rc.N`. `python -I tools/test/launcher-version.py <qml.exe> <compiler bin>` runs the real
+  function. `tools/test/qte-controls.py` (same arguments) exercises the Controls/Accessibility/Mods bindings.
 - **Launcher texts**: a new key goes in `launcher/qml/Textos.js` with tr/en/es/pt; the languages in `launcher/qml/idiomas/`
   fall back to en until the key is added there. A new language: `idiomas/<code>.js` (copy one), its `.import` and
   `archivos` entry and the `idiomas` list in Textos.js, and the file in launcher/CMakeLists.txt. `python -I

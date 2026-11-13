@@ -30,6 +30,13 @@ existing installation**; automatic updates work again from there on. Your game b
   arrow shows (it always turned clockwise), and the guide shows its key under a circle mark. Gamepads are unchanged.
   Not yet confirmed in a real combat QTE. See [design and tests](docs/research/keyboard-qte-rotation-2026-11-13.md).
 
+### Launcher
+- Pre-release launchers can report their suffix (`GOW_PRERELEASE=rc.1` when building gives `0.6.1-rc.1`), and the
+  update check orders versions like semantic versioning, so testers of a release candidate are offered the final
+  release. Launchers of v0.6.0-rc.1 report plain `0.6.0` and therefore only see a newer version number.
+- QTE and accessibility options are translated into German, French, Italian and Russian; the "Circle" stick gesture
+  text explains that it follows the key guide's arrow.
+
 ### Performance
 - The setup ships a profile-guided optimisation (PGO) profile trained on this exact patch set (198,964 functions):
   new installs and rebuilds use it without a training step.

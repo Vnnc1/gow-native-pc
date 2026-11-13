@@ -32,6 +32,13 @@ discos e os saves são mantidos.
   (antes girava sempre no sentido horário), e o guia mostra a tecla dele sob um círculo. Controles não mudam.
   Ainda não confirmado em um QTE de combate real. Veja [projeto e testes](docs/research/keyboard-qte-rotation-2026-11-13.md).
 
+### Launcher
+- Launchers de pré-release podem informar o sufixo (`GOW_PRERELEASE=rc.1` na compilação gera `0.6.1-rc.1`), e a
+  verificação de atualizações ordena as versões como no versionamento semântico: quem testa uma release candidate
+  recebe a versão final. Launchers da v0.6.0-rc.1 informam apenas `0.6.0` e por isso só veem um número de versão maior.
+- As opções de QTE e acessibilidade foram traduzidas para alemão, francês, italiano e russo; o texto do gesto
+  "Círculo" explica que ele segue a seta do guia de teclas.
+
 ### Desempenho
 - O instalador traz um perfil de otimização guiada (PGO) treinado neste mesmo conjunto de patches (198.964 funções):
   instalações novas e recompilações o usam sem etapa de treino.
