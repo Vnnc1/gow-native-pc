@@ -1,6 +1,10 @@
 <div align="center">
 
+<img src="docs/tag-ratone-tend.png" alt="RatOne — creator and maintainer of MK8-online" width="560">
+
 # God of War — Native PC
+
+**Created and maintained by [RatOne](https://github.com/Vnnc1)**
 
 **English** · [Português (Brasil)](README.pt-BR.md)
 
