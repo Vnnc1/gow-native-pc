@@ -1,0 +1,95 @@
+Movies flashed the last gameplay frame (or black) between their pictures. The USA movie player draws every picture
+into fbp 104, a buffer whose memory covers fbp 208, and flips DISPFB between 104 and 208; Present showed the 208 target,
+which still held the last gameplay frame (or did not exist). Present now shows the newest target drawn over the displayed
+buffer's first block when the displayed target itself was not drawn during the last 16 presents (~0.27 s) and that
+newer target was. Gameplay redraws its displayed buffer every one or two presents, so the rule does not apply there
+(a first draft using a one-present gap also fired in sub-60 FPS gameplay, where 104 holds an intermediate pass).
+Logs one [gs-hw-display] line per ~5 s window in which it applied.
+
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index a1d19bd..5a3a38c 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1,5 +1,6 @@
+ // GOW-Port: render-target GS renderer, see include/runtime/gs/gs_hw_backend.h.
+ #include "runtime/gs/gs_hw_backend.h"
++#include <array>
+ #include "runtime/gs/gs_texture_budget.h"
+ #include "runtime/gs/gs_frame_latency.h"
+ #include "runtime/gow_ajustes_vivo.h"
+@@ -741,6 +742,12 @@ struct GSHwBackend::Impl
+     uint64_t textureBytes = 0, textureEvictions = 0, textureReuses = 0;
+     std::vector<RenderTarget> targets;
+     uint64_t useCounter = 0, writeSeq = 0;
++    // zzz-331: writeSeq at each of the last 16 presents (~0.27 s). A displayed target not drawn in that window is stale;
++    // gameplay redraws its displayed buffer every one or two presents even at 30 FPS, movies leave it for seconds.
++    std::array<uint64_t, 16> presentSeqs{};
++    unsigned presentSeqIndex = 0;
++    uint64_t staleDisplaySubstitutions = 0; // presents in the current 5 s window that used another target (logged)
++    uint32_t staleDisplayFbp = 0, staleDisplaySource = 0;
+     struct UploadRecord { uint32_t lo, hi; uint64_t seq; };
+     std::vector<UploadRecord> uploadLog;
+     uint64_t clutHash = 0;
+@@ -1969,6 +1976,38 @@ struct GSHwBackend::Impl
+     // target's last colour draw: the memory then holds Z, not the colour picture. Example: the movie player draws its
+     // pictures into fbp 104, which is the gameplay Z buffer; after the movie the depth writes replace them, and the
+     // game's passes that read the Z memory as PSMCT24 (fog/DOF strips into fbp 320) must not see the old movie frame.
++    // zzz-331: the target to show for a displayed FBP. The movie player draws every picture into fbp 104, a buffer whose
++    // memory covers fbp 208, and flips DISPFB between 104 and 208; the 208 target still holds the last gameplay frame
++    // (or does not exist), so presenting it flashed the old game picture (or black) over the movie. When the displayed
++    // target was not drawn during the last 16 presents and a target drawn in that window covers its first block, the
++    // memory holds that newer picture: show it. Gameplay keeps drawing into 104 too (an intermediate pass), so a
++    // one-present gap at under 60 FPS must not qualify: only a displayed buffer left alone for ~0.27 s does.
++    RenderTarget *displayTarget(uint32_t fbp)
++    {
++        RenderTarget *rt = findTarget(fbp);
++        const uint64_t staleBefore = presentSeqs[presentSeqIndex]; // writeSeq 16 presents ago
++        if (rt && rt->lastDrawSeq > staleBefore)
++            return rt;
++        const uint32_t block = fbp * 32u;
++        RenderTarget *newest = nullptr;
++        for (RenderTarget &t : targets)
++        {
++            if (&t == rt || t.usedW == 0u || t.usedH == 0u || t.fbp >= fbp || overwrittenByDepth(t))
++                continue;
++            const uint32_t lo = t.fbp * 32u, hi = lo + spanBlocks(t.psm, t.fbw, t.usedH);
++            if (block < lo || block >= hi || t.lastDrawSeq <= staleBefore || (rt && t.lastDrawSeq <= rt->lastDrawSeq))
++                continue;
++            if (!newest || t.lastDrawSeq > newest->lastDrawSeq)
++                newest = &t;
++        }
++        if (!newest)
++            return rt;
++        ++staleDisplaySubstitutions;
++        staleDisplayFbp = fbp;
++        staleDisplaySource = newest->fbp;
++        return newest;
++    }
++
+     bool overwrittenByDepth(const RenderTarget &t) const
+     {
+         for (const RenderTarget &o : targets)
+@@ -4144,7 +4183,7 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
+     const uint32_t alp = static_cast<uint32_t>((request.pmode >> 8) & 0xFFu);
+     const auto drawCircuit = [&](uint32_t cfbp, uint64_t dispfb, uint32_t cdbx, uint32_t cdby, bool alphaFactor)
+     {
+-        RenderTarget *rt = d.findTarget(cfbp);
++        RenderTarget *rt = d.displayTarget(cfbp); // zzz-331
+         if (!rt)
+             return;
+         g.BindTexture(kTexture2D, rt->color);
+@@ -4182,6 +4221,14 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
+     }
+     else
+         drawCircuit(fbp, ok1 ? request.dispfb1 : request.dispfb2, ok1 ? dbx1 : dbx2, ok1 ? dby1 : dby2, false);
++    d.presentSeqs[d.presentSeqIndex] = d.writeSeq; // zzz-331: draws after this belong to the next frame
++    d.presentSeqIndex = (d.presentSeqIndex + 1u) % static_cast<unsigned>(d.presentSeqs.size());
++    if (d.presentCount % 300 == 0 && d.staleDisplaySubstitutions) // zzz-331: one line per ~5 s, only when it applied
++    {
++        std::fprintf(stderr, "[gs-hw-display] %llu of the last 300 presents showed fbp=%u for the stale displayed fbp=%u\n",
++                     (unsigned long long)d.staleDisplaySubstitutions, d.staleDisplaySource, d.staleDisplayFbp);
++        d.staleDisplaySubstitutions = 0;
++    }
+     g.BindVertexArray(d.vao);
+     // the displayed image is opaque: force alpha to 1 on the GPU (the host draws it with blending)
+     g.ColorMask(kFalse, kFalse, kFalse, kTrue);

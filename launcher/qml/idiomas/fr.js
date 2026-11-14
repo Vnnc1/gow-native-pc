@@ -3,7 +3,7 @@
 // Launcher texts in French (fr). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
     qteAuto: "QTE automatiques : boutons",
-    qteAutoDesc: "Appuie automatiquement sur le bouton des QTE reconnus, y compris de façon répétée. Désactivé par défaut ; redémarrez le jeu après modification. Ne lance pas les coups de grâce et ne contrôle pas le stick. Les autres invites restent manuelles.",
+    qteAutoDesc: "Appuie automatiquement sur le bouton des QTE reconnus, y compris de façon répétée. Désactivé par défaut ; redémarrez le jeu après modification. Effectue aussi les rotations de stick reconnues (demi-tour et tour complet) ; ne lance pas les coups de grâce. Les autres invites restent manuelles.",
     grupoTexturas: "Textures",
     usarPaquete: "Activer le pack de textures",
     usarPaqueteDesc: "Remplace les textures du jeu par des PNG aux noms PCSX2. Désactivé, les textures d'origine restent.",
@@ -483,5 +483,17 @@ var textos = {
     modsError: "Les mods n'ont pas pu être préparés",
     modsScope: "Les mods peuvent remplacer les textures, les fichiers ouverts par chemin (certains audio/FMV/modules IOP) et les interrupteurs de jeu intégrés. L'audio dans les PAK et le code du jeu demandent une recompilation du runner et ne sont pas pris en charge. Un mod désactivé ne touche pas au jeu.",
     modsNoPython: "Python 3.11+ est introuvable ; le gestionnaire de mods est désactivé.",
-    modsCheckResult: "%1 mod(s) planifié(s), %2 vérification(s)."
+    modsCheckResult: "%1 mod(s) planifié(s), %2 vérification(s).",
+    qteHoldButtonsDesc: "Choisissez ici les boutons principaux et activez les gâchettes séparément ci-dessous. La répétition se met en pause pour toute combinaison de boutons ; celle des gâchettes aussi pendant le déplacement. Répéter une gâchette seule peut encore interrompre une invite « maintenir » ; activez-la seulement si nécessaire.",
+    qteStick: "Aide au stick clavier/souris",
+    qteStickDesc: "Maintenez la touche de geste QTE (G par défaut ; modifiable dans Commandes) quand une invite demande de bouger le stick gauche. Choisissez Gauche / droite ou Cercle selon l'invite. Lorsque le guide de touches numéroté est affiché, le cercle part de sa première touche et tourne dans le sens de la flèche. Relâchez pour revenir au déplacement normal. Les QTE ne sont pas détectés ; en dehors d'eux, Kratos peut bouger. Les manettes connectées ne sont pas modifiées.",
+    qteStickOff: "Désactivé",
+    qteStickShake: "Gauche / droite",
+    qteStickRotate: "Cercle",
+    acc_qte_stick: "Maintenir pour le geste de stick QTE",
+    pestAccessibility: "Accessibilité",
+    accessibilityIntro: "Réglez l'aide à la saisie et les modifications visuelles. Les changements s'appliquent au prochain lancement du jeu.",
+    inputAssistance: "Aide à la saisie",
+    keyboardChords: "Déplacement et actions maintenues",
+    keyboardChordsDesc: "Disposition par défaut : Ctrl maintient R2 ; Ctrl + WASD déplace en le maintenant, et Ctrl + Espace garde R2 + Croix enfoncés. L'esquive utilise Alt + WASD. Changez les touches et la touche de geste QTE dans Commandes.",
 };

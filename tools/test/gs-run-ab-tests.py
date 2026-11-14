@@ -156,7 +156,9 @@ assert all(on[f] == "1" for f in m.PR26_FLAGS.values()) and m.grouping_for("wrap
 for mode, flag in m.SHIPPED_FLAGS.items():
     off, on = m.pr26_environment(mode, 0), m.pr26_environment(mode, 1)
     assert [k for k in off if off[k] != on[k]] == [flag] and m.grouping_for(mode, 0, 0) == 1
-print("PASS: wrap-group / chain-warm comparisons change only their own switch")
+assert m.pr26_environment("frame-latency", 0)["GOW_GS_FRAME_LATENCY"] == "0"
+assert m.pr26_environment("frame-latency", 1)["GOW_GS_FRAME_LATENCY"] == "2"
+print("PASS: wrap-group / chain-warm / frame-latency comparisons change only their own switch")
 
 # Explicit installation paths must not read this checkout's generated languages.json.
 with tempfile.TemporaryDirectory() as directory:
@@ -173,3 +175,12 @@ with tempfile.TemporaryDirectory() as directory:
             "--runner", __file__, "--output", str(output), *flags], capture_output=True, text=True)
         assert result.returncode == 2 and message in result.stderr and not output.exists()
 print("PASS: explicit installation paths bypass local metadata and reject missing inputs before writes")
+
+# --keep-going: only complete pairs with both runs valid enter the means, whatever the order inside the pair.
+runs = [{"variant": 0, "valid": True, "guest_fps": 20}, {"variant": 1, "valid": False, "guest_fps": 99},
+        {"variant": 1, "valid": True, "guest_fps": 30}, {"variant": 0, "valid": True, "guest_fps": 25},
+        {"variant": 0, "valid": True, "guest_fps": 1}]
+pairs = m.valid_pairs(runs)
+assert len(pairs) == 1 and pairs[0][0]["guest_fps"] == 25 and pairs[0][1]["guest_fps"] == 30
+assert m.valid_pairs([{"variant": 0}, {"variant": 1}])  # reports from before the "valid" field
+print("PASS: keep-going means use complete valid pairs only")

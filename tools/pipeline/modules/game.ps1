@@ -5,6 +5,11 @@
 # one installation therefore fits every installation with the same identity. A trained profile gets a manifest
 # (<profile>.json) with that identity; the release package ships one (games/<id>/pgo/shipped.profdata + .json) and a
 # configure without a fitting local profile takes it: the install then needs no instrumented build and no training run.
+# A profile fits when its game code (`code`, the .text hash) is this installation's. The rest of the identity (runtime,
+# patches, runtime sources, game profile, unity batch) may have moved on since training: clang checks every function's
+# CFG hash and ignores the counts of a function that changed (-Wprofile-instr-out-of-date, a warning, never an error),
+# so a runtime update keeps PGO for all the unchanged code instead of silently dropping the whole profile. Build-Game
+# reports how many functions lost their data; retraining is only worth it when that share grows.
 function Get-ElfTextHash([string]$elf) {
     $d = [IO.File]::ReadAllBytes($elf)
     $shoff = [BitConverter]::ToUInt32($d, 0x20)
@@ -64,16 +69,20 @@ function Get-ProfileIdentity {
         unity = Get-UnityBatch
     }
 }
-# $true when the manifest's identity is this installation's (no prepared disc yet: $false)
-function Test-ProfileManifest([string]$manifest) {
-    if (-not (Test-Path $manifest)) { return $false }
+# 'exact' when the manifest's identity is this installation's, 'code' when only the game code matches (stale functions
+# are dropped one by one by clang), $null otherwise (no prepared disc yet, another game code, unreadable manifest)
+function Get-ProfileFit([string]$manifest) {
+    if (-not (Test-Path $manifest)) { return $null }
     # A manifest that cannot be read or parsed is not the same as one that does not fit this installation: the
     # difference was swallowed, so a corrupted file was taken for "no profile" and the build went on without it.
-    try { $id = Get-ProfileIdentity } catch { Write-Host "profile manifest unreadable ($manifest): $($_.Exception.Message)"; return $false }
-    try { $m = Get-Content $manifest -Raw | ConvertFrom-Json } catch { Write-Host "profile manifest corrupted ($manifest): $($_.Exception.Message)"; return $false }
-    return ($m.runtime -eq $id.runtime) -and ($m.patches -eq $id.patches) -and ($m.game -eq $id.game) -and
-        ($m.code -eq $id.code) -and ($m.src -eq $id.src) -and ($m.unity -eq $id.unity)
+    try { $id = Get-ProfileIdentity } catch { Write-Host "profile manifest unreadable ($manifest): $($_.Exception.Message)"; return $null }
+    try { $m = Get-Content $manifest -Raw | ConvertFrom-Json } catch { Write-Host "profile manifest corrupted ($manifest): $($_.Exception.Message)"; return $null }
+    if (-not $m.code -or $m.code -ne $id.code) { return $null }
+    if (($m.runtime -eq $id.runtime) -and ($m.patches -eq $id.patches) -and ($m.game -eq $id.game) -and
+        ($m.src -eq $id.src) -and ($m.unity -eq $id.unity)) { return 'exact' }
+    return 'code'
 }
+function Test-ProfileManifest([string]$manifest) { return [bool](Get-ProfileFit $manifest) }
 function Write-ProfileManifest([string]$source) {
     $m = Get-ProfileIdentity
     $m.source = $source
@@ -100,7 +109,7 @@ function Use-ReleaseProfile {
     Copy-Item $shipped $pgoProfile -Force
     Copy-Item "$shipped.json" "$pgoProfile.json" -Force
     Remove-Item (Join-Path $root 'data\pgo-stale.txt') -ErrorAction SilentlyContinue
-    Write-Host "profile-guided: the release's profile fits this runtime and game code ($pgoProfile)"
+    Write-Host "profile-guided: the release's profile fits this game code ($(Get-ProfileFit "$pgoProfile.json") match, $pgoProfile)"
     return $true
 }
 
@@ -119,7 +128,7 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
             (Test-Path $pgoProfile) -and (Test-ProfileManifest "$pgoProfile.json")
         }
         if (-not $profileReady -and (Test-Path $pgoProfile)) {
-            Write-Host '@@status local PGO profile has no matching manifest; building without it (profile preserved)'
+            Write-Host '@@status local PGO profile is for other game code or has no readable manifest; building without it (profile preserved)'
         }
     }
     $ltcgValue = if ($Ltcg) { 'ON' } else { 'OFF' }
@@ -164,11 +173,12 @@ function Configure([string]$dir = $bld, [string]$pgo = 'auto', [switch]$MaySkip)
     }
     elseif ($profileReady) {
         $profileHash = (Get-FileHash $pgoProfile -Algorithm SHA256).Hash
-        Write-Host "profile-guided: $pgoProfile ($profileHash)"
+        Write-Host "profile-guided: $pgoProfile ($profileHash, $(Get-ProfileFit "$pgoProfile.json") match)"
         # The digest changes Ninja commands and cache keys when the same profile path gets new contents.
-        # -Wno-profile-instr-unprofiled is expected (new generated code is legitimately unprofiled); -out-of-date is
-        # not: it means the source CFG changed under the profile, so the build must stop instead of silently using it.
-        $flags += " -fprofile-instr-use=`"$(Barra $pgoProfile)`" -DGOW_PGO_REVISION=$profileHash -Wno-profile-instr-unprofiled -Werror=profile-instr-out-of-date"
+        # -Wno-profile-instr-unprofiled: new generated code is legitimately unprofiled. -out-of-date stays a warning: clang
+        # ignores the counts of a function whose CFG changed under the profile (a runtime patch), which costs that function
+        # its optimisation, never correctness; Build-Game sums these warnings into the build's profile coverage.
+        $flags += " -fprofile-instr-use=`"$(Barra $pgoProfile)`" -DGOW_PGO_REVISION=$profileHash -Wno-profile-instr-unprofiled -Wno-error=profile-instr-out-of-date"
     }
     # Always explicit: a value once passed stays in CMakeCache.txt, so an omitted one would silently keep it.
     $extra += @('-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG', '-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG')
@@ -236,6 +246,11 @@ if ($Stages -contains 'sync') {
 
 # --- build ----------------------------------------------------------------------------------------------------------
 . (Join-Path $PSScriptRoot 'build-progress.ps1')
+# Clang's per-object -Wprofile-instr-out-of-date summary: functions whose CFG changed since training lose their counts.
+function Add-ProfileStaleWarning($stale, [string]$line) {
+    $m = [regex]::Match($line, 'profile data may be out of date: of (\d+) functions?, (\d+) (?:has|have) mismatched data')
+    if ($m.Success) { $stale.objects++; $stale.functions += [long]$m.Groups[1].Value; $stale.mismatched += [long]$m.Groups[2].Value }
+}
 function Build-Game([string]$dir = $bld) {
     Use-Toolchain
     Need (Join-Path $dir 'CMakeCache.txt') 'configured build folder (run the configure stage)'
@@ -249,10 +264,12 @@ function Build-Game([string]$dir = $bld) {
     $writer.AutoFlush = $true
     $progressState = New-GameBuildProgress $dir
     $errors = 0
+    $stale = [ordered]@{ objects = 0; functions = 0; mismatched = 0 }
     & ninja -C $dir "-j$jobs" ps2EntryRunner 2>&1 | ForEach-Object {
         $s = "$_"
         if ($s -eq 'System.Management.Automation.RemoteException') { return }
         $writer.WriteLine($s)
+        Add-ProfileStaleWarning $stale $s
         $progress = Read-GameBuildProgress $progressState $s
         if ($progress) {
             if ($progress.changed) { Write-Host "@@progress $($progress.done) $($progress.total)" }
@@ -266,6 +283,15 @@ function Build-Game([string]$dir = $bld) {
     if ($profileMode -ne 'generate') { Write-CompilerCacheStats 'game' }
     if ($rc -ne 0) { throw "build failed (rc=$rc), data\$Game\logs\build.log" }
     if ($null -ne $buildProfile) { $script:gameBuildProfiles.Add($buildProfile) }
+    if ($buildProfile -and $buildProfile.pgoApplied) {
+        # Only recompiled objects report: an up-to-date object keeps the coverage of the build that made it.
+        if ($stale.objects) {
+            Write-Host ("profile coverage: {0:N0} of {1:N0} profiled functions in {2} recompiled objects changed since training and were optimised without it" -f
+                $stale.mismatched, $stale.functions, $stale.objects)
+        } else { Write-Host 'profile coverage: no recompiled function changed since training' }
+        # The profile is in use: the launcher must not ask for training again (an update writes pgo-stale.txt)
+        if ($dir -eq $bld) { Remove-Item (Join-Path $root 'data\pgo-stale.txt') -ErrorAction SilentlyContinue }
+    }
     if ($dir -eq $bld) {
         [IO.File]::WriteAllText($toolchainFile, 'clang')
         [IO.File]::WriteAllText($buildRootFile, $BuildRoot)

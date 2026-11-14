@@ -3,7 +3,7 @@
 // Launcher texts in Italian (it). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
     qteAuto: "QTE automatici: pulsanti",
-    qteAutoDesc: "Preme automaticamente il pulsante dei QTE riconosciuti, anche ripetutamente. Disattivato inizialmente; riavvia il gioco dopo le modifiche. Non avvia le mosse finali né automatizza la levetta. Gli altri comandi restano manuali.",
+    qteAutoDesc: "Preme automaticamente il pulsante dei QTE riconosciuti, anche ripetutamente. Disattivato inizialmente; riavvia il gioco dopo le modifiche. Esegue anche le rotazioni della levetta riconosciute (mezzo giro e giro completo); non avvia le mosse finali. Gli altri comandi restano manuali.",
     grupoTexturas: "Texture",
     usarPaquete: "Usa il pacchetto di texture",
     usarPaqueteDesc: "Sostituisce le texture del gioco con PNG dai nomi PCSX2. Disattivato lascia le originali.",
@@ -483,5 +483,17 @@ var textos = {
     modsError: "Impossibile preparare i mod",
     modsScope: "I mod possono sostituire texture, file aperti per percorso (alcuni audio/FMV/moduli IOP) e gli interruttori di gioco integrati. L'audio nei PAK e il codice di gioco richiedono una ricompilazione del runner e non sono supportati. Un mod disattivato non tocca il gioco.",
     modsNoPython: "Python 3.11+ non trovato; il gestore di mod è disattivato.",
-    modsCheckResult: "%1 mod pianificati, %2 controllo/i."
+    modsCheckResult: "%1 mod pianificati, %2 controllo/i.",
+    qteHoldButtonsDesc: "Seleziona qui i tasti frontali e attiva i dorsali separatamente qui sotto. La ripetizione si sospende con qualsiasi combinazione di tasti; quella dei dorsali anche durante il movimento. Ripetere un solo dorsale può comunque interrompere un comando «tieni premuto»; attivalo solo se serve.",
+    qteStick: "Assistenza stick per tastiera/mouse",
+    qteStickDesc: "Tieni premuto il tasto gesto QTE (G per impostazione predefinita; modificabile in Comandi) quando viene chiesto di muovere lo stick sinistro. Scegli Sinistra / destra o Cerchio in base al comando. Con la guida numerata dei tasti a schermo, il cerchio parte dal suo primo tasto e gira nel verso della freccia. Rilascia per tornare al movimento normale. Non rileva i QTE e fuori da essi Kratos può muoversi. I controller collegati non cambiano.",
+    qteStickOff: "Disattivato",
+    qteStickShake: "Sinistra / destra",
+    qteStickRotate: "Cerchio",
+    acc_qte_stick: "Tieni premuto per il gesto stick QTE",
+    pestAccessibility: "Accessibilità",
+    accessibilityIntro: "Regola l'assistenza ai comandi e le modifiche visive. Le modifiche si applicano al prossimo avvio del gioco.",
+    inputAssistance: "Assistenza ai comandi",
+    keyboardChords: "Movimento e azioni tenute premute",
+    keyboardChordsDesc: "Layout predefinito: Ctrl tiene premuto R2; Ctrl + WASD muove tenendolo premuto e Ctrl + Spazio mantiene R2 + Croce. La schivata usa Alt + WASD. Cambia i tasti e il tasto gesto QTE in Comandi.",
 };

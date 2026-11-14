@@ -140,19 +140,38 @@ if ('-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=8' -notin $script:configured[-1]) { th
 Write-Host 'PASS: CPU target and RAM-aware unity batch configure invalidation'
 
 $validManifest = [IO.File]::ReadAllText("$pgoProfile.json")
-foreach ($invalid in @('missing', '{invalid json', '{"runtime":"old","patches":"patches","game":"game","code":"code"}')) {
+foreach ($invalid in @('missing', '{invalid json', '{"runtime":"runtime","patches":"patches","game":"game","code":"other"}',
+                      '{"runtime":"runtime","patches":"patches","game":"game"}')) {
     if ($invalid -eq 'missing') { Remove-Item -LiteralPath "$pgoProfile.json" }
     else { [IO.File]::WriteAllText("$pgoProfile.json", $invalid) }
     Configure -MaySkip
     if ($script:configured[-1] -match 'CXX_FLAGS=.*-fprofile-instr-use=') {
-        throw 'Missing, malformed and mismatched manifests must not apply a local PGO profile'
+        throw 'Missing, malformed and other-game-code manifests must not apply a local PGO profile'
     }
     if ($script:configuredGameProfile.pgoApplied -or $null -ne $script:configuredGameProfile.appliedPgoHash) {
         throw 'Rejected profiles must not appear as applied in configure metadata'
     }
     if ([IO.File]::ReadAllText($pgoProfile) -ne 'profile-two') { throw 'Rejected profiles must remain untouched' }
 }
+# Same game code, earlier runtime/patches/game profile: still applied, clang drops the changed functions' counts.
+[IO.File]::WriteAllText("$pgoProfile.json", '{"runtime":"old","patches":"old","game":"old","code":"code"}')
+if ((Get-ProfileFit "$pgoProfile.json") -ne 'code') { throw 'A profile of this game code on an earlier runtime must fit by code' }
+Configure -MaySkip
+if (-not ($script:configured[-1] -match 'CXX_FLAGS=.*-fprofile-instr-use=') -or -not $script:configuredGameProfile.pgoApplied) {
+    throw 'A profile trained on an earlier runtime must keep PGO for the unchanged game code'
+}
+if ($script:configured[-1] -match 'Werror=profile-instr-out-of-date' -or -not ($script:configured[-1] -match 'Wno-error=profile-instr-out-of-date')) {
+    throw 'Functions changed since training must be a warning, never a build error'
+}
+# Exact text of the pinned clang (23.1.4) for one function changed under a 3-function profile.
+$stale = [ordered]@{ objects = 0; functions = 0; mismatched = 0 }
+Add-ProfileStaleWarning $stale 'warning: profile data may be out of date: of 3 functions, 1 has mismatched data that will be ignored [-Wprofile-instr-out-of-date]'
+Add-ProfileStaleWarning $stale 'a.cpp: warning: profile data may be out of date: of 1200 functions, 40 have mismatched data that will be ignored [-Wprofile-instr-out-of-date]'
+Add-ProfileStaleWarning $stale '1 warning generated.'
+if ($stale.objects -ne 2 -or $stale.functions -ne 1203 -or $stale.mismatched -ne 41) { throw 'Stale-profile warnings must sum into the build coverage' }
+Write-Host 'PASS: a profile of this game code survives runtime changes; stale functions are a counted warning'
 [IO.File]::WriteAllText("$pgoProfile.json", $validManifest)
+if ((Get-ProfileFit "$pgoProfile.json") -ne 'exact') { throw 'The trained identity must be an exact fit' }
 Configure -MaySkip
 if (-not ($script:configured[-1] -match 'CXX_FLAGS=.*-fprofile-instr-use=')) {
     throw 'A matching local profile must restore PGO and invalidate configure'

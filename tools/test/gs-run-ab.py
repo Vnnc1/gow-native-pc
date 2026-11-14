@@ -181,11 +181,16 @@ PR26_FLAGS = {"ring": "GOW_GS_HW_RING", "texreuse": "GOW_GS_TEXREUSE", "depth-zb
 # Comparisons of a later default-on switch: every PR 26 switch and grouping stay at the shipped value, so the
 # variable under test is the only difference from what players run. zzz-302: wrapping-blend triangle grouping.
 SHIPPED_FLAGS = {"wrap-group": "GOW_GS_WRAP_GROUP",
-                 "chain-warm": "GOW_VU1_CHAIN_WARM"}  # patch 76: successor-slot prefetch in VU1 chain()
+                 "chain-warm": "GOW_VU1_CHAIN_WARM",  # patch 76: successor-slot prefetch in VU1 chain()
+                 "frame-latency": "GOW_GS_FRAME_LATENCY"}  # zzz-326: GS worker frames in flight on the GPU
+# Values of variants 0 (reference) and 1 (candidate) where the switch is not a plain 0/1. frame-latency: the shipped
+# default is 0 since zzz-330; variant 1 is --latency-candidate (2 unless given).
+SHIPPED_VALUES = {"frame-latency": ("0", "2")}
 
 def pr26_environment(mode, variant):
     if mode in SHIPPED_FLAGS:
-        return {**{flag: "1" for flag in PR26_FLAGS.values()}, SHIPPED_FLAGS[mode]: str(variant)}
+        value = SHIPPED_VALUES[mode][variant] if mode in SHIPPED_VALUES else str(variant)
+        return {**{flag: "1" for flag in PR26_FLAGS.values()}, SHIPPED_FLAGS[mode]: value}
     if mode != "pr26" and mode not in PR26_FLAGS:
         return {}
     return {flag: str(variant if mode in (name, "pr26") else 1) for name, flag in PR26_FLAGS.items()}
@@ -194,6 +199,15 @@ def grouping_for(mode, variant, fixed):
     if mode in ("grouping", "pr26"):
         return variant
     return 1 if mode in PR26_FLAGS or mode in SHIPPED_FLAGS else fixed  # keep the shipped grouping default
+
+def valid_pairs(runs):
+    """Consecutive (reference, candidate) runs of one alternating pair where both passed every check."""
+    pairs = []
+    for i in range(0, len(runs) - 1, 2):
+        both = {r["variant"]: r for r in runs[i:i + 2]}
+        if set(both) == {0, 1} and all(r.get("valid", True) for r in both.values()):
+            pairs.append(both)
+    return pairs
 
 def completed_child(meta, events, helper_code):
     exits = [e for e in events if e.get("type") == "process_exit"]
@@ -225,9 +239,20 @@ def main():
     p.add_argument("--grouping", type=int, choices=(0, 1), default=0, help="Fixed grouping for alpha/scaler comparisons")
     p.add_argument("--gpu-samples", action="store_true", help="Optional Windows PDH engine busy-time samples every 2 s")
     p.add_argument("--hidden", action="store_true", help="Background sessions; no visible-play performance claim")
+    p.add_argument("--keep-going", action="store_true",
+                   help="Record a run that fails validation as invalid and continue; means use valid runs and complete pairs only")
+    p.add_argument("--fixed-step", action="store_true",
+                   help="Test-only 1/60 s game step in both variants (zzz-328): same simulation per frame on slow machines; "
+                        "FPS is then throughput of an identical workload, not real-time play")
     p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="Extra GOW_/PS2X_ diagnostic variable for both variants (repeatable); recorded in settings.json")
+    p.add_argument("--latency-candidate", type=int, choices=range(1, 8), default=2, metavar="1-7",
+                   help="--compare frame-latency: GOW_GS_FRAME_LATENCY of variant 1 (default 2, the shipped value); "
+                        "variant 0 stays the 0 reference")
     a = p.parse_args()
+    if a.latency_candidate != 2 and a.compare != "frame-latency":
+        p.error("--latency-candidate requires --compare frame-latency")
+    SHIPPED_VALUES["frame-latency"] = ("0", str(a.latency_candidate))
     extra_env = {}
     for item in a.env:
         name, sep, value = item.partition("=")
@@ -251,6 +276,8 @@ def main():
         p.error("--compare scale already selects 1x/2x; omit --scale")
     if a.compare == "logic-rate" and scene and "frame_begin" in scene:
         p.error("Logic-rate comparisons require real-time input/windows, not equal frame numbers")
+    if a.fixed_step and a.compare == "logic-rate":
+        p.error("--fixed-step replaces the measured step; it cannot be combined with --compare logic-rate")
     if scene and "frame_begin" in scene:
         begin, end = scene["frame_begin"], scene.get("frame_end", 0)
         if not (0 <= begin < end <= 1000000 and end - begin <= 4096):
@@ -274,6 +301,7 @@ def main():
               "visible": not a.hidden,
               "compare": a.compare, "gpu_samples": a.gpu_samples, "jit_only": a.compare == "vu1-inline",
               "logic_fps": a.logic_fps if a.compare == "logic-rate" else None,
+              "fixed_step": a.fixed_step,
               "scene": a.scene, "scene_contract": scene,
               "seconds": a.seconds, "warmup": a.warmup, "runs": []}
     original_saves = save_inventory(root / "data" / a.game, elf.parent)
@@ -306,6 +334,8 @@ def main():
         env.update(efficiency_environment(a.compare, variant))
         env.update(pr26_environment(a.compare, variant))
         env.update(extra_env)
+        if a.fixed_step:
+            env["GOW_TEST_FIXED_STEP"] = "1"
         if a.compare == "vu1-fast":
             env["GOW_VU1_FAST"] = str(variant)  # launcher "fast VU" option; changes VU1 float semantics
         if a.compare == "alpha":
@@ -332,7 +362,7 @@ def main():
             env.update(GOW_PAD_GUION=scene["pad_script"], GOW_PLAYER_TRACE="1")
             if scene.get("god_mode"):
                 env["GOW_GOD_MODE"] = "1"
-        if a.timing or a.compare in ("alpha", "sampler", "shader", "alpha-bounds", "efficiency"):
+        if a.timing or a.compare in ("alpha", "sampler", "shader", "alpha-bounds", "efficiency", "frame-latency"):
             # Existing bounded counters; no per-draw timers or GPU readbacks.
             env["GOW_GS_HW_STATS"] = "1"
         if a.task_capture:
@@ -425,6 +455,13 @@ def main():
         stats["exit_metadata_recovered"] = "exit_code" not in meta and checks["exit_zero"]
         if a.compare == "wrap-group":
             checks["effective_wrap_group"] = f"[gs-wrap-config] group={variant}" in log
+        if a.compare == "frame-latency":
+            frames = SHIPPED_VALUES["frame-latency"][variant]
+            checks["effective_frame_latency"] = f"[gs-latency-config] frames={frames}" in log
+            # Bounded [gs-hw-latency] / [gs-hw] counters: frame waits and vertex ring stalls per run.
+            stats["latency_waits"] = sum(int(x) for x in re.findall(r"\[gs-hw-latency\].* waits=(\d+)", log))
+            stats["latency_wait_ms"] = sum(float(x) for x in re.findall(r"\[gs-hw-latency\].* wait_ms=([0-9.]+)", log))
+            stats["ring_stalls"] = sum(int(x) for x in re.findall(r"\[gs-hw\] .*ringStalls=(\d+)", log))
         if a.compare in (*EFFICIENCY_FLAGS, "efficiency"):
             configured = efficiency_environment(a.compare, variant)
             checks["effective_efficiency_settings"] = all(marker in log for marker in (
@@ -447,6 +484,8 @@ def main():
             stats["task_capture_bytes"] = corpus.stat().st_size if corpus.is_file() else 0
             checks["bounded_tasks_recorded"] = stats["task_capture_bytes"] > 0 and "[gow-vu1-task] recorded=32 " in log and "[gow-vu1-task] write_error=1" not in log
         checks["effective_scale"] = f"render-target renderer ready, scale {a.scale:.2f}" in log
+        if a.fixed_step:
+            checks["effective_fixed_step"] = "[gow-logic-config] fps=60 experimental=0 vblank=60 fixed_step=1" in log
         if a.compare == "vu1-inline":
             checks["effective_inline_chain"] = f"[vu1-chain] inline={variant}" in log
             checks["effective_jit_only"] = "[vu1x] JIT-only validation: AOT registry cleared" in log
@@ -458,16 +497,24 @@ def main():
             checks["effective_logic_rate"] = f"[gow-logic-config] fps={stats['logic_fps']} experimental={variant} vblank=60" in log
             checks["speed_windows"] = stats["simulation_speed"]["windows"] >= 3
         if scene:
-            checks["same_scene"] = same_scene([r["scene"] for r in report["runs"]] + [stats["scene"]], scene["position_tolerance"], scene.get("zones"), scene.get("states", [11]))
-        if scene and "trajectory_tolerance" in scene:
-            checks["same_scene"] = same_trajectory([r["scene"] for r in report["runs"]] + [stats["scene"]], scene["trajectory_tolerance"], scene["zones"])
-        report["runs"].append({"directory": str(run), "variant": variant, "grouped": grouped, "checks": checks, **stats})
+            # compared only with accepted runs: an earlier invalid run (--keep-going) must not reject later ones
+            accepted = [r["scene"] for r in report["runs"] if r.get("valid", True)] + [stats["scene"]]
+            checks["same_scene"] = same_scene(accepted, scene["position_tolerance"], scene.get("zones"), scene.get("states", [11]))
+            if "trajectory_tolerance" in scene:
+                checks["same_scene"] = same_trajectory(accepted, scene["trajectory_tolerance"], scene["zones"])
+        report["runs"].append({"directory": str(run), "variant": variant, "grouped": grouped, "checks": checks,
+                               "valid": all(checks.values()), **stats})
         save()
         print(json.dumps(report["runs"][-1]), flush=True)
-        if not all(checks.values()): raise RuntimeError(f"Run failed validation: {checks}")
+        if not all(checks.values()):
+            if not a.keep_going: raise RuntimeError(f"Run failed validation: {checks}")
+            print(f"Run {index + 1} invalid, kept as evidence: {[k for k, v in checks.items() if not v]}", flush=True)
     report["completed"] = True
     if not (a.capture or a.timing or a.task_capture):
-        report["mean_run_guest_fps"] = {str(v): statistics.mean(r["guest_fps"] for r in report["runs"] if r["variant"] == v) for v in (0, 1)}
+        pairs = valid_pairs(report["runs"])
+        report["valid_pairs"] = len(pairs)
+        if pairs:
+            report["mean_run_guest_fps"] = {str(v): statistics.mean(pair[v]["guest_fps"] for pair in pairs) for v in (0, 1)}
     save()
     print(output / "summary.json", flush=True)
 

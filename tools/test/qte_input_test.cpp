@@ -1,6 +1,7 @@
 // Production keyboard-stick integration with a fake host input backend; no window or game data.
 #include "raylib.h"
 #include "runtime/ps2_pad.h"
+#include "runtime/gow_qte_prompt.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -119,5 +120,41 @@ int main(int argc, char **argv) {
     tobiichiSticksTeclado(sticks);
     check(sticks[0] > 224 && sticks[2] == 128 && sticks[3] == 128,
           "dedicated Alt + movement still drives the evade stick");
+    // zzz-329: a published rotation guide (CCW half turn from down: S, D, W) through the production reader.
+    keys.fill(false); mouse.fill(false);
+    const gow_qte_prompt::Sequence guide{{2, 1, 0}, 3};
+    clockTime = 50.0;
+    gow_qte_prompt::publish(0, guide);
+    keys[KEY_S] = true;
+    tobiichiSticksTeclado(sticks);
+    keys[KEY_S] = false;
+    clockTime += 1.0 / 30.0;
+    gow_qte_prompt::publish(0, guide);
+    tobiichiSticksTeclado(sticks);
+    check(smoke ? sticks[3] == 128 : sticks[2] == 128 && sticks[3] == 255,
+          "a released guide key keeps the stick out (scripted tests keep raw keys)");
+    keys[KEY_D] = true;
+    clockTime += 1.0 / 30.0;
+    gow_qte_prompt::publish(0, guide);
+    tobiichiSticksTeclado(sticks);
+    check(smoke ? sticks[2] == 255 && sticks[3] == 128 : sticks[2] > 128 && sticks[2] < 255 && sticks[3] > 128,
+          "the next guide key sweeps through the diagonal instead of jumping");
+    keys[KEY_D] = false;
+    gow_qte_prompt::publish(0);
+    clockTime += 1.0 / 30.0;
+    check(tobiichiSticksTeclado(sticks) && sticks[2] == 128 && sticks[3] == 128,
+          "without a guide on screen released keys centre the stick at once");
+    keys[KEY_G] = true;
+    clockTime += 1.0;
+    gow_qte_prompt::publish(0, guide);
+    tobiichiSticksTeclado(sticks);
+    const bool rotate = std::strcmp(mode, "rotate") == 0;
+    check(!rotate || (sticks[2] == 128 && sticks[3] == 255), "held gesture starts at the guide's first key");
+    clockTime += 0.0625;
+    gow_qte_prompt::publish(0, guide);
+    tobiichiSticksTeclado(sticks);
+    check(!rotate || (sticks[2] > 200 && sticks[3] > 200), "held gesture turns the guide's way (counter-clockwise)");
+    keys[KEY_G] = false;
+    gow_qte_prompt::publish(0);
     return failures ? 1 : 0;
 }

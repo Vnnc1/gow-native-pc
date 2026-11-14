@@ -9,6 +9,9 @@
 // at the chosen rate, the game sees them whether it polls at 60 or at 30 fps, the button stays down most of the time
 // (so a "Hold" prompt still charges), and a button the player did not list is never touched.
 #include "runtime/gow_qte_hold.h"
+#include "runtime/gow_qte_prompt.h"
+
+#include <cmath>
 
 #include <cstdio>
 #include <cstdint>
@@ -180,6 +183,204 @@ int main()
             x = 45; y = 200;
             check(!gesture.apply(gow_qte::StickMode::Off, true, 4.0, x, y) && x == 45 && y == 200,
                   "disabled assistance leaves axes untouched");
+        }
+    }
+
+    // zzz-329: the gesture follows a displayed guide; its defaults keep the original clockwise samples.
+    {
+        gow_qte::StickGesture original, guided;
+        bool same = true;
+        for (int i = 0; i < 40; ++i)
+        {
+            const double t = i / 60.0, angle = std::fmod(t, 0.5) * 12.566370614359172;
+            uint8_t x = 0, y = 0;
+            original.apply(gow_qte::StickMode::Rotate, true, t, x, y);
+            same &= x == std::lround(128.0 + 127.0 * std::cos(angle)) && y == std::lround(128.0 + 127.0 * std::sin(angle));
+        }
+        check(same, "default rotation keeps the original clockwise samples");
+        uint8_t x = 0, y = 0;
+        guided.apply(gow_qte::StickMode::Rotate, true, 10.0, x, y, -1, 180.0);
+        check(x == 128 && y == 255, "guided rotation starts at the guide's first key (down)");
+        guided.apply(gow_qte::StickMode::Rotate, true, 10.0 + 0.0625, x, y, -1, 180.0);
+        check(x > 200 && y > 200, "counter-clockwise from down passes down-right first");
+        guided.apply(gow_qte::StickMode::Rotate, true, 10.125, x, y, -1, 180.0);
+        check(x == 255 && y == 128, "a quarter turn later it is right, the guide's second key");
+    }
+
+    // zzz-329: keyboard sweep along a rotation guide.
+    {
+        using gow_qte_prompt::KeyboardSweep;
+        using gow_qte_prompt::turnOf;
+        check(turnOf({{2, 1, 0}, 3}) == -1 && turnOf({{0, 1, 2, 3, 0}, 5}) == 1 && turnOf({{0, 3, 2}, 3}) == -1 &&
+                  turnOf({}) == 0 && turnOf({{0, 2, 0}, 3}) == 0,
+              "guide direction from its first two keys");
+        check(turnOf({{3, 1}, 2, 1}) == 1 && turnOf({{3, 1}, 2, -1}) == -1 && turnOf({{0, 2, 0}, 3, -1}) == -1,
+              "short guides carry their turn: A > D over the top or under the bottom");
+        auto angleOf = [](uint8_t x, uint8_t y) {
+            double a = std::atan2(double(x) - 128.0, 128.0 - double(y)) * 57.29577951308232;
+            return a < 0 ? a + 360.0 : a;
+        };
+        auto key = [](unsigned k, uint8_t &x, uint8_t &y) { // 0 up 1 right 2 down 3 left, 4 none
+            x = k == 1 ? 255 : k == 3 ? 0 : 128;
+            y = k == 0 ? 0 : k == 2 ? 255 : 128;
+        };
+        for (double hz : {15.0, 20.0, 30.0, 60.0})
+        {
+            // Taps with releases between them, the way issue 34's player pressed S, D, W for a CCW half turn.
+            const unsigned taps[] = {2, 2, 4, 1, 1, 4, 0, 0};
+            KeyboardSweep sweep;
+            bool centred = false, diagonal = false, reversed = false, stable = true;
+            double previous = -1.0, travelled = 0.0;
+            double t = 5.0;
+            for (int frame = 0; frame < 60; ++frame, t += 1.0 / hz)
+            {
+                uint8_t x, y;
+                key(frame < 8 ? taps[frame] : 4, x, y);
+                const uint8_t rawX = x, rawY = y;
+                const bool on = sweep.apply(-1, t, x, y);
+                if (!on)
+                {
+                    stable &= x == rawX && y == rawY;
+                    continue;
+                }
+                uint8_t againX = rawX, againY = rawY;
+                sweep.apply(-1, t, againX, againY);
+                stable &= againX == x && againY == y;
+                centred |= std::hypot(double(x) - 128.0, double(y) - 128.0) < 100.0;
+                const double a = angleOf(x, y);
+                diagonal |= a > 95.0 && a < 175.0;
+                if (previous >= 0.0)
+                {
+                    double step = previous - a; // counter-clockwise lowers the angle
+                    if (step < -180.0) step += 360.0;
+                    if (step > 180.0) step -= 360.0;
+                    reversed |= step < -0.5;
+                    travelled += step;
+                }
+                previous = a;
+            }
+            const std::string rate = std::to_string(int(hz)) + " Hz: ";
+            check(!centred, rate + "tapped keys never drop the stick to the centre during the guide");
+            check(diagonal, rate + "the sweep passes the down-right diagonal between S and D");
+            check(!reversed && travelled > 170.0 && travelled < 190.0, rate + "S, D, W make one counter-clockwise half turn");
+            check(stable, rate + "repeated reads at one time agree; idle reads keep the raw axes");
+        }
+        {
+            KeyboardSweep sweep;
+            uint8_t x, y;
+            key(2, x, y);
+            sweep.apply(-1, 1.0, x, y);
+            bool viaRight = false;
+            for (int i = 1; i <= 20; ++i)
+            {
+                key(0, x, y);
+                sweep.apply(-1, 1.0 + i / 60.0, x, y);
+                viaRight |= x > 240;
+            }
+            check(viaRight && y < 8, "an opposite key turns the guide's way (down to up through right)");
+            {
+                KeyboardSweep half;
+                uint8_t hx, hy;
+                key(3, hx, hy);
+                half.apply(-1, 7.0, hx, hy);
+                bool viaBottom = false, viaTop = false;
+                for (int i = 1; i <= 20; ++i)
+                {
+                    key(1, hx, hy);
+                    half.apply(-1, 7.0 + i / 60.0, hx, hy);
+                    viaBottom |= hy > 240;
+                    viaTop |= hy < 16;
+                }
+                check(viaBottom && !viaTop && hx > 248, "A > D counter-clockwise sweeps under the bottom (Down180CCW)");
+            }
+            for (double hz : {30.0, 60.0})
+            {
+                // Full-turn guide (one held key): holding W turns the stick the prompt's way, never through the centre.
+                KeyboardSweep spin;
+                uint8_t sx, sy;
+                double travelled = 0.0, previous = -1.0;
+                bool centred = false, backwards = false;
+                for (int i = 0; i <= int(0.55 * hz); ++i)
+                {
+                    key(0, sx, sy);
+                    spin.apply(1, 20.0 + i / hz, sx, sy, true);
+                    const double a = angleOf(sx, sy);
+                    centred |= std::hypot(double(sx) - 128.0, double(sy) - 128.0) < 100.0;
+                    if (previous >= 0.0)
+                    {
+                        double step = a - previous;
+                        if (step < -180.0) step += 360.0;
+                        if (step > 180.0) step -= 360.0;
+                        backwards |= step < -0.5;
+                        travelled += step;
+                    }
+                    previous = a;
+                }
+                const std::string rate = std::to_string(int(hz)) + " Hz: ";
+                check(!centred && !backwards && travelled >= 360.0, rate + "holding W on a clockwise full turn spins at least once");
+                key(4, sx, sy);
+                spin.apply(1, 21.0, sx, sy, true);
+                const uint8_t stopX = sx, stopY = sy;
+                key(4, sx, sy);
+                spin.apply(1, 21.1, sx, sy, true);
+                check(sx == stopX && sy == stopY, rate + "releasing the key stops the turn where it is");
+                key(4, sx, sy);
+                check(!spin.apply(1, 21.5, sx, sy, true) && sx == 128 && sy == 128, rate + "then the stick centres");
+                KeyboardSweep ccw;
+                key(0, sx, sy);
+                ccw.apply(-1, 30.0, sx, sy, true);
+                key(0, sx, sy);
+                ccw.apply(-1, 30.0 + 1.0 / hz, sx, sy, true);
+                check(sx < 128, rate + "a counter-clockwise full turn leaves W towards A");
+            }
+            {
+                // zzz-333: automatic stick QTE (Accessibility > automatic QTE)
+                using gow_qte_prompt::AutoStick;
+                AutoStick automatic;
+                uint8_t ax = 77, ay = 99;
+                check(!automatic.apply({{3, 1}, 2, -1}, 1.0, false, true, ax, ay) && ax == 77 && ay == 99,
+                      "automatic stick: disabled leaves the axes untouched");
+                check(!automatic.apply({{3, 1}, 2, -1}, 1.0, true, false, ax, ay) && ax == 77,
+                      "automatic stick: focus loss leaves the axes untouched");
+                check(!automatic.apply({}, 1.0, true, true, ax, ay) && ax == 77, "automatic stick: no guide, no input");
+                const gow_qte_prompt::Sequence half{{3, 1}, 2, -1}; // Down180CCW: A > (S) > D
+                automatic.apply(half, 10.0, true, true, ax, ay);
+                check(ax < 8 && ay == 128, "automatic half turn starts at its first key (A)");
+                automatic.apply(half, 10.2, true, true, ax, ay);
+                check(ay > 248, "it passes under the bottom (S) counter-clockwise");
+                automatic.apply(half, 10.35, true, true, ax, ay);
+                check(ax > 248 && ay == 128, "and ends at its last key (D)");
+                automatic.apply(half, 10.5, true, true, ax, ay);
+                check(ax == 128 && ay == 128, "then releases so the next repetition is a new gesture");
+                automatic.apply(half, 10.65, true, true, ax, ay);
+                check(ax < 8, "and repeats from the first key");
+                uint8_t bx = 0, by = 0;
+                automatic.apply(half, 10.65, true, true, bx, by);
+                check(bx == ax && by == ay, "repeated reads at one time agree");
+                const gow_qte_prompt::Sequence full{{0}, 1, 1}; // 360CW: W, clockwise
+                automatic.apply(full, 20.0, true, true, ax, ay);
+                check(ax == 128 && ay < 8, "a new guide restarts: full turn starts at W");
+                automatic.apply(full, 20.125, true, true, ax, ay);
+                check(ax > 248, "and turns clockwise to D in an eighth of a second");
+                automatic.apply(full, 20.25, true, true, ax, ay);
+                check(ay > 248, "then S: two turns per second");
+            }
+            key(4, x, y);
+            check(sweep.apply(-1, 1.5, x, y) && y < 8, "a released key holds the reached angle for a moment");
+            key(4, x, y);
+            check(!sweep.apply(-1, 1.9, x, y) && x == 128 && y == 128, "after the grace period the stick returns to the centre");
+            key(1, x, y);
+            check(!sweep.apply(0, 2.0, x, y) && x == 255 && y == 128, "without a guide the keys stay raw digital input");
+            key(1, x, y);
+            sweep.apply(1, 3.0, x, y);
+            key(3, x, y);
+            sweep.apply(1, 3.0 + 1.0 / 60.0, x, y);
+            check(y > 128, "a clockwise guide turns right to left through down");
+            key(2, x, y);
+            sweep.apply(1, 4.0, x, y);
+            key(1, x, y);
+            sweep.apply(1, 4.5, x, y);
+            check(x == 255 && y == 128, "a player turning against a guide still reaches the shorter target");
         }
     }
 

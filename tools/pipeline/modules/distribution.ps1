@@ -7,6 +7,11 @@ if ($Stages -contains 'launcher') {
     $lb = Join-Path $root 'launcher/build-clang'
     $launcherArgs = @('-S', (Join-Path $root 'launcher'), '-B', $lb, '-G', 'Ninja',
         '-DCMAKE_BUILD_TYPE=Release', "-DCMAKE_PREFIX_PATH=$(Barra $qt)") + (Clang-CMakeArgs)
+    # Pre-release launcher (reports <version>-rc.N so the final release is offered as an update); always passed so a
+    # release build clears a suffix cached by an earlier pre-release configure.
+    $prerelease = "$env:GOW_PRERELEASE"
+    if ($prerelease -and $prerelease -notmatch '^[0-9A-Za-z]+(\.[0-9A-Za-z]+)*$') { throw "GOW_PRERELEASE must look like rc.1, got '$prerelease'" }
+    $launcherArgs += "-DGOW_PRERELEASE=$prerelease"
     Native $cmakeExe $launcherArgs 'launcher configure'
     Native $cmakeExe @('--build', $lb, '--parallel', "$jobs") 'launcher build'
     $builtExe = Join-Path $lb 'gow-launcher.exe'
@@ -59,13 +64,15 @@ if ($Stages -contains 'package' -or $Stages -contains 'installer') {
     foreach ($item in @('README.md', 'README.pt-BR.md', 'CHANGELOG.md', 'CHANGELOG.pt-BR.md', 'CREDITS.md', 'LICENSE', 'AGENTS.md', 'CLAUDE.md', 'build.cmd', 'docs', 'games', 'tools')) {
         Copy-Item (Join-Path $root $item) $stage -Recurse -Force
     }
-    # The release's profile-guided data (Use-ReleaseProfile, game.ps1): this checkout's profile, and only one trained on
-    # exactly this runtime, patch set, game profile and game code (its manifest). -NoReleaseProfile packages without one
-    # (installs then train their own, as before).
+    # The release's profile-guided data (Use-ReleaseProfile, game.ps1): this checkout's profile for this game code (its
+    # manifest). One trained on an earlier runtime is still shipped: installs drop the changed functions' counts.
+    # -NoReleaseProfile packages without one (installs then build without PGO until a profile is trained).
     if (-not $NoReleaseProfile) {
-        if (-not ((Test-Path $pgoProfile) -and (Test-ProfileManifest "$pgoProfile.json"))) {
-            throw "no profile trained on this runtime and patch set ($pgoProfile + .json): run build.cmd -Stages fetch,configure,recomp,sync,pgo first, or package with -NoReleaseProfile"
+        $fit = if (Test-Path $pgoProfile) { Get-ProfileFit "$pgoProfile.json" } else { $null }
+        if (-not $fit) {
+            throw "no profile trained on this game code ($pgoProfile + .json): run build.cmd -Stages fetch,configure,recomp,sync,pgo first, or package with -NoReleaseProfile"
         }
+        if ($fit -ne 'exact') { Write-Host 'release profile: trained on an earlier runtime; retraining restores the changed functions' }
         $shippedDir = Join-Path $stage "games\$Game\pgo"
         New-Item -ItemType Directory -Force $shippedDir | Out-Null
         Copy-Item $pgoProfile (Join-Path $shippedDir 'shipped.profdata')

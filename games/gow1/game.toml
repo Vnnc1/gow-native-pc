@@ -67,8 +67,9 @@ position_tolerance = 50.0
 zones = ["Athn01A", "Athn01B"]
 
 [diagnostics.scenes.ship_frames]
-# Rejected combat pilot: arrival/knockback still diverges. Keep gates mandatory;
-# do not use its timing as a valid comparison until trajectories match.
+# Combat frames 240-840. Real-time step diverges on slow machines (frame motion scales with
+# elapsed fields); with gs-run-ab.py --fixed-step (zzz-328) four identical-binary runs matched
+# exactly on the i5-8265U. Keep gates mandatory; without --fixed-step expect rejections.
 pad_script = "5:start,12:x,18:x,24:x,30:x,36:x,f0:l1*100000"
 god_mode = true
 position_tolerance = 50.0

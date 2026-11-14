@@ -11,13 +11,13 @@ R5900 para C++, com launcher instalador, compilação em um clique, suporte a tr
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/vers%C3%A3o-0.6.0-crimson)
+![version](https://img.shields.io/badge/vers%C3%A3o-0.6.1-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 </div>
 
-**Candidata 0.6.0 para testes:** menu com pausa e ajustes persistentes, carregamento de slots nativos, backups nos altares, ícones/QTEs remapeados, assistências opcionais e escolha da pasta da build. Veja [todas as mudanças](CHANGELOG.pt-BR.md) e [validações da candidata](docs/research/release-0.6.0-candidate.md). Distribuída apenas como v0.6.0-rc.1 para testes; v0.5.0 continua estável.
+**0.6.1 (estável):** menu no jogo com pausa e ajustes persistentes, carregamento de slots nativos, backups nos altares, ícones de botões conforme o dispositivo, QTEs de girar curtos e confiáveis no teclado (também automáticos na Acessibilidade), correção do pisca nos filmes e perfil PGO incluído. Veja as [novidades](#novidades-da-061) e o [changelog](CHANGELOG.pt-BR.md).
 
 **Linux / Steam Deck (experimental):** launcher nativo, pipeline e instalador Linux disponíveis para testes.
 Veja [instalação e validações pendentes](docs/linux.md). Hardware e desempenho no Steam Deck ainda não validados.
@@ -37,6 +37,7 @@ Veja [instalação e validações pendentes](docs/linux.md). Hardware e desempen
 ## Conteúdo
 
 - [O que é](#o-que-é)
+- [Novidades da 0.6.1](#novidades-da-061)
 - [Novidades da 0.5.0](#novidades-da-050)
 - [Novidades da 0.4.0](#novidades-da-040)
 - [Novidades da 0.3.1](#novidades-da-031)
@@ -67,9 +68,9 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
   automaticamente; uma tela de carregamento mostra o progresso geral, o tempo restante e dicas.
 - **Uma ISO basta**: a original (USA) ou uma tradução de fãs reconhecida. Com várias ISOs (ex.: a original e uma
   tradução), todos os idiomas ficam jogáveis e o launcher **pergunta em qual idioma você quer jogar**.
-- **Feito para desempenho**: builds Windows podem usar um perfil de otimização (PGO) compatível. O pacote 0.5.0
-  não inclui perfil pré-treinado; o treinamento local continua disponível. A preparação da
-  primeira jogatina grava o código de VU1/IOP numa única execução e o compila como código nativo.
+- **Feito para desempenho**: builds Windows usam um perfil de otimização (PGO) compatível. O instalador 0.6.1
+  traz um perfil pré-treinado para o seu conjunto de patches; o treino local continua disponível. A preparação
+  da primeira jogada grava o código VU1/IOP do jogo numa execução e o compila como código nativo.
 - **Controles configuráveis**: teclado e mouse totalmente configuráveis, layouts clássico ou moderno de controle e
   mapeamento botão a botão.
 - **Acessibilidade**: os minijogos que pedem apertos repetidos podem ser jogados segurando o botão
@@ -79,9 +80,34 @@ Este projeto junta o trabalho de vários autores (veja [`CREDITS.md`](CREDITS.md
 - **Launcher em nove idiomas**: inglês, português, espanhol, turco, francês, alemão, italiano, russo e chinês
   simplificado.
 
+## Novidades da 0.6.1
+
+A 0.6.1 é a versão estável da série 0.6: tudo o que foi testado na pré-release v0.6.0-rc.1 mais as correções
+encontradas nesses testes. Detalhes: [changelog](CHANGELOG.pt-BR.md) e [notas da versão](docs/releases/v0.6.1.md).
+
+- **Menu no jogo:** pausa o jogo; gráficos e áudio ao vivo, controles, acessibilidade, trapaças e pacotes de
+  texturas. Os ajustes suportados persistem e sincronizam com o launcher.
+- **Slots de save nativos:** nomes de local, miniaturas e horários no launcher e no menu; carregue um slot pelo
+  carregador do próprio jogo. Backups automáticos após salvar nos altares, com histórico.
+- **Ícones de botões conforme o dispositivo** (Xbox, PlayStation, teclado/mouse) e o seu mapeamento.
+- **QTEs de girar no teclado:** meias-voltas com duas teclas (A > D ou D > A), voltas completas com uma tecla
+  segurada (W com seta circular); validados no minigame da cabine do navio. O **QTE automático** (Acessibilidade)
+  também faz esses giros.
+- **Filmes:** corrigido o pisca de quadros antigos do jogo (ou preto) entre as imagens dos filmes; corrigido o filme
+  que travava na alavanca dos Penhascos da Loucura (#30, build USA).
+- **Desempenho:** perfil PGO pré-treinado incluído no instalador; integração do renderizador (anel de vértices,
+  primitivas agrupadas, reuso de texturas, resolução abaixo de 1x, renderizador por software); execução do VU1 mais
+  enxuta. Deixe o **Diagnóstico de desempenho** desligado ao jogar (no PC de teste ele custou cerca de 15–20 % no
+  trecho da tempestade no navio).
+- **Instalador:** escolha onde o jogo é compilado; release candidates recebem a versão final automaticamente.
+- **Traduções:** opções de QTE e acessibilidade em alemão, francês, italiano e russo.
+
+Limitações conhecidas: cenas pesadas em CPUs mais lentas ficam abaixo de 60 FPS, o travamento após a escalada de
+Cronos (#33) continua em aberto e os prompts de sacudir o analógico ainda não têm guia no teclado.
+
 ## Novidades da 0.5.0
 
-Para a candidata 0.6.0 mais recente, veja o [changelog completo](CHANGELOG.pt-BR.md). A seção abaixo é da versão anterior.
+A seção abaixo é de uma versão anterior.
 
 - **Linux experimental:** launcher nativo, pipeline de compilação e instalador `.run` para testes em PCs Linux e
   Steam Deck. Compilação e testes iniciais feitos no WSL; compatibilidade e desempenho no Deck real ainda não validados.
@@ -114,7 +140,7 @@ Em [Releases](https://github.com/Vnnc1/gow-native-pc/releases), baixe
 
 ```sh
 bash gow-native-pc-linux-x86_64-ubuntu26.04-experimental.run
-bash "$HOME/.local/share/gow-native-pc-0.5.0/start-linux.sh"
+bash "$HOME/.local/share/gow-native-pc-0.6.1/start-linux.sh"
 ```
 
 Instale antes as dependências de sistema correspondentes; o pacote usa bibliotecas do Ubuntu 26.04 e não é um
@@ -208,7 +234,7 @@ O instalador não move caches compilados do CMake. Atualizar sem escolher outra 
 2. No launcher → aba **Instalação**:
    1. **Baixar ferramentas** — cópias portáteis são baixadas uma vez, com verificação SHA-256, sem alterar seu PATH;
    2. **Adicionar ISO / CHD…** — escolha uma ou mais imagens compatíveis; o launcher identifica o jogo e o idioma;
-   3. **Instalar e compilar** — baixa o runtime, prepara o disco e compila o jogo. Usa um perfil PGO da versão quando disponível (a 0.5.0 não inclui um). Deixe
+   3. **Instalar e compilar** — baixa o runtime, prepara o disco e compila o jogo. Usa automaticamente o perfil PGO incluído na versão. Deixe
       **Preparar a primeira jogatina (recomendado)** ligado: uma cópia do jogo se joga sozinha por quatro minutos,
       **escondida e sem som**, gravando o código de VU1/IOP que usa, e esse código é compilado no jogo.
 3. Escolha um **perfil gráfico** (página Gráficos), confira os **Controles** se for jogar no teclado e clique em **JOGAR**.
@@ -221,7 +247,7 @@ Veja [formatos de disco e compatibilidade regional](docs/disc-import.md).
 
 O tempo depende da CPU, da RAM, do disco e dos downloads; as ~6.400 funções recompiladas do jogo são compiladas no seu
 PC. No PC de testes (Xeon E5-2666 v3, 20 threads, 16 GB) a instalação completa levava **cerca de 30 minutos** quando
-ainda treinava o próprio perfil PGO (0.3.x). Um perfil distribuído compatível pode evitar esse treino, mas a v0.5.0 não inclui um.
+ainda treinava o próprio perfil PGO (0.3.x). Desde a 0.6.1 o instalador traz um perfil compatível, então não há etapa de treino.
 Numa CPU de notebook com 2 núcleos/4 threads (i3-10110U) uma instalação levou **cerca de 75
 minutos**. São referências históricas, não prazos. Um jogo instalado com uma versão anterior mostra **"Otimização de FPS
 recomendada (PGO)"** na página Início.

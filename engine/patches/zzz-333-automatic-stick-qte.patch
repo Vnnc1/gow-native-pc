@@ -1,0 +1,108 @@
+Accessibility > automatic QTE (the live GOW_QTE_AUTO / F1 toggle, default off) also performs recognized stick gestures,
+as requested by the maintainer after the cabin minigame test. While a zzz-332 rotation guide is fresh, the left stick of
+every pad read (keyboard and controller, and the keyboard packet path) follows the guide: half turns repeat
+start > 180-degree arc the guide's way > hold > release every 0.6 s; full turns keep turning the guide's way at two
+turns per second. Time-based (repeated reads agree), restarted when the guide changes, inactive without focus, in
+scripted pad tests and with GOW_QTE_KEY_SWEEP=0. Unknown/wiggle prompts stay manual. The F1 menu text says buttons and
+stick. Tests: qte_hold_test (cycle, direction, release, restart), control-prompts auto mode (production reader,
+focus loss, live toggle).
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+index 6e33057..3fce394 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+@@ -103,6 +103,34 @@ private:
+     bool m_active=false;
+     double m_angle=0.0, m_target=0.0, m_last=0.0, m_released=-1.0;
+ };
++// zzz-333: Accessibility > automatic QTE also performs recognized stick gestures (the player's live toggle). Half
++// turns repeat start > arc > hold > release every 0.6 s while the prompt shows; full turns keep turning the prompt's way
++// at two turns per second. Time-based like AutoButtons, so repeated reads agree; any guide change restarts the cycle.
++class AutoStick {
++public:
++    static constexpr double kHalfCycle=0.6;
++    bool apply(const Sequence &guide,double now,bool enabled,bool focused,uint8_t &x,uint8_t &y) {
++        const int turn=turnOf(guide);
++        if (!enabled || !focused || !turn || !guide.count || guide.keys[0]>3 || !std::isfinite(now)) { m_started=-1.0; return false; }
++        if (m_started<0.0 || now<m_started || guide.count!=m_guide.count || guide.turn!=m_guide.turn ||
++            guide.keys!=m_guide.keys) { m_started=now; m_guide=guide; }
++        const double t=now-m_started, start=90.0*guide.keys[0];
++        double angle=start;
++        if (guide.count==1) angle=start+turn*720.0*t;
++        else {
++            const double p=std::fmod(t,kHalfCycle);
++            if (p>=0.45) { x=y=128; return true; } // release so the next repetition starts as a new gesture
++            if (p>=0.1) angle=start+turn*180.0*std::fmin(1.0,(p-0.1)/0.2);
++        }
++        const double radians=angle/57.29577951308232;
++        x=static_cast<uint8_t>(std::lround(128.0+127.0*std::sin(radians)));
++        y=static_cast<uint8_t>(std::lround(128.0-127.0*std::cos(radians)));
++        return true;
++    }
++private:
++    double m_started=-1.0;
++    Sequence m_guide{};
++};
+ inline std::mutex mutex;
+ inline uint16_t buttons=0;
+ inline Sequence guide{};
+@@ -116,6 +144,15 @@ inline Sequence activeGuide() {
+     const double age=std::chrono::duration<double>(std::chrono::steady_clock::now()-published).count();
+     return age>=0.0 && age<=0.25 ? guide : Sequence{};
+ }
++// zzz-333: the left stick (x, y) of one pad read; false leaves the axes untouched (no fresh guide, disabled, unfocused).
++inline bool applyStick(uint8_t &x,uint8_t &y,bool enabled,bool focused) {
++    static AutoStick assist;
++    static std::mutex stickMutex; // both pad readers call this
++    const Sequence current=activeGuide();
++    std::lock_guard<std::mutex> lock(stickMutex);
++    const double now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    return assist.apply(current,now,enabled,focused,x,y);
++}
+ inline uint16_t apply(uint16_t input,bool enabled,bool focused) {
+     static AutoButtons assist;
+     std::lock_guard<std::mutex> lock(mutex);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+index c5a57da..2001529 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_trucos.cpp
+@@ -747,7 +747,7 @@ namespace
+             return {activeMods()[i].c_str(),tr("Selecionado para esta sessão; alterações exigem reiniciar.","Selected for this session; changes require a restart."),Opcion,false,tr("Ativo","Active"),false};
+         }
+         if(pestana==PTrucos && i==kNumTrucos)
+-            return {tr("QTEs automáticos","Automatic QTEs"),tr("Pressiona botões reconhecidos. Movimentos do analógico continuam manuais.","Presses recognized buttons. Stick gestures remain manual."),Interruptor,gow_menu_live::autoQte().load(),{},true};
++            return {tr("QTEs automáticos","Automatic QTEs"),tr("Pressiona botões e faz os giros do analógico reconhecidos.","Presses recognized buttons and performs recognized stick turns."),Interruptor,gow_menu_live::autoQte().load(),{},true};
+         if (pestana == PTrucos)
+             return {textos().nombre[i], textos().descripcion[i], Interruptor, g_activo[i].load(std::memory_order_relaxed), {}, true};
+         if (pestana == PSave)
+@@ -1140,7 +1140,7 @@ static void drawAccessibilityNotice() {
+     static const double noticeBegan=GetTime();
+     if(GetTime()-noticeBegan<14.0 && !g_menuAbierto.load()) {
+         std::vector<std::string> lines;
+-        if(gow_menu_live::autoQte().load()) lines.push_back(tr("QTE automático: botões","Automatic QTE: buttons"));
++        if(gow_menu_live::autoQte().load()) lines.push_back(tr("QTE automático: botões e analógico","Automatic QTE: buttons and stick"));
+         if(const char *hold=std::getenv("GOW_QTE_HOLD");hold && *hold && std::strcmp(hold,"0")) {
+             lines.push_back(tr("QTE: segurar para repetir","QTE: hold to repeat"));
+             std::string list=std::strcmp(hold,"1")==0?"circle":std::string(hold,std::min<size_t>(std::strlen(hold),256));size_t begin=0;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+index d054621..68fa76a 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -366,6 +366,9 @@ bool tobiichiSticksTeclado(uint8_t (&sticks)[4])
+         sweep.reset();
+     gesture.apply(mode, accionPulsada(m, AccQteStick) && focused, now, sticks[2], sticks[3],
+                   turn ? turn : 1, turn ? 90.0 * guide.keys[0] : 90.0);
++    // zzz-333: Accessibility > automatic QTE performs the recognized stick gesture itself (also in the packet path)
++    if (sweepEnabled && gow_menu_live::autoQte().load())
++        gow_qte_prompt::applyStick(sticks[2], sticks[3], true, focused);
+     return true;
+ }
+ 
+@@ -597,6 +600,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     const bool autoEnabled = !scripted && gow_menu_live::autoQte().load();
+     static thread_local bool wasAutoEnabled=false;
+     if(autoEnabled || wasAutoEnabled) btns = gow_qte_prompt::apply(btns, autoEnabled, IsWindowFocused());
++    if(autoEnabled) gow_qte_prompt::applyStick(data[6], data[7], true, IsWindowFocused()); // zzz-333: left stick, any device
+     wasAutoEnabled=autoEnabled;
+ 
+     data[2] = static_cast<uint8_t>(btns & 0xFF);

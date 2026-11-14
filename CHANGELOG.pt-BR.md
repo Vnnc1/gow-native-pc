@@ -23,6 +23,48 @@ diziam v0.0.x. Agora são v0.1.0, v0.2.0, v0.3.0 e v0.3.1, com os mesmos arquivo
 cima da instalação atual**; daí em diante as atualizações automáticas voltam a funcionar. A compilação do jogo, os
 discos e os saves são mantidos.
 
+## [v0.6.1] — 2026-11-13
+
+Versão estável da série 0.6: tudo da v0.6.0-rc.1 mais as mudanças abaixo. É preciso recompilar o jogo (patches novos
+no runtime); o launcher faz isso pela página Instalar. Launchers da v0.6.0-rc.1 informam 0.6.0, então recebem a 0.6.1 como atualização.
+
+### Teclado e mouse
+- QTEs de girar (#34), validados no minigame da cabine do navio: o guia de teclas é curto e estável. Meias-voltas
+  mostram duas teclas, A > D ou D > A, e o analógico faz o arco por baixo ou por cima no sentido do prompt; voltas
+  completas mostram W com uma seta circular: segure e o analógico continua girando nesse sentido. O guia não segue mais
+  a animação da seta nem troca de sentido entre quadros, o que fazia voltas completas e algumas meias-voltas falharem
+  (`zzz-329`, `zzz-332`). O gesto "Círculo" da Acessibilidade começa na tecla do guia e gira no sentido do prompt.
+- Acessibilidade > QTE automático agora também faz os giros do analógico reconhecidos (meia-volta e volta completa),
+  no teclado ou no controle, além de apertar botões (`zzz-333`). Continua desligado por padrão; prompts de sacudir
+  continuam manuais. Veja [projeto e testes](docs/research/keyboard-qte-rotation-2026-11-13.md).
+
+### Launcher
+- Launchers de pré-release podem informar o sufixo (`GOW_PRERELEASE=rc.1` na compilação gera `0.6.1-rc.1`), e a
+  verificação de atualizações ordena as versões como no versionamento semântico: quem testa uma release candidate
+  recebe a versão final. Launchers da v0.6.0-rc.1 informam apenas `0.6.0` e por isso só veem um número de versão maior.
+- As opções de QTE e acessibilidade foram traduzidas para alemão, francês, italiano e russo; o texto do gesto
+  "Círculo" explica que ele segue a seta do guia de teclas.
+
+### Desempenho
+- O instalador traz um perfil de otimização guiada (PGO) treinado neste mesmo conjunto de patches (198.964 funções):
+  instalações novas e recompilações o usam sem etapa de treino.
+- O limitador de latência de quadros do GS (`zzz-326`, voltado aos engasgos da #31) está incluído, mas **desligado por
+  padrão** (`zzz-330`). Num RX 580 com a GPU saturada (3x, AF 16x), o limite 2 piorou muito o ritmo dos quadros
+  (p95 33 -> 51-74 ms); o limite 3 foi neutro. O comportamento padrão é o da v0.6.0-rc.1. Quem testa pode usar
+  `GOW_GS_FRAME_LATENCY=2` ou `3`. Veja [GPU-06](docs/research/performance-experiments.md).
+
+### Filmes
+- Corrigido o pisca de um quadro antigo do jogo (ou preto) entre as imagens dos filmes, visto no filme de abertura
+  (`zzz-331`). O player de filmes desenha em um buffer e alterna a exibição com um segundo que ainda guardava o último
+  quadro do gameplay. No filme de abertura, as capturas com o quadro antigo passaram de 11-23 % para nenhuma; o gameplay
+  não muda (a regra nunca se aplicou nele, nem a 45 FPS). Veja [a investigação](docs/research/movie-flash-2026-11-13.md).
+
+### Diagnóstico
+- Relatórios de destino ausente também mostram os registradores `$s2`-`$s7` e as palavras para as quais apontam
+  (`zzz-327`), o que identifica o objeto nulo por trás do travamento depois da escalada de Cronos (#33) no próximo
+  relatório. O travamento em si ainda não foi corrigido.
+- Passo fixo de 1/60 s só para testes automatizados reproduzíveis (`zzz-328`); nunca ativo no jogo normal.
+
 ## [v0.6.0-rc.1] — pré-release para testes
 
 Inclui fix-chore e mudanças da main desde v0.5.0. A v0.5.0 continua estável; esta versão é opcional para testes.

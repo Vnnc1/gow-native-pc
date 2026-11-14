@@ -3,7 +3,7 @@
 // Launcher texts in Simplified Chinese (zh). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
     qteAuto: "自动 QTE 按键",
-    qteAutoDesc: "自动按下已识别 QTE 显示的按钮，包括连续按键。默认关闭，更改后请重启游戏。不会主动发动终结技或自动操作摇杆。未识别的提示仍需手动操作。",
+    qteAutoDesc: "自动按下已识别 QTE 显示的按钮，包括连续按键。默认关闭，更改后请重启游戏。也会自动完成已识别的摇杆转动（半圈和整圈）；不会主动发动终结技。未识别的提示仍需手动操作。",
     grupoTexturas: "贴图",
     usarPaquete: "启用贴图包",
     usarPaqueteDesc: "用 PCSX2 命名的 PNG 替换游戏贴图；关闭时保持原贴图不变。",
@@ -497,7 +497,7 @@ var textos = {
     textureMods: "贴图包与视觉模组",
     acc_qte_stick: "按住以执行 QTE 摇杆手势",
     qteStick: "键鼠摇杆辅助",
-    qteStickDesc: "当提示要求推动左摇杆时，按住 QTE 手势键（默认 G，可在“操作”页修改）。按提示选择左右或画圈，松开即恢复正常移动。此功能不会识别 QTE，在 QTE 之外也可能让奎托斯移动。已连接的手柄不受影响。",
+    qteStickDesc: "当提示要求推动左摇杆时，按住 QTE 手势键（默认 G，可在“操作”页修改）。按提示选择左右或画圈，松开即恢复正常移动。此功能不会识别 QTE，在 QTE 之外也可能让奎托斯移动。已连接的手柄不受影响。屏幕上显示带编号的按键提示时，圆形手势会从第一个按键开始，并按箭头方向旋转。",
     qteStickOff: "关闭",
     qteStickShake: "左右",
     qteStickRotate: "画圈",

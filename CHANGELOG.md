@@ -21,6 +21,49 @@ said v0.0.x. They are now v0.1.0, v0.2.0, v0.3.0 and v0.3.1, with the same files
 releases (it reports 1.0.0 to 3.0.1) does not see 0.x releases as newer: **install v0.4.0 once from its setup over the
 existing installation**; automatic updates work again from there on. Your game build, discs and saves are kept.
 
+## [v0.6.1] — 2026-11-13
+
+Stable release of the 0.6 series: everything in v0.6.0-rc.1 plus the changes below. Rebuilding the game is required
+(new runtime patches); the launcher does it from the Install page. v0.6.0-rc.1 launchers report 0.6.0, so they are offered 0.6.1 as an update.
+
+### Keyboard and mouse
+- Rotation QTEs (#34), validated in the ship cabin minigame: the key guide is short and stable. Half turns show two
+  keys, A > D or D > A, and the stick sweeps the arc under the bottom or over the top the way the prompt turns; full
+  turns show W with a circular arrow: hold it and the stick keeps turning that way. The guide no longer follows the
+  arrow's animation or flips direction between frames, which had made full turns and some half turns fail
+  (`zzz-329`, `zzz-332`). The Accessibility "Circle" gesture starts at the guide's key and turns the prompt's way.
+- Accessibility > automatic QTE now also performs recognized stick turns (half and full circles) with keyboard or
+  controller, besides pressing buttons (`zzz-333`). Still off by default; shake prompts stay manual.
+  See [design and tests](docs/research/keyboard-qte-rotation-2026-11-13.md).
+
+### Launcher
+- Pre-release launchers can report their suffix (`GOW_PRERELEASE=rc.1` when building gives `0.6.1-rc.1`), and the
+  update check orders versions like semantic versioning, so testers of a release candidate are offered the final
+  release. Launchers of v0.6.0-rc.1 report plain `0.6.0` and therefore only see a newer version number.
+- QTE and accessibility options are translated into German, French, Italian and Russian; the "Circle" stick gesture
+  text explains that it follows the key guide's arrow.
+
+### Performance
+- The setup ships a profile-guided optimisation (PGO) profile trained on this exact patch set (198,964 functions):
+  new installs and rebuilds use it without a training step.
+- A GS frame-latency limiter (`zzz-326`, aimed at the stutter in #31) is included but **off by default** (`zzz-330`).
+  On an RX 580 with the GPU saturated (3x, AF 16x) a limit of 2 made frame pacing much worse (p95 33 -> 51-74 ms);
+  a limit of 3 was neutral. Default behaviour is that of v0.6.0-rc.1. Testers can try `GOW_GS_FRAME_LATENCY=2` or `3`.
+  See [GPU-06](docs/research/performance-experiments.md).
+
+### Movies
+- Fixed movies flashing an old gameplay frame (or black) between their pictures, seen in the opening movie (`zzz-331`).
+  The movie player draws into one buffer and alternates the displayed buffer with a second one that still held the last
+  gameplay picture. In the opening movie this went from 11-23 % of screen captures showing the old frame to none; gameplay
+  is unaffected (the rule never applied there, even at 45 FPS). See
+  [the investigation](docs/research/movie-flash-2026-11-13.md).
+
+### Diagnostics
+- Missing-target reports also print the saved registers `$s2`-`$s7` and the words they point to (`zzz-327`), which
+  identifies the null object behind the freeze after the Cronos climb (#33) in the next report. The freeze itself is
+  not fixed yet.
+- Test-only fixed 1/60 s step for reproducible scripted benchmarks (`zzz-328`); never active in normal play.
+
 ## [v0.6.0-rc.1] — pre-release for testing
 
 Includes fix-chore and the main changes since v0.5.0. v0.5.0 remains the stable release; this is an opt-in test build.

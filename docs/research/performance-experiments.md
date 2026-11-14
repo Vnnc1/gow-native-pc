@@ -427,3 +427,151 @@ Five-seed generated/JIT/SSE/special-value and self-loop budget/depth equivalence
 passed. Final rebuilt core equals the measured object except its COFF timestamp.
 The installed runner/settings/source card were not replaced. Other hardware,
 sustained combat and full-campaign acceptance remain open. [Full report](vu1-chain-2026-11-09.md).
+
+## GPU-06 / 2026-11-11 — GS worker frames in flight (`zzz-326`)
+
+New hypothesis for issue 31 (still reproducing on v0.6.0-rc.1): the GS worker context never swaps,
+so no driver pre-render limit applies. Only the 4×8 MiB vertex ring, waiting on a fence three segments old,
+bounded its lead (about 12–24 frames). A GPU-bound scene then alternates running ahead with whole-segment
+ring stalls. That fits the counter showing 45–60 FPS during visible stutter, and the 5–6 s of smoothness
+after a menu pause drains the queue. Not a retest: GS-04 and SYNC-01..04 changed batching and spin strategy,
+GPU-02/05 host acquisition; none bounded queue depth. Candidate: fence per presented frame, wait on the
+oldest while more than 2 are pending, 50 ms bound, no `glFinish`. `GOW_GS_FRAME_LATENCY=0` is the reference.
+Validation so far: fake-fence unit test, syntax compile, full chain apply. **No game, GPU or FPS run.**
+Do not claim a #31 fix or an FPS change until gates 1–3 in
+[the report](frame-latency-2026-11-11.md) pass: GTX 1060 3 GB scene, a CPU-bound notebook and the RX 580 arrival probe.
+
+GPU-06 Windows follow-up (2026-11-11, i5-8265U / UHD 620 / driver 27.20.100.9664, AC):
+`fetch,sync,build,verify` with the 140-patch chain passed on Windows/llvm-mingw (18/18 CTest groups
+including `gow_frame_latency`, VU1 equivalence, task replay, mod consumers). Runner
+`e909b29f5a8b68e9f20a426eee13fadfa65f9601e5482503cfd8488b5b7cef14`. `gs-run-ab.py --compare frame-latency`
+(new mode: variant 0 = `GOW_GS_FRAME_LATENCY=0`, 1 = shipped 2; checks `[gs-latency-config]`) ran visible
+`ship_guard`, 1x/1280x720, audio, private blank cards, 120 s / 60 s warmup. **FPS comparison invalid**:
+three batches aborted on `same_scene` after 5, 1 and 2 runs; guest FPS ranged 13.7–26.5 in both variants
+with mean system CPU 16–70% from concurrent desktop work (VS Code, Chrome, Explorer), and the sampled
+processor performance fell from ~207% idle to ~130–160% while playing (shared CPU/iGPU power limit).
+Mechanism evidence that is valid: with `GOW_GS_HW_STATS=1` the reference had `ringStalls` 0–2 per session,
+and the candidate waited at most once per 5 s window (≤1.8 ms total), with no timeouts. So on this
+power-limited notebook zzz-326 is near-free and the ring-wrap stall it targets barely occurs; this neither
+confirms nor refutes the GTX 1060 issue-31 hypothesis. Evidence: `data/experiments/frame-latency-20261111{,-b,-c}/`.
+Gate 2 (no CPU-bound regression) still needs an idle-machine repeat; gates 1 and 3 untouched.
+
+GS-05 (patch 66 grouping) gate retry (2026-11-11, same notebook/runner): `--compare grouping`, same settings.
+**Invalid**: aborted on `same_scene` after 3 runs, system CPU 69–100% (concurrent `zig`/`node`/Chrome),
+guest FPS 7–13. No default change; the i5-8265U gate in AGENTS.md remains open and needs an idle machine.
+Evidence: `data/experiments/grouping-20261111/`. Per maintainer guidance, a notebook result alone
+does not set defaults for other tiers.
+
+Idle-machine repeat (2026-11-11, same notebook/runner, system CPU 17–33%, no concurrent build). New
+`gs-run-ab.py --keep-going` keeps runs that fail validation as invalid evidence and averages only complete
+pairs whose two runs passed every check (same validity rules; `same_scene` now compares against accepted
+runs only). Visible `ship_guard`, 1x/1280x720, audio, private blank cards, 120 s / 60 s warmup, 4 pairs each.
+`ship_arrival_frames` was not usable here: at ~26 FPS the frame-indexed trajectory diverged by 88 units at
+frame 240 (delta-time physics), so frame-aligned scenes need faster hardware.
+
+- GPU-06 `--compare frame-latency`: 3 valid pairs (one reference run failed `same_scene`). Mean guest FPS
+  19.82 → 20.67; median-window p95 per pair 67.8/76.2/64.5 → 65.6/64.5/65.6 ms; intervals >100 ms 14 → 0;
+  zero missing audio. Candidate waited 2–8 times per session (38–249 ms total), never timed out; reference
+  ringStalls 0–4. **Neutral to slightly favorable; gate 2 (no notebook regression) passed.** Gates 1 (GTX 1060)
+  and 3 (RX 580) remain open. Evidence: `data/experiments/frame-latency-keepgoing-20261111/`.
+- GS-05 `--compare grouping`: 2 valid pairs (two candidate runs failed `same_scene`, both faster: 22.4 and
+  25.7 FPS, excluded). Mean guest FPS 18.62 → 21.65; p95 74.5/68.7 → 63.6/65.7 ms, p99 81.3/72.0 → 68.7/70.6 ms;
+  intervals >100 ms 14 → 0; missing audio 1751 → 0 (one reference run). Every valid off run was slower than
+  every on run. **The notebook gate passed: grouping stays default on.** Local i5-8265U/UHD 620 evidence only.
+  Evidence: `data/experiments/grouping-keepgoing-20261111/`.
+
+GAIN-09 retest (2026-11-11, i5-8265U / UHD 620): first profile trained on the current 140-patch chain
+(`-Stages pgo,pgo-check`, 243,003 profiled functions, exact fit). The final build reported
+`profile coverage: 1 of 6 profiled functions in 1 recompiled objects changed` (`vu1_generado/programa0.cpp`
+differs between the instrumented and the final build): under the former `-Werror=profile-instr-out-of-date`
+that object would have failed the build; with the tolerant fit it built and pgo-check passed.
+Runners: no PGO `e909b29f…cef14`, PGO `7ee02a2a…afcd` (copies in `data/experiments/runners/`).
+`--compare vu1 --reference-runner` (both variants grouping **off**, not the shipped default), visible
+`ship_guard`, 4 pairs, `--keep-going`: **inconclusive**, only 1 valid pair (no PGO 19.16 vs PGO 15.78 FPS,
+the PGO run under 44% system CPU from concurrent node/headless Chrome/VS Code). Five runs failed `same_scene`:
+knockback moved Kratos up to ~230 units into a lighter area (20–29 FPS), so roughly half of ship_guard runs
+on this notebook are not comparable. No PGO speed claim from this machine; repeat on an idle machine with
+`--grouping 1`. Evidence: `data/experiments/pgo-20261111/`.
+
+MEAS-01 / 2026-11-12 — reproducible combat measurement (`zzz-328`). Not a speed change: a test-only fixed 1/60 s
+step so frame-indexed scenes replay the same simulation on slow machines. Identical-binary `ship_frames` with
+`--fixed-step` on the i5-8265U: 4/4 runs valid, trajectory deviation 0.000, guest FPS 32.5–34.7 (same binary,
+~6 % spread). Use it for future A/Bs on this notebook; its FPS is identical-workload throughput, not real-time play.
+Evidence: `data/experiments/fixedstep-repeat-20261112/`, [report](fixed-step-2026-11-12.md).
+
+GAIN-09 notebook retest with `--fixed-step` (2026-11-12, i5-8265U / UHD 620): same source (fix-chore + `zzz-328`),
+no PGO `539c1434…fac5` vs PGO `f3a5e8d9…aa7b` (tolerant `code` fit, 4 of 586 recompiled functions without data),
+visible `ship_frames`, grouping on, audio, 4 pairs, `--keep-going`. **8/8 runs valid** (the scene gate no longer
+rejects runs). Mean guest FPS 20.83 → 23.60 (+13.3 %); per pair +1.9 %, −1.0 %, +13.6 %, +47.2 %; candidate p95 better
+in 2 of 4 pairs. **Favorable but confounded**: system CPU 44–81 % from concurrent headless Chrome / VS Code / node
+work, the largest gains coincide with references under the heaviest load, and the identical binary alone spread ~6 %
+(MEAS-01). PGO stays shipped on the strength of GAIN-09; no notebook percentage is claimed. Repeat on an idle machine.
+Evidence: `data/experiments/pgo-fixedstep-20261112/`.
+
+REG-01 / 2026-11-13 — v0.5.0 -> fix-chore regression, VU1 share (Xeon E5-2666 v3 / RX 580, desktop apps open).
+Follow-up of the i3-10110U report's open item 2 (heavy section ~10-15 % slower on fix-chore, cause not isolated), not a
+retest: it isolates the VU1 interpreter/JIT part with identical work. `gow_vu1_tasks` built by each version's own
+`fetch,verify` (v0.5.0 = 64-patch chain; fix-chore `77376e7` + zzz-329, which does not touch VU1), same pinned
+llvm-mingw, replaying the existing 32-task Athn01D corpus (`data/experiments/vu1-waits-20261109/load-cost/tasks.bin`),
+100 repetitions, alternating order; parity and per-record signatures identical in every run.
+
+- `vu1-task-ab.py` JIT, 5 pairs: 548.9/543.4/541.1/550.8/564.6 -> 561.5/565.3/567.0/579.8/569.7 us (sum of warm
+  medians); median 548.9 -> 567.0 (+3.3 %), **fix-chore slower in 5/5 pairs**.
+- hybrid mode, 4 pairs: 548.9/556.7/554.7/555.5 -> 561.3/562.7/556.7/575.4; median 555.1 -> 562.0 (+1.2 %), slower 4/4.
+- Same-configuration bisection builds (chain prefix 64 vs 142): 569.7/560.5/554.9 -> 586.0/599.5/573.6 (+4.6 %), 3/3.
+
+Decision: a small, consistent VU1 cost increase exists (about 1-5 % of isolated VU1 time), but it cannot explain the
+whole 10-15 % frame-rate loss on the i3-10110U; the larger part is outside the VU1 task path (EE codegen/memory
+patches, the PR 26 GS frontend, scheduling). Prime VU1 suspects: diagnostic branches added by 62/63/65 that zzz-316 did
+not specialize, 76/78/79/86/88, zzz-202. The bisection (prefix points 67, 71, 81, 90, 109, 129, 130) was interrupted:
+the 20-job build ran the 16 GB machine out of memory; no intermediate point was measured. Resume with fewer build jobs.
+
+REG-01 bisection (same day, 6 build jobs, same configuration for every point, `gow_vu1_tasks` built from chain prefixes
+of the current patch list; JIT replay, 3 alternating pairs each against prefix 64 = v0.5.0; medians in us).
+Prefixes 81-97 do not compile on their own (patch 75 includes `gs_sw_backend.h`, created by `zzz-002`), so the PR 26
+range is measured as one step.
+
+| Prefix (last patch) | 64 -> prefix | Pairs worse |
+| --- | --- | --- |
+| 67 (60 JIT fast mode) | 567.1 -> 568.0 (0 %) | 1/3 |
+| 68 (62 cost diag) | 550.5 -> 556.5 (+1.1 %) | 2/3 |
+| 69 (63 hot entry) | 547.4 -> 553.9 (+1.2 %) | 3/3 |
+| 70 (64 GS frontend diag) | 554.5 -> 556.7 (+0.4 %) | 2/3 |
+| 71 (65 opstat/chain diag) | 563.5 -> 588.1 (+4.4 %) | 3/3 |
+| 98 (rest of PR 26, zz-workspace, zzz-001/002) | 554.4 -> 611.3 (+10.3 %) | 3/3 |
+| 109 (zzz-202) | 555.9 -> 609.5 (+9.6 %) | 3/3 |
+| 129 (zzz-315) | 556.9 -> 611.5 (+9.8 %) | 3/3 |
+| 130 (zzz-316 chain specialization) | 554.0 -> 563.7 (+1.7 %) | 3/3 |
+| 142 vs 130 directly, 4 pairs | 574.5 -> 576.4 (tie) | 2/4 |
+
+Decision: the VU1-path regression came from diagnostic checks on the ordinary path, mostly patch 65 and the PR 26
+VU1 patches between 66 and 98, and `zzz-316` already removed almost all of it (+10 % -> +1.7 %). Nothing after
+`zzz-316` changes VU1 cost. The i3-10110U "fix-chore ~10-15 % slower than v0.5.0" result (2026-11-07) predates
+`zzz-316` (2026-11-09), so it must be re-measured with a current runner before any further cause is searched for. The
+remaining ~1-2 % (patch 62/63 per-run/per-block branches) is below this method's pair noise; no change proposed.
+Evidence: `data/experiments/regression-v050-20261113/bisect/`.
+Limits: one corpus (a stationary altar load, not ship combat), one CPU, interactive desktop load; not FPS.
+Evidence: `data/experiments/regression-v050-20261113/`.
+
+GPU-06 RX 580 gates and PGO release profile (2026-11-13, Xeon E5-2666 v3 / RX 580 2048SP, Windows). Runner built from
+fix-chore `1abba7b` (143 patches) with a profile trained the same day (`fetch,configure,recomp,sync,pgo,pgo-check`:
+198,964 functions, `pgo check: profile fits (exact match)`, no instrumentation runtime). Visible, audio, private cards,
+`gs-run-ab.py --compare frame-latency --keep-going --gpu-samples` (variant 0 = `GOW_GS_FRAME_LATENCY=0`, 1 = candidate).
+
+- Gate 3, `ship_arrival_frames`, 1x, 3 pairs, all 6 runs valid: guest FPS 59.18/60.00/59.99 -> 60.00/60.00/60.00;
+  aligned p99 18.08/17.68/17.66 -> 17.64/17.99/17.57 ms; the only >100 ms interval (109.8 ms) and the only ring stalls
+  (5) were in a reference run; 0 limiter waits, 0 missing audio. **No regression at 1x.**
+- Movie: `movie-smoke.ps1 -Movies A01MP02 -NewGame -RequireCompletion -ExpectedLastPicture 997 -Visible` with
+  `[gs-latency-config] frames=2`: played, last picture 997, returned to gameplay, exit 0, no guest error.
+- GPU-bound, `ship_guard`, 3x, AF16: 0 valid pairs (all but the first run failed `same_scene`), but every candidate run
+  had worse pacing: >33 ms intervals 57/178/126 -> 410/376/402, median-window p95 32.8-35.4 -> 48.8-62.5 ms.
+- GPU-bound, `ship_frames --fixed-step`, 3x, AF16, 3 valid pairs (GPU 95-98 %): FPS 42.45/42.69/41.25 ->
+  42.53/42.65/33.91; p50 24.0-25.0 -> 18.5-19.4 ms but p95 32.3-34.6 -> 50.6-74.1 ms, p99 37.6-41.8 -> 63.0-92.8 ms,
+  max 44-52 -> 71-120 ms (six >100 ms in one run); 616-1,414 limiter waits per run. **Limit 2 fails the GPU-bound gate.**
+- Same scene, `--latency-candidate 3` (new harness option), 3 valid pairs (slower session overall): FPS 34.51 -> 34.67,
+  p95 per pair 41.8/44.4/43.6 -> 40.8/42.2/43.3 ms, p99 mixed, ring stalls unchanged (~1,330-1,400). **Neutral.**
+
+Decision: `zzz-330` makes 0 the default for the public release (the v0.6.0-rc.1 behaviour); 2 and 3 stay available
+through `GOW_GS_FRAME_LATENCY`. The issue-31 queue-depth hypothesis is neither confirmed nor refuted: on this GPU the
+reference showed no multi-second stutter cycle. Gate 1 (GTX 1060 3 GB) remains open and should compare 0 / 3.
+Evidence: `D:/gfc-exp/frame-latency-rx580-20261113/` (copied to `data/experiments/frame-latency-rx580-20261113/`).

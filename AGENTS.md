@@ -170,6 +170,26 @@ leaf meshes also appear outside that instance; replacing by leaf identity corrup
 Preserve those original draws and the existing readiness/capacity gates. `control-prompts.py` covers the
 regression; private slot-3 captures and limits are in `docs/research/spartan-r2-prompt-2026-11-10.md`.
 
+Patch `zzz-326` bounds GS worker frames in flight (`gs_frame_latency.h`, `GOW_GS_FRAME_LATENCY=<n>`): the worker
+context never swaps, so only the vertex ring limited its lead over the GPU. Its fences guard no resource. Keep each
+wait bounded and never fall back to `glFinish`; the ring fences still own vertex safety. `gow_frame_latency` covers it.
+`zzz-330` makes 0 (off, the earlier behaviour) the default: on the RX 580, GPU-bound (`ship_frames --fixed-step`, 3x,
+AF16), limit 2 made intervals bimodal and p95/p99 much worse; limit 3 was neutral. Do not re-enable a default without a
+GPU-bound gate (`gs-run-ab.py --compare frame-latency --latency-candidate N --fixed-step`); see GPU-06 in the ledger.
+
+Patch `zzz-332` takes a stick gesture's guide from its exported symbol name (each 360 / Down180CCW diagram draws two
+leaves with opposite windings, and the arrows animate, so matrix-derived guides flipped and wandered): half turns are
+two waypoints plus an explicit `Sequence::turn` (A > D under or over, D > A), full turns one held key that spins the
+stick (`KeyboardSweep` `spin`). `zzz-333` adds `AutoStick`: with the automatic-QTE toggle the left stick follows the
+fresh guide on every pad read (repeating half turns every 0.6 s, spinning full turns). Keep both time-based, focus- and
+scripted-test-gated; `qte_hold_test` and `control-prompts` (auto mode) cover them.
+
+Patch `zzz-331` resolves a stale displayed buffer in `GSHwBackend::Present` (`displayTarget`): only when the displayed
+target was not drawn during the last 16 presents and a target drawn in that window covers its first block (movies draw
+into fbp 104 and flip DISPFB to fbp 208). Do not shorten the window to one present: gameplay draws an intermediate
+pass into 104 and would flash it at under 60 FPS. `[gs-hw-display]` must stay silent in gameplay; see
+`docs/research/movie-flash-2026-11-13.md`.
+
 Patch `zzz-318` adds the RatOne startup and six-category in-game dock. The profile's
 `runtime.branding_image` supplies `GOW_BRAND_IMAGE` at Windows/Linux configure time;
 keep the approved PNG byte-identical and embed it, never depend on an artist's local path.
@@ -241,10 +261,18 @@ Resolve shared leaves through bounded USA Flash instance ancestry and the final
 arrow matrix; CW/CCW names alone do not determine displayed direction. Preserve
 caller/stack/vtable/movie gates, complete-guide capacity and original arrow art.
 `GOW_QTE_AUTO=1` is default-off automatic pressing of recognized Greek button
-prompts only, not world indicators, ordinary tutorials or stick gestures. Keep
+prompts and (since `zzz-333`) recognized stick turns, not world indicators, ordinary tutorials or shake gestures. Keep
 empty-frame publication, stale/focus/conflict rejection and scripted-pad exclusion.
 `gow_control_prompts` covers production recognition/input; `qte-controls.py` tests
 the actual accessibility toggle. See `docs/research/keyboard-qte-sequences-2026-11-09.md`.
+
+Patch `zzz-329` publishes the frame's rotation guide with the button batch (same 250 ms staleness) and, only while
+one is fresh, turns the keyboard left stick into `gow_qte_prompt::KeyboardSweep`: full deflection, bounded 900°/s,
+shorter way (guide way when opposite), 250 ms grace after release. It is time-based (repeated reads agree) and
+guarded by one mutex because both pad readers call `tobiichiSticksTeclado`. Evade, focus loss, gamepads, scripted
+`GOW_PAD_TEST=1` sessions and `GOW_QTE_KEY_SWEEP=0` keep raw keys. The `qte_stick` gesture takes the guide's turn and
+start; its defaults must keep the original clockwise samples (`qte_hold_test`). Do not extend the sweep to unrecognized
+diagrams or make it press anything by itself. See `docs/research/keyboard-qte-rotation-2026-11-13.md`.
 
 Patch `zzz-309` backs up USA altar saves only after `0x22E800` returns to the final
 index-write caller `0x2306C0` with success, zero game error and all 68 index bytes
@@ -366,10 +394,13 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   runtime reader: dynamic scale, sharp image, the renderer switch and the shader cache were removed for having none.
 - **GS primitive grouping (patch 66)**: since the PR 26 integration the PR's patch 66 is in the chain and grouping
   is ON by default (`PS2X_GS_RUN=0` restores individual submissions; the launcher writes it from
-  `gsAgruparPrimitivas`). This is still an open decision: fix-chore's laptop A/B improved mean FPS but regressed
-  p95/p99 in its last pair, and the PR's evidence is frontend cost on an HD 4400 (366-427 -> 86-118 ns/vertex), not
-  frame tails. `gs-run-ab.py --compare grouping` on the i5-8265U is the gate; if p95/p99 regress again, set the
-  default back to off in both `gs_frontend.cpp` (zzz-300) and `Main.qml`, and record it in the performance ledger.
+  `gsAgruparPrimitivas`). fix-chore's earlier laptop A/B improved mean FPS but regressed p95/p99 in its last pair;
+  the i5-8265U gate (`gs-run-ab.py --compare grouping`) was rerun on 2026-11-11 with the full chain: 2 valid visible
+  ship_guard pairs, on beat off in FPS (18.6 -> 21.7) and p95/p99 in both, so the default stays on (GS-05 follow-up
+  in the ledger). That is notebook evidence only: if another tier's p95/p99 regress, set the default back to off in
+  both `gs_frontend.cpp` (zzz-300) and `Main.qml`, and record it in the performance ledger.
+  `--keep-going` records a run that fails validation (e.g. `same_scene` after combat knockback at low FPS) and
+  continues; means then use only complete pairs whose two runs passed every check.
   zzz-300 restored fix-chore's review fixes to the run encoder and the per-GS read of `PS2X_GS_RUN`.
   fix-chore's opt-in GS candidates (67 alpha prune, 72 sampler cache, 73 specialized shader, 74 alpha bounds,
   75 variant counters) and 71 VU1 chain inline are not in the chain since the PR 26 integration: they conflict
@@ -493,6 +524,11 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - **New game**: see `docs/adding-a-game.md`.
 - **New translation / edition**: add an `[[editions]]` entry (elf_crc from `identify.py`); if it changes code (.text
   differs) it is not supported.
+- **Launcher version**: `launcher/CMakeLists.txt` `project(... VERSION x.y.z)` is the release; a release candidate is
+  built with `GOW_PRERELEASE=rc.N` in the environment (the launcher stage always passes `-DGOW_PRERELEASE=...`, so an
+  empty value clears an earlier suffix) and reports `x.y.z-rc.N`, which `versionMayor` (Main.qml) orders before
+  `x.y.z`. Tag it `vx.y.z-rc.N`. `python -I tools/test/launcher-version.py <qml.exe> <compiler bin>` runs the real
+  function. `tools/test/qte-controls.py` (same arguments) exercises the Controls/Accessibility/Mods bindings.
 - **Launcher texts**: a new key goes in `launcher/qml/Textos.js` with tr/en/es/pt; the languages in `launcher/qml/idiomas/`
   fall back to en until the key is added there. A new language: `idiomas/<code>.js` (copy one), its `.import` and
   `archivos` entry and the `idiomas` list in Textos.js, and the file in launcher/CMakeLists.txt. `python -I
@@ -554,11 +590,16 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
   `.text` is byte-identical to the USA one). A configure of the main build folder without a fitting local profile takes
   the shipped one; `tune` with a fitting profile skips the instrumented build and the training run (one build, then the
   optimize recording), and small CPUs' `build,optimize` get it too. A trained profile gets the same manifest
-  (`Clear-StaleProfile`). The `package` stage refuses a profile without a matching manifest (`-NoReleaseProfile` to package
-  without one): train with `-Stages fetch,configure,recomp,sync,pgo` on the release's runtime first. The `.profdata`
-  holds function names derived from guest addresses (`sub_<address>`), counters and CFG hashes, no game code or data.
-  Automatic configure also rejects missing, malformed or mismatched manifests; without a matching shipped profile,
-  it preserves the rejected local profile and configures without PGO. Never silently reuse stale optimization data.
+  (`Clear-StaleProfile`). The `.profdata` holds function names derived from guest addresses (`sub_<address>`),
+  counters and CFG hashes, no game code or data.
+  PGO must stay invisible to players: no training step, no failed build. A profile fits (`Get-ProfileFit`) when its
+  manifest's `code` (the `.text` hash) is this installation's: `exact` when the whole identity matches, `code` when the
+  runtime, patches, game profile, sources or unity batch moved on since training. Clang compares every function's CFG
+  hash and ignores the counts of a changed one, so `-Wprofile-instr-out-of-date` stays a warning (never `-Werror`):
+  a stale function only loses its optimisation, never correctness. `Build-Game` sums those warnings into a
+  `profile coverage:` line; retrain when that share grows. Missing, malformed or other-game-code manifests are still
+  rejected (the local profile is preserved and the build continues without PGO). `package` ships any fitting profile
+  (`-NoReleaseProfile` to package without one); train once with `-Stages fetch,configure,recomp,sync,pgo`.
 - Texture packs (runtime patch 52): PCSX2's replacement names, so PCSX2 packs work unchanged; the name code mirrors
   `GSTextureCache::HashCacheKey` (blocks or unswizzled rows, 32-bit palette, PSM/TW/TH/TEXA bits). Never commit or ship
   packs, dumps or screenshots of them. `GOW_TEX_PCSX2_NAMES=<file>` lists the names a session draws.
@@ -567,9 +608,9 @@ GPU/presentation latency. Run `tools/test/session_diagnostics.py` against the de
 - CPUs without SSE4.2/POPCNT (x86-64-v2) cannot run the build: the Install page blocks the install
   (`installer.cpuSupported()`) instead of compiling a game that would not start.
 - Update markers: `data/needs-rebuild.txt` is removed by a successful final build only in a run that also fetched the
-  runtime (a `sync,build` of the old runtime keeps it). `data/pgo-stale.txt` (written with it by update.ps1) makes
-  `pgoApplied()` false so the launcher recommends PGO again; a new profile clears it when trained on the current runtime
-  (`Clear-StaleProfile` in optimize.ps1).
+  runtime (a `sync,build` of the old runtime keeps it). `data/pgo-stale.txt` (written with it by update.ps1 and the
+  installer) makes `pgoApplied()` false until the next main build that applies a profile (`Build-Game`) or a profile
+  trained on the current runtime (`Clear-StaleProfile` in optimize.ps1) clears it.
 - PGO generation disables object caching. Profile-use compile commands include the profile content hash so replacing
   `gow.profdata` at the same path cannot silently reuse objects trained with the old profile.
 - Runtime patch ordering is ordinal, not culture-dependent `Sort-Object`: Windows PowerShell 5.1 otherwise puts
@@ -634,6 +675,12 @@ Never enable it for regional overlays or add it to default boot profiles.
 real-time input/windows, private cards and `GOW_DELTA_DIAG`. A speed ratio near
 one does not validate frame-counted QTEs, combos or collision behavior. See
 `docs/research/experimental-logic-rate.md` for evidence and limitations.
+
+Patch `zzz-328` adds a test-only fixed 1/60 s step to the same adapter (`GOW_PAD_TEST=1` + `GOW_TEST_FIXED_STEP=1`,
+never with the experimental rate). The game scales each frame by elapsed fields, so frame-indexed scenes diverged on
+slow machines even with an aligned origin; `gs-run-ab.py --fixed-step` made four identical-binary `ship_frames`
+runs match exactly on the i5-8265U. Its FPS is throughput of an identical workload, not real-time play; never expose
+it to players. The same binary spread ~6% there. See `docs/research/fixed-step-2026-11-12.md`.
 
 Patches 36–37 add opt-in `GOW_SYNC_DIAG=1` worker/GS-stage wait aggregates and bounded isolated MSCAL task replay.
 `tools/test/worker-ab.py` separates FPS, intrusive timing and capture modes; it uses private cards and stops only its

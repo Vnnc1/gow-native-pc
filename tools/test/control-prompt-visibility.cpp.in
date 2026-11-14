@@ -14,7 +14,7 @@
 struct R5900Context { uint32_t pc=0; uint32_t regs[32]{}; };
 struct PS2Runtime {};
 #define GPR_U32(c,n) ((c)->regs[n])
-enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight };
+enum Boton { BCruz, BCirculo, BCuadrado, BTriangulo, BL1, BR1, BL2, BR2, BStickIzq, BMoveUp, BMoveLeft, BMoveDown, BMoveRight, BQteStick };
 enum Variante { VNormal,VGriego };
 struct Caja {};
 struct Anterior {
@@ -28,7 +28,7 @@ struct Rotulo {
 } g_rotulo;
 struct Forma { uint32_t malla=0,rellenos=0,color0=0,color1=0; } form;
 struct Especial { Boton boton; float dx,dy,radio; } special{BL1,0,0,1};
-struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; unsigned guideStep=0,guideCount=0;uint16_t autoButton=0; };
+struct Icono { Boton boton; Variante variante; float x,y,escala,r,g,b,a; unsigned guideStep=0,guideCount=0;int guideTurn=0;bool guideHold=false;uint16_t autoButton=0; };
 std::vector<Icono> g_construyendo;
 std::set<uint32_t> g_buttonBackgrounds;
 std::atomic<bool> g_replacementsReady{false};
@@ -86,16 +86,15 @@ int main() {
     draw();assert(originals==1); // Capacity cannot erase a prompt.
     g_construyendo.clear();form={};namedButton=BStickIzq;namedVariant=VGriego;
     g_buttonBackgrounds.insert(ctx.regs[4]);
-    draw();assert(originals==1 && g_construyendo.size()==3);
-    assert(g_construyendo[0].boton==BMoveUp && g_construyendo[1].boton==BMoveLeft && g_construyendo[2].boton==BMoveDown);
-    assert(g_construyendo[0].y==g_construyendo[2].y && g_construyendo[0].x<g_construyendo[1].x);
-    draw();assert(originals==1 && g_construyendo.size()==3);
-    g_construyendo.clear();symbolIdentity=1;draw();assert(g_construyendo.size()==5);
-    assert(g_construyendo[1].boton==BMoveRight && g_construyendo[4].boton==BMoveUp);
-    for(unsigned k=0;k<5;++k) assert(g_construyendo[k].guideStep==k+1 && g_construyendo[k].guideCount==5);
-    g_construyendo.clear();g_construyendo.resize(125);draw();assert(originals==1 && g_construyendo.size()==125);
+    draw();assert(originals==1 && g_construyendo.size()==2);
+    assert(g_construyendo[0].boton==BMoveRight && g_construyendo[1].boton==BMoveLeft && g_construyendo[0].guideTurn==-1); // zzz-333: Up180CCW D > A
+    assert(g_construyendo[0].y==g_construyendo[1].y && g_construyendo[0].x<g_construyendo[1].x);
+    draw();assert(originals==1 && g_construyendo.size()==2);
+    g_construyendo.clear();symbolIdentity=1;draw();assert(g_construyendo.size()==1); // 360CW: hold W, clockwise
+    assert(g_construyendo[0].boton==BMoveUp && g_construyendo[0].guideStep==1 && g_construyendo[0].guideCount==1 && g_construyendo[0].guideTurn==1);
+    g_construyendo.clear();g_construyendo.resize(128);draw();assert(originals==1 && g_construyendo.size()==128); // no room: no guide
     g_construyendo.clear();symbolIdentity=-1;draw();assert(g_construyendo.empty()); // Never guess shared arrow direction.
-    symbolIdentity=2;draw();assert(g_construyendo.size()==3 && g_construyendo[0].boton==BMoveUp);
+    symbolIdentity=2;draw();assert(g_construyendo.size()==2 && g_construyendo[0].boton==BMoveLeft && g_construyendo[1].boton==BMoveRight); // Down180CCW A > D
     g_construyendo.clear();
     // Spartan HUD reuses Greek R2 leaves outside a button instance: retain them, never publish an R2.
     g_buttonBackgrounds.clear();g_anterior={};g_rotulo={};form={};named=true;namedButton=BR2;namedVariant=VGriego;

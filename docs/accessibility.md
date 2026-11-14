@@ -1,7 +1,7 @@
 # Accessibility and texture packs
 
-The launcher's **Accessibility** page groups input assistance and visual mods in
-v0.5.0. Keyboard bindings remain on **Controls**; resolution, filtering and
+The launcher's **Accessibility** page groups input assistance and visual mods
+(since v0.5.0; automatic stick QTEs since v0.6.1). Keyboard bindings remain on **Controls**; resolution, filtering and
 borderless mode remain on **Graphics**.
 
 ## Texture packs
