@@ -58,3 +58,24 @@ on the player's behalf: with no key held, the sweep only finishes the turn the p
 No game run: an actual rotation QTE (this ship scene, Cyclops/Minotaur finishers, full turns) with keyboard taps, held
 rolls and the "Circle" key, at 60 FPS and on a slow notebook, remains the acceptance gate. If the game turns out to
 require several turns or a faster turn, tune `kDegreesPerSecond`; do not add automatic turning without a key held.
+
+## Follow-up: live cabin minigame runs (`zzz-332`, `zzz-333`), same day
+
+The maintainer played the ship cabin minigame from a private copy of a card, with `GOW_ICONOS_DIAG=1`. It shows
+`Up180CW`, `Up180CCW`, `Down180CW`, `Down180CCW` and `360CW`/`360CCW` prompts.
+
+- Run 1 (matrix-derived guides): each `360CW` and `Down180CCW` diagram draws two leaves with opposite windings; the
+  guide published per frame came from the first leaf and showed the wrong way (`360CW` as W A S D W, `Down180CCW` as
+  D S A), so the sweep turned the wrong way. Single-leaf prompts always matched their names. Full turns failed and
+  five keys were too slow for the prompt window.
+- Run 2 (name-based direction, short guides A > D / D > A / W > S > W): guides stable; half turns easier, full turns
+  still failed (three presses too slow).
+- Run 3 (full turn = hold W, stick spins the prompt's way at two turns per second): every prompt succeeded; the
+  `360CCW` prompt cleared about one second after it appeared (12 s in run 2).
+- Run 4 (`zzz-333`, automatic QTE on): every stick prompt was performed without key presses; the maintainer
+  confirmed the minigame.
+
+Tests: `qte_hold_test` (92 cases: guides, spin at 30/60 Hz, automatic cycle and restart), `control-prompts` six modes
+(name-based guides for every matrix, short-guide publication, automatic stick through the production reader, focus
+loss, live toggle), `qte_input_test` four modes. Shake prompts (`WiggleBackForth`, `WiggleStick`) remain without a
+guide or automation.

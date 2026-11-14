@@ -3,4 +3,5 @@ v0.2.0	v0.2.0 — clang builds, three-step install, controller remapping and aut
 v0.3.0	v0.3.0 — VU1 JIT, Early FINISH, PGO in the install and the F1 menu
 v0.3.1	v0.3.1 — 57 fps average: leaner VU1, lock-free GS hand-off, OpenGL 4.3 and a CPU check
 v0.4.0	v0.4.0 — Shipped PGO profile, Fast VU mode, hold instead of mashing and clear install/GPU errors
-v0.5.0  v0.5.0 — Experimental Linux, CHD import, regional editions and accessibility improvements
+v0.5.0	v0.5.0 — Experimental Linux, CHD import, regional editions and accessibility improvements
+v0.6.1	v0.6.1 — Stable in-game menu, native save slots, shipped PGO and reliable keyboard QTEs

@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 # The release version (tag v<this>, CHANGELOG.md). The updater compares it with the latest release's tag, so the two
 # must match. 0.x until the port is complete; releases up to 3.0.1 were renumbered 0.1.0-0.3.1.
-project(GowNativePcLauncher VERSION 0.6.0 LANGUAGES CXX)
+project(GowNativePcLauncher VERSION 0.6.1 LANGUAGES CXX)
 # Pre-release builds report "<version>-<suffix>" (e.g. 0.6.1-rc.1, tag v0.6.1-rc.1): the updater then offers the final
 # <version> to their testers (versionMayor in qml/Main.qml). The launcher stage passes $env:GOW_PRERELEASE; empty = release.
 set(GOW_PRERELEASE "" CACHE STRING "Pre-release suffix of this launcher build, such as rc.1; empty for a release")

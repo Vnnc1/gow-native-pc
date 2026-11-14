@@ -3,7 +3,7 @@
 // Launcher texts in German (de). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
     qteAuto: "Automatische QTE-Tasten",
-    qteAutoDesc: "Drückt die angezeigte Taste erkannter QTEs automatisch, auch wiederholt. Standardmäßig aus; nach Änderungen das Spiel neu starten. Startet keine Finisher und automatisiert keine Stickbewegungen. Unbekannte Aufforderungen bleiben manuell.",
+    qteAutoDesc: "Drückt die angezeigte Taste erkannter QTEs automatisch, auch wiederholt. Standardmäßig aus; nach Änderungen das Spiel neu starten. Führt auch erkannte Stickdrehungen aus (halbe und ganze Kreise); startet keine Finisher. Unbekannte Aufforderungen bleiben manuell.",
     grupoTexturas: "Texturen",
     usarPaquete: "Texturpaket verwenden",
     usarPaqueteDesc: "Ersetzt die Spieltexturen durch PNGs mit PCSX2-Namen. Aus lässt die Originaltexturen unverändert.",

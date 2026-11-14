@@ -177,6 +177,19 @@ wait bounded and never fall back to `glFinish`; the ring fences still own vertex
 AF16), limit 2 made intervals bimodal and p95/p99 much worse; limit 3 was neutral. Do not re-enable a default without a
 GPU-bound gate (`gs-run-ab.py --compare frame-latency --latency-candidate N --fixed-step`); see GPU-06 in the ledger.
 
+Patch `zzz-332` takes a stick gesture's guide from its exported symbol name (each 360 / Down180CCW diagram draws two
+leaves with opposite windings, and the arrows animate, so matrix-derived guides flipped and wandered): half turns are
+two waypoints plus an explicit `Sequence::turn` (A > D under or over, D > A), full turns one held key that spins the
+stick (`KeyboardSweep` `spin`). `zzz-333` adds `AutoStick`: with the automatic-QTE toggle the left stick follows the
+fresh guide on every pad read (repeating half turns every 0.6 s, spinning full turns). Keep both time-based, focus- and
+scripted-test-gated; `qte_hold_test` and `control-prompts` (auto mode) cover them.
+
+Patch `zzz-331` resolves a stale displayed buffer in `GSHwBackend::Present` (`displayTarget`): only when the displayed
+target was not drawn during the last 16 presents and a target drawn in that window covers its first block (movies draw
+into fbp 104 and flip DISPFB to fbp 208). Do not shorten the window to one present: gameplay draws an intermediate
+pass into 104 and would flash it at under 60 FPS. `[gs-hw-display]` must stay silent in gameplay; see
+`docs/research/movie-flash-2026-11-13.md`.
+
 Patch `zzz-318` adds the RatOne startup and six-category in-game dock. The profile's
 `runtime.branding_image` supplies `GOW_BRAND_IMAGE` at Windows/Linux configure time;
 keep the approved PNG byte-identical and embed it, never depend on an artist's local path.
@@ -248,7 +261,7 @@ Resolve shared leaves through bounded USA Flash instance ancestry and the final
 arrow matrix; CW/CCW names alone do not determine displayed direction. Preserve
 caller/stack/vtable/movie gates, complete-guide capacity and original arrow art.
 `GOW_QTE_AUTO=1` is default-off automatic pressing of recognized Greek button
-prompts only, not world indicators, ordinary tutorials or stick gestures. Keep
+prompts and (since `zzz-333`) recognized stick turns, not world indicators, ordinary tutorials or shake gestures. Keep
 empty-frame publication, stale/focus/conflict rejection and scripted-pad exclusion.
 `gow_control_prompts` covers production recognition/input; `qte-controls.py` tests
 the actual accessibility toggle. See `docs/research/keyboard-qte-sequences-2026-11-09.md`.

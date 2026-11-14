@@ -214,6 +214,8 @@ int main()
         check(turnOf({{2, 1, 0}, 3}) == -1 && turnOf({{0, 1, 2, 3, 0}, 5}) == 1 && turnOf({{0, 3, 2}, 3}) == -1 &&
                   turnOf({}) == 0 && turnOf({{0, 2, 0}, 3}) == 0,
               "guide direction from its first two keys");
+        check(turnOf({{3, 1}, 2, 1}) == 1 && turnOf({{3, 1}, 2, -1}) == -1 && turnOf({{0, 2, 0}, 3, -1}) == -1,
+              "short guides carry their turn: A > D over the top or under the bottom");
         auto angleOf = [](uint8_t x, uint8_t y) {
             double a = std::atan2(double(x) - 128.0, 128.0 - double(y)) * 57.29577951308232;
             return a < 0 ? a + 360.0 : a;
@@ -276,6 +278,93 @@ int main()
                 viaRight |= x > 240;
             }
             check(viaRight && y < 8, "an opposite key turns the guide's way (down to up through right)");
+            {
+                KeyboardSweep half;
+                uint8_t hx, hy;
+                key(3, hx, hy);
+                half.apply(-1, 7.0, hx, hy);
+                bool viaBottom = false, viaTop = false;
+                for (int i = 1; i <= 20; ++i)
+                {
+                    key(1, hx, hy);
+                    half.apply(-1, 7.0 + i / 60.0, hx, hy);
+                    viaBottom |= hy > 240;
+                    viaTop |= hy < 16;
+                }
+                check(viaBottom && !viaTop && hx > 248, "A > D counter-clockwise sweeps under the bottom (Down180CCW)");
+            }
+            for (double hz : {30.0, 60.0})
+            {
+                // Full-turn guide (one held key): holding W turns the stick the prompt's way, never through the centre.
+                KeyboardSweep spin;
+                uint8_t sx, sy;
+                double travelled = 0.0, previous = -1.0;
+                bool centred = false, backwards = false;
+                for (int i = 0; i <= int(0.55 * hz); ++i)
+                {
+                    key(0, sx, sy);
+                    spin.apply(1, 20.0 + i / hz, sx, sy, true);
+                    const double a = angleOf(sx, sy);
+                    centred |= std::hypot(double(sx) - 128.0, double(sy) - 128.0) < 100.0;
+                    if (previous >= 0.0)
+                    {
+                        double step = a - previous;
+                        if (step < -180.0) step += 360.0;
+                        if (step > 180.0) step -= 360.0;
+                        backwards |= step < -0.5;
+                        travelled += step;
+                    }
+                    previous = a;
+                }
+                const std::string rate = std::to_string(int(hz)) + " Hz: ";
+                check(!centred && !backwards && travelled >= 360.0, rate + "holding W on a clockwise full turn spins at least once");
+                key(4, sx, sy);
+                spin.apply(1, 21.0, sx, sy, true);
+                const uint8_t stopX = sx, stopY = sy;
+                key(4, sx, sy);
+                spin.apply(1, 21.1, sx, sy, true);
+                check(sx == stopX && sy == stopY, rate + "releasing the key stops the turn where it is");
+                key(4, sx, sy);
+                check(!spin.apply(1, 21.5, sx, sy, true) && sx == 128 && sy == 128, rate + "then the stick centres");
+                KeyboardSweep ccw;
+                key(0, sx, sy);
+                ccw.apply(-1, 30.0, sx, sy, true);
+                key(0, sx, sy);
+                ccw.apply(-1, 30.0 + 1.0 / hz, sx, sy, true);
+                check(sx < 128, rate + "a counter-clockwise full turn leaves W towards A");
+            }
+            {
+                // zzz-333: automatic stick QTE (Accessibility > automatic QTE)
+                using gow_qte_prompt::AutoStick;
+                AutoStick automatic;
+                uint8_t ax = 77, ay = 99;
+                check(!automatic.apply({{3, 1}, 2, -1}, 1.0, false, true, ax, ay) && ax == 77 && ay == 99,
+                      "automatic stick: disabled leaves the axes untouched");
+                check(!automatic.apply({{3, 1}, 2, -1}, 1.0, true, false, ax, ay) && ax == 77,
+                      "automatic stick: focus loss leaves the axes untouched");
+                check(!automatic.apply({}, 1.0, true, true, ax, ay) && ax == 77, "automatic stick: no guide, no input");
+                const gow_qte_prompt::Sequence half{{3, 1}, 2, -1}; // Down180CCW: A > (S) > D
+                automatic.apply(half, 10.0, true, true, ax, ay);
+                check(ax < 8 && ay == 128, "automatic half turn starts at its first key (A)");
+                automatic.apply(half, 10.2, true, true, ax, ay);
+                check(ay > 248, "it passes under the bottom (S) counter-clockwise");
+                automatic.apply(half, 10.35, true, true, ax, ay);
+                check(ax > 248 && ay == 128, "and ends at its last key (D)");
+                automatic.apply(half, 10.5, true, true, ax, ay);
+                check(ax == 128 && ay == 128, "then releases so the next repetition is a new gesture");
+                automatic.apply(half, 10.65, true, true, ax, ay);
+                check(ax < 8, "and repeats from the first key");
+                uint8_t bx = 0, by = 0;
+                automatic.apply(half, 10.65, true, true, bx, by);
+                check(bx == ax && by == ay, "repeated reads at one time agree");
+                const gow_qte_prompt::Sequence full{{0}, 1, 1}; // 360CW: W, clockwise
+                automatic.apply(full, 20.0, true, true, ax, ay);
+                check(ax == 128 && ay < 8, "a new guide restarts: full turn starts at W");
+                automatic.apply(full, 20.125, true, true, ax, ay);
+                check(ax > 248, "and turns clockwise to D in an eighth of a second");
+                automatic.apply(full, 20.25, true, true, ax, ay);
+                check(ay > 248, "then S: two turns per second");
+            }
             key(4, x, y);
             check(sweep.apply(-1, 1.5, x, y) && y < 8, "a released key holds the reached angle for a moment");
             key(4, x, y);

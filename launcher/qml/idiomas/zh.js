@@ -3,7 +3,7 @@
 // Launcher texts in Simplified Chinese (zh). Keys of Textos.js; a key missing here falls back to English.
 var textos = {
     qteAuto: "自动 QTE 按键",
-    qteAutoDesc: "自动按下已识别 QTE 显示的按钮，包括连续按键。默认关闭，更改后请重启游戏。不会主动发动终结技或自动操作摇杆。未识别的提示仍需手动操作。",
+    qteAutoDesc: "自动按下已识别 QTE 显示的按钮，包括连续按键。默认关闭，更改后请重启游戏。也会自动完成已识别的摇杆转动（半圈和整圈）；不会主动发动终结技。未识别的提示仍需手动操作。",
     grupoTexturas: "贴图",
     usarPaquete: "启用贴图包",
     usarPaqueteDesc: "用 PCSX2 命名的 PNG 替换游戏贴图；关闭时保持原贴图不变。",

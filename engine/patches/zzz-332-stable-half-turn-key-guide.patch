@@ -1,0 +1,199 @@
+Keyboard rotation QTE guide, after a live run of the cabin minigame (issue 34 follow-up). The guide took its keys from
+the drawn arrow matrix: the arrows animate (the matrix rotates, so issue 34 showed S > D > W), and each 360 / Down180CCW
+diagram draws two leaves with opposite windings, so the guide and the keyboard sweep flipped between clockwise and
+counter-clockwise every frame and the game rejected the turn. The gesture now comes from the exported symbol name
+(zzz-317 instance ancestry), which matched every observed single-leaf winding, and guides are short so the timing is
+reachable: half turns start > end (Down180CW D > A, Down180CCW A > D, Up180CW A > D, Up180CCW D > A) with an explicit
+turn that makes the sweep pass under the bottom or over the top. Full turns are one held key: W > S > W was still too slow
+for the prompt's window in the live run, so while W is held the stick turns the prompt's way at two turns per second
+(like the opt-in Circle gesture) and stops on release; the key shows a circular arrow of that direction.
+GOW_ICONOS_DIAG=1 logs [gow-qte-guide] (symbol, matrix, guide, turn) when they change. Tests: control-prompts,
+qte_hold_test.
+
+diff --git a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+index 8fd708a..6e33057 100644
+--- a/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
++++ b/PS2Recomp/ps2xRuntime/include/runtime/gow_qte_prompt.h
+@@ -7,25 +7,27 @@
+ #include <cstring>
+ #include <mutex>
+ namespace gow_qte_prompt {
+-struct Sequence { std::array<unsigned,5> keys{}; unsigned count=0; };
+-// Indices are up/right/down/left in the displayed game view. The USA full/half
+-// arrows share meshes with mirrored/rotated matrices; names alone cannot give screen direction.
++// Key guide of a stick gesture: waypoints (0 up, 1 right, 2 down, 3 left in the displayed view) and the way to turn
++// between them (+1 clockwise on screen, -1 counter-clockwise). The keyboard sweep fills the arc between waypoints.
++struct Sequence { std::array<unsigned,5> keys{}; unsigned count=0; int turn=0; };
++// zzz-333: the gesture comes from the exported symbol name (instance ancestry, zzz-317). A live run of the cabin
++// minigame showed each 360 / Down180CCW diagram drawing two leaves with opposite windings (one mirrored), so the
++// matrix-derived guide flipped between W>D>S>A and W>A>S>D every frame; the leaf that matched the name was right, and
++// single-leaf diagrams always agreed with their names. The matrix only rejects degenerate draws. Short guides keep the
++// timing reachable: half turns are start > end (A > D or D > A; the turn decides over the top or under the bottom).
++// Full turns are one held key (count 1, "spin"): W > S > W was still too slow to type inside the prompt's window, so
++// while the player holds W the stick keeps turning the prompt's way, like the opt-in "Circle" gesture; release stops.
+ inline Sequence sequence(const char *name,float m0=1,float m1=0,float m4=0,float m5=1) {
+     if (!name) return {};
+     const float det=m0*m5-m1*m4;
+     if (!std::isfinite(det) || std::fabs(det)<0.000001f) return {};
+-    if (!std::strcmp(name,"360CW") || !std::strcmp(name,"360CCW"))
+-        return det>0 ? Sequence{{0,1,2,3,0},5} : Sequence{{0,3,2,1,0},5};
+-    if (std::strcmp(name,"Up180CW") && std::strcmp(name,"Up180CCW") &&
+-        std::strcmp(name,"Down180CW") && std::strcmp(name,"Down180CCW")) return {};
+-    // Verified shared half-arrow geometry runs +X -> +Y -> -X before its Flash matrix.
+-    const float xs[]={m0,m4,-m0}, ys[]={m1,m5,-m1};
+-    Sequence result;result.count=3;
+-    for(unsigned i=0;i<3;++i) {
+-        if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) return {};
+-        result.keys[i] = std::fabs(xs[i])>std::fabs(ys[i]) ? (xs[i]>0?1:3) : (ys[i]>0?0:2);
+-    }
+-    return result;
++    if (!std::strcmp(name,"360CW")) return Sequence{{0},1,1};   // hold W, clockwise
++    if (!std::strcmp(name,"360CCW")) return Sequence{{0},1,-1}; // hold W, counter-clockwise
++    if (!std::strcmp(name,"Down180CW")) return Sequence{{1,3},2,1};   // D > (S) > A
++    if (!std::strcmp(name,"Down180CCW")) return Sequence{{3,1},2,-1}; // A > (S) > D
++    if (!std::strcmp(name,"Up180CW")) return Sequence{{3,1},2,1};     // A > (W) > D
++    if (!std::strcmp(name,"Up180CCW")) return Sequence{{1,3},2,-1};   // D > (W) > A
++    return {};
+ }
+ struct AutoButtons {
+     uint16_t previous=0;
+@@ -43,6 +45,7 @@ struct AutoButtons {
+ };
+ // zzz-329: +1 when the guide turns clockwise on screen, -1 counter-clockwise, 0 when it is not a turn.
+ inline int turnOf(const Sequence &guide) {
++    if (guide.count>=1 && guide.turn) return guide.turn<0 ? -1 : 1;
+     if (guide.count<2 || guide.keys[0]>3 || guide.keys[1]>3) return 0;
+     const unsigned step=(guide.keys[1]+4u-guide.keys[0])%4u;
+     return step==1u ? 1 : step==3u ? -1 : 0;
+@@ -57,15 +60,24 @@ public:
+     static constexpr double kDegreesPerSecond=900.0; // half turn 0.2 s, full turn 0.4 s
+     static constexpr double kGrace=0.25;             // a released key keeps the stick out this long (taps work)
+     static constexpr double kMaxStep=0.1;            // a stalled reader never makes the sweep jump
+-    bool apply(int turn,double now,uint8_t &x,uint8_t &y) {
++    static constexpr double kSpinDegreesPerSecond=720.0; // full-turn guides: two turns per second while a key is held
++    // spin: the guide is one held key for a full turn; while any movement key is held the stick keeps turning `turn`'s
++    // way from where it is (the first key places it), and stops turning when the keys are released.
++    bool apply(int turn,double now,uint8_t &x,uint8_t &y,bool spin=false) {
+         if (!turn || !std::isfinite(now)) { reset(); return false; }
+         const double dt=m_active && now>m_last ? std::fmin(now-m_last,kMaxStep) : 0.0;
+         m_last=now;
+         const int dx=(x>128)-(x<128), dy=(y>128)-(y<128);
+-        if (dx || dy) {
++        const bool holding=dx || dy;
++        if (holding) {
+             const double held=wrap(std::atan2(double(dx),double(-dy))*57.29577951308232);
+             if (!m_active) { m_angle=held; m_active=true; }
+             m_target=held; m_released=-1.0;
++            if (spin) {
++                m_angle=wrap(m_angle+(turn>0 ? 1.0 : -1.0)*kSpinDegreesPerSecond*dt);
++                m_target=m_angle; // on release the stick stays where the turn reached, then centres after the grace
++                return write(x,y);
++            }
+         } else {
+             if (!m_active) return false;
+             if (m_released<0.0) m_released=now;
+@@ -75,14 +87,17 @@ public:
+         const double way=forward<=180.0 ? double(turn) : -double(turn);
+         const double remaining=forward<=180.0 ? forward : 360.0-forward;
+         m_angle=wrap(m_angle+way*std::fmin(remaining,kDegreesPerSecond*dt));
++        return write(x,y);
++    }
++    void reset() { m_active=false; m_released=-1.0; }
++    bool active() const { return m_active; }
++private:
++    bool write(uint8_t &x,uint8_t &y) const {
+         const double radians=m_angle/57.29577951308232;
+         x=static_cast<uint8_t>(std::lround(128.0+127.0*std::sin(radians)));
+         y=static_cast<uint8_t>(std::lround(128.0-127.0*std::cos(radians)));
+         return true;
+     }
+-    void reset() { m_active=false; m_released=-1.0; }
+-    bool active() const { return m_active; }
+-private:
+     static double wrap(double a) { a=std::fmod(a,360.0); return a<0.0 ? a+360.0 : a; }
+     static double distance(double a,double b) { const double d=wrap(a-b); return d>180.0 ? 360.0-d : d; }
+     bool m_active=false;
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+index cb8c9f1..6900f02 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/gow_iconos.cpp
+@@ -484,6 +484,7 @@ namespace
+         bool worldSpace = false;
+         std::array<float, 8> worldCorners{};
+         unsigned guideStep = 0, guideCount = 0;
++        int guideTurn = 0; // zzz-333: the guide's way round, published with its keys
+         bool guideHold = false; // zzz-329: the held QTE gesture key that turns along the guide
+         uint16_t autoButton = 0;
+     };
+@@ -766,6 +767,18 @@ namespace
+ 
+         // Exact symbol identity carries direction and starting position, unlike a generic stick leaf.
+         const auto sequence = gow_qte_prompt::sequence(identity >= 0 ? kSimbolos[identity].nombre : nullptr, actual.m0, actual.m1, actual.m4, actual.m5);
++        if (g_diag && sequence.count) {
++            // zzz-332 (GOW_ICONOS_DIAG=1): the stick gesture recognized and the key guide shown for it, when either changes
++            static char last[192];
++            char line[192];
++            std::snprintf(line, sizeof(line), "%s m=%.2f,%.2f,%.2f,%.2f guide=%u:%u%u%u%u%u turn=%d", kSimbolos[identity].nombre,
++                          actual.m0, actual.m1, actual.m4, actual.m5, sequence.count, sequence.keys[0], sequence.keys[1],
++                          sequence.keys[2], sequence.keys[3], sequence.keys[4], sequence.turn);
++            if (std::strcmp(last, line) != 0) {
++                std::memcpy(last, line, sizeof(line));
++                std::fprintf(stderr, "[gow-qte-guide] t=%.2f %s\n", segundos(), line);
++            }
++        }
+         if (sequence.count && esBoton && b == BStickIzq && v == VGriego &&
+             g_construyendo.size() + sequence.count <= 128 &&
+             std::none_of(g_construyendo.begin(), g_construyendo.end(), [](const Icono &i) { return i.guideStep != 0; })) {
+@@ -777,7 +790,7 @@ namespace
+             for (unsigned key = 0; key < sequence.count; ++key) {
+                 Icono hint{keys[sequence.keys[key]], VNormal, centerX + (float(key) - (sequence.count-1)*0.5f)*spacing,
+                            top, size, 1, 1, 1, 1};
+-                hint.guideStep = key + 1; hint.guideCount = sequence.count;
++                hint.guideStep = key + 1; hint.guideCount = sequence.count; hint.guideTurn = sequence.turn;
+                 leerCxform(rdram, GPR_U32(ctx, 8), hint.r, hint.g, hint.b, hint.a);
+                 anotar(hint);
+             }
+@@ -1260,6 +1273,7 @@ void gowIconosFrame()
+         if (i.guideStep && i.guideStep <= guide.keys.size() && i.guideCount <= guide.keys.size()) {
+             guide.keys[i.guideStep - 1] = i.boton == BMoveUp ? 0u : i.boton == BMoveRight ? 1u : i.boton == BMoveDown ? 2u : 3u;
+             guide.count = i.guideCount;
++            guide.turn = i.guideTurn;
+         }
+     }
+     gow_qte_prompt::publish(automatic, guide);
+@@ -1274,6 +1288,22 @@ void drawGuideMarkers(const Icono &i, float cx, float cy, float dw, float dh, Co
+             const float unit = dh / 480.0f;
+             DrawRing({cx, cy - 24.0f * unit}, 5.0f * unit, 6.5f * unit, -60.0f, 240.0f, 24, tinte);
+         }
++        if (i.guideStep && i.guideCount == 1) { // zzz-332: a full turn is one held key; draw its way round, no number
++            const float unit = dh / 480.0f;
++            const Vector2 c{cx, cy - 24.0f * unit};
++            const float r = 6.0f * unit;
++            DrawRing(c, r - 1.0f * unit, r + 0.75f * unit, -60.0f, 240.0f, 24, tinte);
++            // raylib angles grow clockwise on screen: a clockwise turn ends at 240 deg, a counter-clockwise one at -60 deg
++            const float end = (i.guideTurn >= 0 ? 240.0f : -60.0f) * DEG2RAD, way = i.guideTurn >= 0 ? 1.0f : -1.0f;
++            const Vector2 p{c.x + r * std::cos(end), c.y + r * std::sin(end)};
++            const Vector2 t{-std::sin(end) * way, std::cos(end) * way}, n{std::cos(end), std::sin(end)};
++            const Vector2 tip{p.x + t.x * 3.5f * unit, p.y + t.y * 3.5f * unit};
++            const Vector2 a{p.x - t.x * unit + n.x * 2.5f * unit, p.y - t.y * unit + n.y * 2.5f * unit};
++            const Vector2 b{p.x - t.x * unit - n.x * 2.5f * unit, p.y - t.y * unit - n.y * 2.5f * unit};
++            DrawTriangle(tip, a, b, tinte); // one of the two windings is culled; draw both
++            DrawTriangle(tip, b, a, tinte);
++            return;
++        }
+         if (i.guideStep) {
+             const float unit = dh / 480.0f;
+             DrawText(TextFormat("%u", i.guideStep), int(cx-3*unit), int(cy-26*unit), std::max(10,int(10*unit)), tinte);
+diff --git a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+index 3574af5..d054621 100644
+--- a/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -361,7 +361,7 @@ bool tobiichiSticksTeclado(uint8_t (&sticks)[4])
+     static gow_qte::StickGesture gesture;
+     std::lock_guard<std::mutex> lock(sweepMutex);
+     if (sweepEnabled && focused && !evadeModifierHeld(m))
+-        sweep.apply(turn, now, sticks[2], sticks[3]);
++        sweep.apply(turn, now, sticks[2], sticks[3], guide.count == 1); // zzz-332: one held key turns a full-turn guide
+     else
+         sweep.reset();
+     gesture.apply(mode, accionPulsada(m, AccQteStick) && focused, now, sticks[2], sticks[3],

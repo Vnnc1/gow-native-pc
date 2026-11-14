@@ -11,13 +11,13 @@ with an installer launcher, one-click build, fan-translation support and a 60 fp
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![version](https://img.shields.io/badge/version-0.6.0-crimson)
+![version](https://img.shields.io/badge/version-0.6.1-crimson)
 ![status](https://img.shields.io/badge/status-experimental-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 </div>
 
-**0.6.0 test candidate:** new paused in-game menu with persistent settings, native save-slot loading, altar backups, mapped QTE prompts, optional QTE assistance and build-directory selection. See the [complete changes](CHANGELOG.md) and [candidate validation](docs/research/release-0.6.0-candidate.md). Published only as v0.6.0-rc.1 for testing; v0.5.0 remains stable.
+**0.6.1 (stable):** new in-game menu with pause and persistent settings, native save-slot loading, altar backups, device-aware button prompts, short and reliable keyboard stick QTEs (also automatic in Accessibility), movie flash fix and a shipped PGO profile. See [what's new](#whats-new-in-061) and the [changelog](CHANGELOG.md).
 
 **Linux / Steam Deck (experimental):** native launcher, build pipeline and Linux installer are available for testing.
 See [installation and remaining validation](docs/linux.md). Steam Deck hardware and performance are not yet validated.
@@ -43,6 +43,7 @@ See [installation and remaining validation](docs/linux.md). Steam Deck hardware 
 ## Contents
 
 - [What is this?](#what-is-this)
+- [What's new in 0.6.1](#whats-new-in-061)
 - [What's new in 0.5.0](#whats-new-in-050)
 - [What's new in 0.4.0](#whats-new-in-040)
 - [What's new in 0.3.1](#whats-new-in-031)
@@ -73,8 +74,8 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
   downloaded automatically; a loading screen shows overall progress, estimated time remaining and tips.
 - **One ISO is enough**: the original (USA) or a recognised fan translation. With several ISOs (e.g. the original and
   a translation) every language becomes playable and the launcher **asks which language you want to play in**.
-- **Built for speed**: Windows builds can use a matching profile-guided optimisation (PGO) profile. The 0.5.0 package
-  ships without a pre-trained profile; local training remains available. The first-play preparation records the
+- **Built for speed**: Windows builds use a matching profile-guided optimisation (PGO) profile. The 0.6.1 setup
+  ships a pre-trained profile for its patch set; local training remains available. The first-play preparation records the
   game's VU1/IOP code in one run and builds it in as native code.
 - **Configurable controls**: full keyboard/mouse bindings, classic or modern gamepad layouts and button-by-button mapping.
 - **Accessibility**: the minigames that ask for repeated presses can be played by holding the button instead
@@ -84,9 +85,32 @@ This project brings the work of several authors (see [`CREDITS.md`](CREDITS.md))
 - **Launcher in nine languages**: English, Portuguese, Spanish, Turkish, French, German, Italian, Russian and
   Simplified Chinese.
 
+## What's new in 0.6.1
+
+0.6.1 is the stable release of the 0.6 series: everything tested in the v0.6.0-rc.1 pre-release plus the fixes
+found during that testing. Full details: [changelog](CHANGELOG.md) and [release notes](docs/releases/v0.6.1.md).
+
+- **In-game menu:** pauses the game; live graphics/audio, control bindings, accessibility, cheats and texture packs.
+  Supported settings persist and synchronize with the launcher.
+- **Native save slots:** location names, thumbnails and timestamps in the launcher and the menu; load a slot through
+  the game's own loader. Automatic backups after altar saves, with history.
+- **Button prompts follow your device** (Xbox, PlayStation, keyboard/mouse) and your remapping.
+- **Keyboard stick QTEs:** half turns are two keys (A > D or D > A), full turns are one held key (W with a circular
+  arrow); validated in the ship cabin minigame. **Automatic QTE** (Accessibility) also performs these turns.
+- **Movies:** fixed old gameplay frames (or black) flashing between movie pictures; fixed the Cliffs of Madness
+  movie hang (#30, USA build).
+- **Performance:** pre-trained PGO profile shipped with the setup; renderer integration (vertex ring, primitive
+  runs, texture reuse, resolution below 1x, software fallback); leaner default VU1 execution. Keep **Performance
+  diagnostics** off while playing (on the test desktop they cost about 15–20 % in the ship's storm section).
+- **Setup:** choose the build location; release candidates are offered their final release automatically.
+- **Translations:** QTE and accessibility options in German, French, Italian and Russian.
+
+Known limitations: heavy scenes on slower CPUs stay below 60 FPS, the freeze after the Cronos climb (#33) is still
+open and shake (wiggle) prompts have no keyboard guide yet.
+
 ## What's new in 0.5.0
 
-For the newer 0.6.0 test candidate, see the [complete changelog](CHANGELOG.md). The following is the previous release.
+The following is an earlier release.
 
 - **Experimental Linux:** native launcher, build pipeline and `.run` installer for testing on Linux PCs and
   Steam Deck. Built and smoke-tested in WSL; real Steam Deck performance and compatibility remain unvalidated.
@@ -118,7 +142,7 @@ From [Releases](https://github.com/Vnnc1/gow-native-pc/releases), download
 
 ```sh
 bash gow-native-pc-linux-x86_64-ubuntu26.04-experimental.run
-bash "$HOME/.local/share/gow-native-pc-0.5.0/start-linux.sh"
+bash "$HOME/.local/share/gow-native-pc-0.6.1/start-linux.sh"
 ```
 
 Install the matching system dependencies first; this uses Ubuntu 26.04 libraries and is not a universal AppImage.
@@ -210,8 +234,8 @@ The installer does not move compiled CMake caches. Updates without a new choice 
 2. In the launcher → **Install** tab:
    1. **Download tools** — portable copies are downloaded once, with SHA-256 verification, without changing your PATH;
    2. **Add ISO / CHD…** — select one or more compatible disc images; the launcher identifies the game and language;
-   3. **Install and build** — downloads the runtime, prepares the disc and compiles the game. A matching shipped PGO
-      profile is used when available; 0.5.0 does not include one. Leave **Prepare the first play (recommended)** enabled: a copy of the game plays itself for four
+   3. **Install and build** — downloads the runtime, prepares the disc and compiles the game. The shipped PGO
+      profile is used automatically. Leave **Prepare the first play (recommended)** enabled: a copy of the game plays itself for four
       minutes, **hidden and muted**, recording the VU1/IOP code it uses, and that code is compiled in.
 3. Pick a **graphics profile** (Graphics page), check **Controls** if you play on the keyboard, then **PLAY**.
 
@@ -223,7 +247,7 @@ See [disc formats and regional compatibility](docs/disc-import.md).
 
 Build time depends on the CPU, RAM, storage and downloads; the game's ~6,400 recompiled functions are compiled on your
 PC. On the test PC (Xeon E5-2666 v3, 20 threads, 16 GB) the whole installation took **about 30 minutes** when it still
-trained its own PGO profile (0.3.x). A matching shipped profile can avoid that training, but v0.5.0 ships without one.
+trained its own PGO profile (0.3.x). Since 0.6.1 the setup ships a matching profile, so no training run is needed.
 On a 2-core/4-thread laptop CPU (i3-10110U) an install took **about 75 minutes**. These are historical references,
 not deadlines. A game installed with an older version shows **"FPS optimisation recommended (PGO)"** on the Home page.
 

@@ -60,13 +60,15 @@ int main(int argc,char **argv) {
     bool autoMode=argc>1 && std::strcmp(argv[1],"auto")==0;
     if(autoMode) env("GOW_QTE_AUTO","1");
     using gow_qte_prompt::sequence;
-    assert(sequence("360CCW").keys == (std::array<unsigned,5>{0,1,2,3,0}));
-    assert(sequence("360CW",-1,0,0,1).keys == (std::array<unsigned,5>{0,3,2,1,0}));
-    assert(sequence("Up180CW",0,1,-1,0).keys == (std::array<unsigned,5>{0,3,2}));
-    assert(sequence("Up180CCW",0,1,1,0).keys == (std::array<unsigned,5>{0,1,2}));
-    assert(sequence("Down180CW",0,-1,1,0).keys == (std::array<unsigned,5>{2,1,0}));
-    assert(sequence("Down180CCW",0,-1,-1,0).keys == (std::array<unsigned,5>{2,3,0}));
-    assert(sequence("Up180CW").count==3 && sequence("360CW").count==5);
+    // zzz-333: name-based short guides, explicit turn; any matrix (rotated by the animation or a mirrored leaf) agrees.
+    const float mats[6][4]={{1,0,0,1},{0,1,-1,0},{-1,0,0,-1},{0,-1,1,0},{-1,0,0,1},{0.1f,0,0,-0.07f}};
+    const struct { const char *name; std::array<unsigned,5> keys; unsigned count; int turn; } expect[]={
+        {"360CW",{0},1,1},{"360CCW",{0},1,-1},{"Down180CW",{1,3},2,1},{"Down180CCW",{3,1},2,-1},
+        {"Up180CW",{3,1},2,1},{"Up180CCW",{1,3},2,-1}};
+    for(const auto &e:expect) for(const auto &m:mats) {
+        const auto q=sequence(e.name,m[0],m[1],m[2],m[3]);
+        assert(q.keys==e.keys && q.count==e.count && q.turn==e.turn && gow_qte_prompt::turnOf(q)==e.turn);
+    }
     assert(!sequence(nullptr).count && !sequence("WiggleStick").count && !sequence("unknown").count);
     assert(!sequence("360CW",0,0,0,0).count);
     gow_qte_prompt::AutoButtons automatic;
@@ -181,6 +183,14 @@ int main(int argc,char **argv) {
         assert(!(data[3]&0x20));
         focused=false;backend.readState(0,0,data,32);assert(data[3]&0x20);
         focused=true;gow_qte_prompt::publish(0);backend.readState(0,0,data,32);assert(data[3]&0x20);
+        // zzz-333: the same live toggle performs a recognized stick gesture through the production pad reader
+        gow_qte_prompt::publish(0,gow_qte_prompt::Sequence{{0},1,1});backend.readState(0,0,data,32);
+        assert(data[6]==128 && data[7]<8); // full turn starts at W
+        focused=false;gow_qte_prompt::publish(0,gow_qte_prompt::Sequence{{0},1,1});backend.readState(0,0,data,32);
+        assert(data[6]==128 && data[7]==128); // focus loss: no automatic input
+        focused=true;gow_menu_live::autoQte().store(false);gow_qte_prompt::publish(0,gow_qte_prompt::Sequence{{0},1,1});
+        backend.readState(0,0,data,32);assert(data[6]==128 && data[7]==128); // toggled off live: manual again
+        gow_menu_live::autoQte().store(true);gow_qte_prompt::publish(0);
     }
     const std::string previousLabel=rotulo(ETeclado,BMoveUp);
     keys.fill(false);mouse.fill(false);connected.fill(false);gowPromptPoll();
